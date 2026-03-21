@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rewards Bot</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- ═══ Hero ═══ -->
+        <header class="hero">
+            <div class="hero-left">
+                <div class="hero-icon">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                </div>
+                <div>
+                    <h1>Rewards Bot</h1>
+                    <p class="hero-sub" id="heroSub">Sẵn sàng chạy</p>
+                </div>
+            </div>
+            <div class="hero-stats">
+                <div class="hero-stat"><div class="hero-stat-label">Điểm</div><div class="hero-stat-value" id="stPoints">—</div></div>
+                <div class="hero-stat"><div class="hero-stat-label">Tài khoản</div><div class="hero-stat-value" id="stAccounts">—</div></div>
+                <div class="hero-stat"><div class="hero-stat-label">Trạng thái</div><div id="stStatus"></div></div>
+            </div>
+        </header>
+
+        <!-- ═══ Main 2-col ═══ -->
+        <div class="row">
+            <!-- Left: Controls -->
+            <div class="col" style="width:340px;flex-shrink:0">
+                <!-- Run Deck -->
+                <div class="card">
+                    <div class="card-head">
+                        <h2>Điều khiển</h2>
+                        <span id="headerBadge"></span>
+                    </div>
+                    <div class="card-body">
+                        <div class="run-grid">
+                            <button onclick="runTask('all')" data-run="1" class="btn btn-primary" style="grid-column:1/-1">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.25 5.65c0-.86.92-1.4 1.67-.99l11.54 6.35a1.13 1.13 0 010 1.97l-11.54 6.35a1.13 1.13 0 01-1.67-.99V5.65z"/></svg>
+                                Chạy tất cả
+                            </button>
+                            <button onclick="runTask('bootstrap')" data-run="1" class="btn btn-ghost">Khởi tạo</button>
+                            <button onclick="runTask('searches')" data-run="1" class="btn btn-ghost">Tìm kiếm</button>
+                            <button onclick="runTask('daily')" data-run="1" class="btn btn-ghost">Daily Set</button>
+                            <button onclick="runTask('punch')" data-run="1" class="btn btn-ghost">Punch Cards</button>
+                        </div>
+                        <button onclick="stopBot()" id="btnStop" class="btn btn-danger hidden" style="width:100%;margin-top:8px">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z"/></svg>
+                            Dừng ngay
+                        </button>
+                        <div id="progCard" class="progress-card hidden">
+                            <div class="progress-meta">
+                                <span class="progress-label" id="progLabel">—</span>
+                                <span class="progress-count" id="progCount">0/0</span>
+                            </div>
+                            <div class="progress-bar"><div id="progBar" class="progress-fill"></div></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Quick Info -->
+                <div class="card">
+                    <div class="card-head"><h2>Tài khoản</h2>
+                        <button onclick="openDrawer('accounts')" class="btn btn-ghost btn-sm">Quản lý</button>
+                    </div>
+                    <div class="card-body" id="quickAccounts" style="font-size:13px;color:var(--text-3)">Đang tải...</div>
+                </div>
+
+                <!-- Settings Button -->
+                <button onclick="openDrawer()" class="btn btn-ghost" style="width:100%;padding:12px">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px;height:16px"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                    Cài đặt
+                </button>
+            </div>
+
+            <!-- Right: Log Feed -->
+            <div class="col grow">
+                <div class="card" style="flex:1">
+                    <div class="card-head">
+                        <h2>Live Feed</h2>
+                        <button onclick="clearLogs()" class="btn btn-ghost btn-sm">Xóa log</button>
+                    </div>
+                    <div class="card-body" style="padding-bottom:12px">
+                        <div id="dashLogs" class="log-box"><div class="empty-state">Chưa có hoạt động nào.</div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ Settings Drawer ═══ -->
+    <div id="drawerOverlay" class="drawer-overlay" onclick="closeDrawer()"></div>
+    <div id="drawer" class="drawer">
+        <div class="drawer-header">
+            <h2>Cài đặt</h2>
+            <button class="drawer-close" onclick="closeDrawer()">
+                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+
+        <!-- Accounts -->
+        <div class="drawer-section" id="sec-accounts">
+            <h3>Tài khoản</h3>
+            <div id="addForm" class="hidden" style="margin-bottom:14px">
+                <div class="form-row form-2" style="margin-bottom:8px">
+                    <div class="field"><label class="label">Email</label><input id="aEmail" type="email" placeholder="user@outlook.com" class="input"></div>
+                    <div class="field"><label class="label">Mật khẩu</label><input id="aPass" type="password" placeholder="Mật khẩu" class="input"></div>
+                </div>
+                <div class="form-row form-2" style="margin-bottom:10px">
+                    <div class="field"><label class="label">TOTP</label><input id="aTotp" type="text" placeholder="Tùy chọn" class="input"></div>
+                    <div class="field"><label class="label">Proxy</label><input id="aProxy" type="text" placeholder="http://ip:port" class="input"></div>
+                </div>
+                <button onclick="addAccount()" class="btn btn-primary btn-sm">Lưu tài khoản</button>
+            </div>
+            <div class="btn-row" style="margin-bottom:12px">
+                <button onclick="document.getElementById('addForm').classList.toggle('hidden')" class="btn btn-ghost btn-sm">+ Thêm tài khoản</button>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>#</th><th>Email</th><th>2FA</th><th>Proxy</th><th>Phiên</th><th style="text-align:right">Xóa</th></tr></thead>
+                    <tbody id="accTable"><tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-4)">Đang tải...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Schedule -->
+        <div class="drawer-section">
+            <h3>Lịch trình</h3>
+            <div class="toggle-row" style="margin-bottom:12px">
+                <div class="toggle-info"><h4>Tự động chạy</h4><p>Chạy bot theo giờ cố định</p></div>
+                <div id="tSchedule" onclick="tog(this)" class="toggle"></div>
+            </div>
+            <div class="form-row form-2" style="margin-bottom:10px">
+                <div class="field"><label class="label">Giờ chạy</label><input id="sTime" type="time" value="08:00" class="input"></div>
+                <div style="display:flex;align-items:flex-end"><button onclick="saveSchedule()" class="btn btn-primary btn-sm">Lưu</button></div>
+            </div>
+            <button onclick="createWinTask()" class="btn btn-ghost btn-sm" style="margin-bottom:8px">Tạo Windows Task</button>
+            <p id="schInfo" style="font-size:12px;color:var(--text-3)"></p>
+        </div>
+
+        <!-- Browser -->
+        <div class="drawer-section">
+            <h3>Trình duyệt</h3>
+            <div class="toggle-row"><div class="toggle-info"><h4>Chạy ẩn</h4><p>Ẩn cửa sổ trình duyệt</p></div><div id="tHeadless" onclick="tog(this)" class="toggle"></div></div>
+            <div class="toggle-row"><div class="toggle-info"><h4>Edge runtime riêng</h4><p>Profile Edge riêng cho bot</p></div><div id="tNativeEdge" onclick="tog(this)" class="toggle on"></div></div>
+            <div class="toggle-row"><div class="toggle-info"><h4>Stealth</h4><p>Giảm dấu vết bot</p></div><div id="tStealth" onclick="tog(this)" class="toggle on"></div></div>
+            <div class="toggle-row"><div class="toggle-info"><h4>Chặn hình ảnh</h4><p>Tải trang nhanh hơn</p></div><div id="tImages" onclick="tog(this)" class="toggle on"></div></div>
+            <div class="toggle-row"><div class="toggle-info"><h4>Google Trends</h4><p>Từ khóa thịnh hành</p></div><div id="tTrends" onclick="tog(this)" class="toggle on"></div></div>
+        </div>
+
+        <!-- Rewards -->
+        <div class="drawer-section">
+            <h3>Rewards</h3>
+            <div class="toggle-row"><div class="toggle-info"><h4>Bảo vệ streak</h4><p>Theo dõi chuỗi ngày</p></div><div id="tStreak" onclick="tog(this)" class="toggle on"></div></div>
+            <div class="toggle-row"><div class="toggle-info"><h4>Tự đổi thưởng</h4><p>Đổi điểm khi đạt mục tiêu</p></div><div id="tRedeem" onclick="tog(this)" class="toggle"></div></div>
+        </div>
+
+        <!-- Challenge -->
+        <div class="drawer-section">
+            <h3>Challenge & Edge</h3>
+            <div class="toggle-row" style="margin-bottom:10px"><div class="toggle-info"><h4>Handoff challenge</h4><p>Tạm dừng khi có captcha</p></div><div id="tManualCaptcha" onclick="tog(this)" class="toggle on"></div></div>
+            <div class="field" style="margin-bottom:10px"><label class="label">Timeout (giây)</label><input id="sCaptchaTimeout" type="number" value="900" class="input"></div>
+            <div class="toggle-row" style="margin-bottom:10px"><div class="toggle-info"><h4>Attach Edge có sẵn</h4><p>Dùng Edge debug profile</p></div><div id="tAttachBootstrap" onclick="tog(this)" class="toggle on"></div></div>
+            <div class="field"><label class="label">Edge CDP URL</label><input id="sEdgeCDP" type="text" value="http://127.0.0.1:9222" class="input"></div>
+        </div>
+
+        <!-- AI -->
+        <div class="drawer-section">
+            <h3>AI Agent</h3>
+            <div class="toggle-row" style="margin-bottom:10px"><div class="toggle-info"><h4>Kích hoạt AI</h4><p>Fallback AI cho flow phức tạp</p></div><div id="tAI" onclick="tog(this)" class="toggle on"></div></div>
+            <div class="field" style="margin-bottom:10px"><label class="label">API Key</label><input id="sAIKey" type="password" placeholder="sk-or-v1-..." class="input"></div>
+            <div class="field">
+                <label class="label">Model</label>
+                <select id="sAIModel" class="select">
+                    <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B — Free</option>
+                    <option value="nousresearch/hermes-3-llama-3.1-405b:free">Hermes 3 405B — Free</option>
+                    <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 120B — Free</option>
+                    <option value="qwen/qwen3-next-80b-a3b-instruct:free">Qwen3 Next 80B — Free</option>
+                    <option value="qwen/qwen3-coder:free">Qwen3 Coder — Free</option>
+                    <option value="google/gemma-3-27b-it:free">Gemma 3 27B — Free</option>
+                    <option value="deepseek/deepseek-chat">DeepSeek V3 — Paid</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Notifications -->
+        <div class="drawer-section">
+            <h3>Thông báo</h3>
+            <div class="field" style="margin-bottom:10px"><label class="label">Discord Webhook</label><input id="sDiscord" type="text" placeholder="https://discord.com/api/webhooks/..." class="input"></div>
+            <div class="form-row form-2">
+                <div class="field"><label class="label">Telegram Token</label><input id="sTgToken" type="text" placeholder="123456:ABC..." class="input"></div>
+                <div class="field"><label class="label">Chat ID</label><input id="sTgChat" type="text" placeholder="123456789" class="input"></div>
+            </div>
+        </div>
+
+        <!-- Save -->
+        <div class="drawer-section" style="position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--border);padding:16px 20px">
+            <button onclick="saveSettings()" class="btn btn-primary" style="width:100%">Lưu tất cả cài đặt</button>
+        </div>
+    </div>
+
+    <!-- ═══ Delete Modal ═══ -->
+    <div id="delModal" class="modal-bg">
+        <div class="modal">
+            <h3>Xóa tài khoản</h3>
+            <p>Xóa <strong id="delEmail" style="color:#fff"></strong>? Không thể hoàn tác.</p>
+            <div class="modal-actions">
+                <button onclick="closeDelModal()" class="btn btn-ghost">Hủy</button>
+                <button onclick="confirmDelete()" class="btn btn-danger">Xóa</button>
+            </div>
+        </div>
+    </div>
+    <div id="toast" class="toast"><div class="toast-box" id="toastMsg"></div></div>
+
+    <script>
+const API=location.origin;let logIdx=0,poll=null,delTarget="",lastStatus="idle";
+
+function init(){loadAccounts();loadSettings();loadSchedule();poll=setInterval(tick,2000);tick()}
+function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
+function setHTML(id,v){const e=document.getElementById(id);if(e)e.innerHTML=v}
+function maskEmail(v){if(!v)return"—";const p=v.split("@");return p.length!==2?v:`${p[0].length>4?p[0].slice(0,4)+"**":p[0]}@${p[1]}`}
+function formatTime(v){if(!v)return"—";const n=String(v).replace("T"," ").trim().split(" ");return n.length>1?n[1].slice(0,8):n[0].slice(0,8)}
+function humanizeTask(t){return{all:"Chạy tất cả",bootstrap:"Khởi tạo",searches:"Tìm kiếm",daily:"Daily Set",punch:"Punch Cards",promos:"Promos"}[t]||t||"Sẵn sàng"}
+
+function renderStatus(s){
+    if(s==="running")return'<span class="badge badge-running"><span class="dot"></span>Đang chạy</span>';
+    if(s==="error")return'<span class="badge badge-error"><span class="dot"></span>Lỗi</span>';
+    return'<span class="badge badge-idle"><span class="dot"></span>Sẵn sàng</span>';
+}
+
+async function apiJSON(url,o={}){const r=await fetch(url,o);let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw new Error(d.error||"Thất bại");return d}
+
+async function tick(){
+    try{
+        const s=await apiJSON(`${API}/api/status`);
+        setText("stPoints",s.total_points?s.total_points.toLocaleString():"—");
+        setText("stAccounts",String((s.accounts_count||0)));
+        const sub=s.status==="running"?`${humanizeTask(s.current_task)} · ${maskEmail(s.current_account)}`
+            :s.last_run?`Lần chạy: ${formatTime(s.last_run)}`:"Sẵn sàng chạy";
+        setText("heroSub",sub);
+
+        setHTML("stStatus",renderStatus(s.status));
+        setHTML("headerBadge",renderStatus(s.status));
+
+        const running=s.status==="running";
+        document.querySelectorAll("[data-run='1']").forEach(b=>b.disabled=running);
+        const pc=document.getElementById("progCard");
+        if(running){
+            pc.classList.remove("hidden");
+            document.getElementById("btnStop").classList.remove("hidden");
+            setText("progLabel",s.current_task||"Đang chạy");
+            setText("progCount",`${s.progress}/${s.progress_total}`);
+            document.getElementById("progBar").style.width=`${s.progress_total>0?(s.progress/s.progress_total)*100:0}%`;
+        }else{
+            pc.classList.add("hidden");
+            document.getElementById("btnStop").classList.add("hidden");
+            document.getElementById("progBar").style.width="0%";
+        }
+        if(lastStatus==="running"&&s.status!=="running")loadAccounts();
+        lastStatus=s.status;
+
+        const lr=await apiJSON(`${API}/api/logs?since=${logIdx}`);
+        if(lr.logs&&lr.logs.length){logIdx+=lr.logs.length;appendLogs(lr.logs)}
+    }catch(e){}
+}
+
+function appendLogs(logs){
+    const box=document.getElementById("dashLogs");
+    if(!box.querySelector(".log-line"))box.innerHTML="";
+    logs.forEach(l=>{
+        const r=document.createElement("div");
+        r.className="log-line";
+        r.innerHTML=`<span class="log-time">${l.time}</span><span class="log-lvl ${l.level==="error"?"error":l.level==="warning"?"warning":"info"}">${l.level}</span><span class="log-msg">${l.message}</span>`;
+        box.appendChild(r);
+    });
+    box.scrollTop=box.scrollHeight;
+}
+function clearLogs(){logIdx=0;document.getElementById("dashLogs").innerHTML='<div class="empty-state">Đã xóa log.</div>'}
+
+async function loadAccounts(){
+    try{
+        const r=await apiJSON(`${API}/api/accounts`);
+        const a=r.accounts||[];
+        setText("stAccounts",String(a.length));
+        // Quick summary on main page
+        const qa=document.getElementById("quickAccounts");
+        if(!a.length){qa.textContent="Chưa có tài khoản";}
+        else{qa.innerHTML=a.map(x=>`<div style="padding:4px 0;border-bottom:1px solid var(--border)">${maskEmail(x.email)} ${x.has_session?'<span class="tag tag-on" style="font-size:10px">Session</span>':'<span class="tag tag-off" style="font-size:10px">Chưa</span>'}</div>`).join("");}
+        // Full table in drawer
+        const t=document.getElementById("accTable");
+        if(!a.length){t.innerHTML='<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-4)">Chưa có</td></tr>';return}
+        t.innerHTML=a.map((x,i)=>`<tr>
+            <td style="color:var(--text-4)">${i+1}</td>
+            <td style="color:#fff;font-weight:600">${x.email}</td>
+            <td>${x.has_totp?'<span class="tag tag-on">Có</span>':'<span class="tag tag-off">—</span>'}</td>
+            <td>${x.has_proxy?'<span class="tag tag-on">Có</span>':'<span class="tag tag-off">—</span>'}</td>
+            <td>${x.has_session?'<span class="tag tag-on">Lưu</span>':'<span class="tag tag-off">—</span>'}</td>
+            <td style="text-align:right"><button onclick="openDelModal('${x.email}')" class="btn btn-danger btn-sm">Xóa</button></td>
+        </tr>`).join("");
+    }catch(e){toast(e.message||"Lỗi tải accounts")}
+}
+
+async function addAccount(){
+    const email=document.getElementById("aEmail").value.trim(),pw=document.getElementById("aPass").value;
+    if(!email||!pw)return toast("Cần email và mật khẩu");
+    try{
+        await apiJSON(`${API}/api/accounts`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password:pw,totp_secret:document.getElementById("aTotp").value.trim(),proxy:document.getElementById("aProxy").value.trim()})});
+        ["aEmail","aPass","aTotp","aProxy"].forEach(id=>document.getElementById(id).value="");
+        document.getElementById("addForm").classList.add("hidden");
+        loadAccounts();toast("Đã thêm tài khoản");
+    }catch(e){toast(e.message||"Thêm thất bại")}
+}
+
+function openDelModal(e){delTarget=e;setText("delEmail",e);document.getElementById("delModal").classList.add("show")}
+function closeDelModal(){document.getElementById("delModal").classList.remove("show")}
+async function confirmDelete(){
+    try{await apiJSON(`${API}/api/accounts/${encodeURIComponent(delTarget)}`,{method:"DELETE"});closeDelModal();loadAccounts();toast("Đã xóa")}
+    catch(e){toast(e.message||"Xóa thất bại")}
+}
+
+// Drawer
+function openDrawer(section){
+    document.getElementById("drawer").classList.add("open");
+    document.getElementById("drawerOverlay").classList.add("open");
+    if(section){const el=document.getElementById("sec-"+section);if(el)setTimeout(()=>el.scrollIntoView({behavior:"smooth"}),100)}
+}
+function closeDrawer(){document.getElementById("drawer").classList.remove("open");document.getElementById("drawerOverlay").classList.remove("open")}
+
+// Settings
+function setSecretInput(id,v){const e=document.getElementById(id);if(v==="***"){e.value="";e.dataset.masked="1";e.placeholder="Đã lưu";return}e.value=v||"";e.dataset.masked="0"}
+function getSecretValue(id){const e=document.getElementById(id);if(!e.value&&e.dataset.masked==="1")return"__KEEP_EXISTING_SECRET__";return e.value}
+function setTog(id,on){const e=document.getElementById(id);if(on)e.classList.add("on");else e.classList.remove("on");e.dataset.on=on?"1":"0"}
+function tog(el){setTog(el.id,el.dataset.on!=="1")}
+function isOn(id){return document.getElementById(id).dataset.on==="1"}
+
+async function loadSettings(){
+    try{
+        const s=await apiJSON(`${API}/api/settings`);
+        setTog("tHeadless",s.headless);setTog("tNativeEdge",s.native_edge_runtime_enabled!==false);
+        setTog("tStealth",s.use_stealth);setTog("tTrends",s.use_google_trends);setTog("tImages",s.block_images);
+        setTog("tStreak",s.streak_protection);setTog("tRedeem",s.auto_redeem);
+        setTog("tManualCaptcha",s.manual_captcha_handoff!==false);
+        document.getElementById("sCaptchaTimeout").value=s.manual_captcha_timeout||900;
+        setTog("tAttachBootstrap",s.bootstrap_attach_existing_edge!==false);
+        document.getElementById("sEdgeCDP").value=s.edge_cdp_url||"http://127.0.0.1:9222";
+        setTog("tAI",s.ai_enabled);setSecretInput("sAIKey",s.ai_api_key);
+        if(s.ai_model)document.getElementById("sAIModel").value=s.ai_model;
+        setSecretInput("sDiscord",s.discord_webhook);setSecretInput("sTgToken",s.telegram_bot_token);
+        document.getElementById("sTgChat").value=s.telegram_chat_id||"";
+    }catch(e){toast(e.message||"Lỗi tải settings")}
+}
+
+async function saveSettings(){
+    try{
+        await apiJSON(`${API}/api/settings`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+            headless:isOn("tHeadless"),native_edge_runtime_enabled:isOn("tNativeEdge"),use_stealth:isOn("tStealth"),
+            use_google_trends:isOn("tTrends"),block_images:isOn("tImages"),streak_protection:isOn("tStreak"),
+            auto_redeem:isOn("tRedeem"),manual_captcha_handoff:isOn("tManualCaptcha"),
+            manual_captcha_timeout:+document.getElementById("sCaptchaTimeout").value||900,
+            bootstrap_attach_existing_edge:isOn("tAttachBootstrap"),
+            edge_cdp_url:document.getElementById("sEdgeCDP").value.trim()||"http://127.0.0.1:9222",
+            ai_enabled:isOn("tAI"),ai_api_key:getSecretValue("sAIKey"),
+            ai_model:document.getElementById("sAIModel").value,
+            discord_webhook:getSecretValue("sDiscord"),telegram_bot_token:getSecretValue("sTgToken"),
+            telegram_chat_id:document.getElementById("sTgChat").value
+        })});toast("Đã lưu cài đặt");
+    }catch(e){toast(e.message||"Lưu thất bại")}
+}
+
+async function runTask(t){
+    try{
+        await apiJSON(`${API}/api/run`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task:t})});
+        logIdx=0;document.getElementById("dashLogs").innerHTML='<div class="empty-state">Đang chờ log...</div>';
+        toast(`Bắt đầu: ${humanizeTask(t)}`);tick();
+    }catch(e){toast(e.message||"Không thể chạy")}
+}
+
+async function stopBot(){try{await apiJSON(`${API}/api/stop`,{method:"POST"});toast("Đang dừng...")}catch(e){toast(e.message||"Dừng thất bại")}}
+
+async function loadSchedule(){
+    try{
+        const s=await apiJSON(`${API}/api/schedule`);setTog("tSchedule",s.enabled);
+        document.getElementById("sTime").value=s.time||"08:00";
+        document.getElementById("schInfo").innerHTML=`Windows Task: ${s.windows_task_exists?'<span style="color:var(--green)">Hoạt động</span>':'<span style="color:var(--text-4)">Chưa có</span>'}${s.countdown?` · ${s.countdown}`:""}`;
+    }catch(e){document.getElementById("schInfo").textContent="Lỗi tải lịch"}
+}
+async function saveSchedule(){
+    try{await apiJSON(`${API}/api/schedule`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:isOn("tSchedule"),time:document.getElementById("sTime").value})});toast("Đã lưu lịch");loadSchedule()}
+    catch(e){toast(e.message||"Lưu lịch thất bại")}
+}
+async function createWinTask(){
+    try{await apiJSON(`${API}/api/schedule`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:true,time:document.getElementById("sTime").value,create_task:true})});toast("Đã tạo Windows Task");loadSchedule()}
+    catch(e){toast(e.message||"Tạo task thất bại")}
+}
+function toast(m){const e=document.getElementById("toast");setText("toastMsg",m);e.classList.add("show");setTimeout(()=>e.classList.remove("show"),2600)}
+
+init();
+    </script>
+</body>
+</html>

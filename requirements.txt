@@ -1,0 +1,12 @@
+playwright==1.50.0
+rich==13.9.4
+matplotlib==3.10.1
+requests==2.32.3
+httpx==0.28.1
+aiohttp>=3.9.0
+schedule==1.2.2
+pyotp==2.9.0
+cryptography==44.0.0
+flask==3.1.0
+waitress==3.0.2
+python-telegram-bot==21.9
