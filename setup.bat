@@ -93,7 +93,7 @@ echo.
 :: Step 3: Install Playwright browser
 :: ═══════════════════════════════════════════
 echo  [3/4] Installing browser (Chromium)...
-playwright install chromium
+python -m playwright install chromium
 if %errorlevel% neq 0 (
     echo  [ERROR] Playwright browser install failed.
     pause
