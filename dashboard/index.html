@@ -2,250 +2,249 @@
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
     <title>Rewards Bot</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="app">
-        <!-- ═══ Hero ═══ -->
-        <header class="hero">
-            <div class="hero-left">
-                <div class="hero-icon">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-                </div>
-                <div>
-                    <h1>Rewards Bot</h1>
-                    <p class="hero-sub" id="heroSub">Sẵn sàng chạy</p>
-                </div>
-            </div>
-            <div class="hero-stats">
-                <div class="hero-stat"><div class="hero-stat-label">Điểm</div><div class="hero-stat-value" id="stPoints">—</div></div>
-                <div class="hero-stat"><div class="hero-stat-label">Tài khoản</div><div class="hero-stat-value" id="stAccounts">—</div></div>
-                <div class="hero-stat"><div class="hero-stat-label">Trạng thái</div><div id="stStatus"></div></div>
-            </div>
-        </header>
+<div class="layout">
 
-        <!-- ═══ Main 2-col ═══ -->
-        <div class="row">
-            <!-- Left: Controls -->
-            <div class="col" style="width:340px;flex-shrink:0">
-                <!-- Run Deck -->
-                <div class="card">
-                    <div class="card-head">
-                        <h2>Điều khiển</h2>
-                        <span id="headerBadge"></span>
-                    </div>
-                    <div class="card-body">
-                        <div class="run-grid">
-                            <button onclick="runTask('all')" data-run="1" class="btn btn-primary" style="grid-column:1/-1">
-                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.25 5.65c0-.86.92-1.4 1.67-.99l11.54 6.35a1.13 1.13 0 010 1.97l-11.54 6.35a1.13 1.13 0 01-1.67-.99V5.65z"/></svg>
-                                Chạy tất cả
-                            </button>
-                            <button onclick="runTask('bootstrap')" data-run="1" class="btn btn-ghost">Khởi tạo</button>
-                            <button onclick="runTask('searches')" data-run="1" class="btn btn-ghost">Tìm kiếm</button>
-                            <button onclick="runTask('daily')" data-run="1" class="btn btn-ghost">Daily Set</button>
-                            <button onclick="runTask('punch')" data-run="1" class="btn btn-ghost">Punch Cards</button>
-                        </div>
-                        <button onclick="stopBot()" id="btnStop" class="btn btn-danger hidden" style="width:100%;margin-top:8px">
-                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z"/></svg>
-                            Dừng ngay
-                        </button>
-                        <div id="progCard" class="progress-card hidden">
-                            <div class="progress-meta">
-                                <span class="progress-label" id="progLabel">—</span>
-                                <span class="progress-count" id="progCount">0/0</span>
-                            </div>
-                            <div class="progress-bar"><div id="progBar" class="progress-fill"></div></div>
-                        </div>
-                    </div>
-                </div>
+  <!-- ═══ Sidebar ═══ -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+      <span>Rewards Bot <small>v1.0</small></span>
+    </div>
+    <div class="sidebar-section">Main</div>
+    <nav class="sidebar-nav" id="mainNav">
+      <a class="nav-item active" data-page="accounts">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>
+        Tài khoản <span class="badge" id="navBadge">0</span>
+      </a>
+      <a class="nav-item" data-page="controls">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.25 5.65c0-.86.92-1.4 1.67-.99l11.54 6.35a1.13 1.13 0 010 1.97l-11.54 6.35a1.13 1.13 0 01-1.67-.99V5.65z"/></svg>
+        Điều khiển
+      </a>
+      <a class="nav-item" data-page="log">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+        Log
+      </a>
+    </nav>
+    <div class="sidebar-section">Others</div>
+    <nav class="sidebar-nav" id="otherNav">
+      <a class="nav-item" data-page="settings">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87a6.47 6.47 0 01.22.128c.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124a6.47 6.47 0 01.22-.128c.332-.183.582-.495.644-.869l.214-1.28z"/><circle cx="12" cy="12" r="3" stroke-width="2"/></svg>
+        Cài đặt
+      </a>
+    </nav>
+    <div class="sidebar-foot">Built by cattfan</div>
+  </aside>
 
-                <!-- Quick Info -->
-                <div class="card">
-                    <div class="card-head"><h2>Tài khoản</h2>
-                        <button onclick="openDrawer('accounts')" class="btn btn-ghost btn-sm">Quản lý</button>
-                    </div>
-                    <div class="card-body" id="quickAccounts" style="font-size:13px;color:var(--text-3)">Đang tải...</div>
-                </div>
-
-                <!-- Settings Button -->
-                <button onclick="openDrawer()" class="btn btn-ghost" style="width:100%;padding:12px">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px;height:16px"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-                    Cài đặt
-                </button>
-            </div>
-
-            <!-- Right: Log Feed -->
-            <div class="col grow">
-                <div class="card" style="flex:1">
-                    <div class="card-head">
-                        <h2>Live Feed</h2>
-                        <button onclick="clearLogs()" class="btn btn-ghost btn-sm">Xóa log</button>
-                    </div>
-                    <div class="card-body" style="padding-bottom:12px">
-                        <div id="dashLogs" class="log-box"><div class="empty-state">Chưa có hoạt động nào.</div></div>
-                    </div>
-                </div>
-            </div>
-        </div>
+  <!-- ═══ Main Content ═══ -->
+  <div class="main">
+    <!-- Topbar -->
+    <div class="topbar">
+      <div class="topbar-left">
+        <h2 id="pageTitle">Tài khoản</h2>
+        <span id="stStatus"></span>
+      </div>
+      <div class="topbar-stats">
+        <div class="stat"><div class="stat-label">Tổng điểm</div><div class="stat-value" style="color:var(--green)" id="stPoints">—</div></div>
+        <div class="stat"><div class="stat-label">Tài khoản</div><div class="stat-value" id="stAccounts">—</div></div>
+        <div class="stat"><div class="stat-label">Lần chạy</div><div class="stat-value" style="font-size:13px;color:var(--text-2)" id="stLastRun">—</div></div>
+      </div>
     </div>
 
-    <!-- ═══ Settings Drawer ═══ -->
-    <div id="drawerOverlay" class="drawer-overlay" onclick="closeDrawer()"></div>
-    <div id="drawer" class="drawer">
-        <div class="drawer-header">
-            <h2>Cài đặt</h2>
-            <button class="drawer-close" onclick="closeDrawer()">
-                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-            </button>
+    <!-- ═══ Page: Accounts ═══ -->
+    <div class="page active" id="page-accounts">
+      <div class="toolbar">
+        <input type="text" class="search-box" placeholder="Tìm tài khoản..." id="searchInput" oninput="filterAccounts()">
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-success" onclick="document.getElementById('addForm').classList.toggle('hidden')"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4.5v15m7.5-7.5h-15"/></svg> Thêm</button>
+          <button class="btn btn-primary" data-run="1" onclick="runTask('all')">▶ Chạy tất cả</button>
         </div>
+      </div>
 
-        <!-- Accounts -->
-        <div class="drawer-section" id="sec-accounts">
-            <h3>Tài khoản</h3>
-            <div id="addForm" class="hidden" style="margin-bottom:14px">
-                <div class="form-row form-2" style="margin-bottom:8px">
-                    <div class="field"><label class="label">Email</label><input id="aEmail" type="email" placeholder="user@outlook.com" class="input"></div>
-                    <div class="field"><label class="label">Mật khẩu</label><input id="aPass" type="password" placeholder="Mật khẩu" class="input"></div>
-                </div>
-                <div class="form-row form-2" style="margin-bottom:10px">
-                    <div class="field"><label class="label">TOTP</label><input id="aTotp" type="text" placeholder="Tùy chọn" class="input"></div>
-                    <div class="field"><label class="label">Proxy</label><input id="aProxy" type="text" placeholder="http://ip:port" class="input"></div>
-                </div>
-                <button onclick="addAccount()" class="btn btn-primary btn-sm">Lưu tài khoản</button>
-            </div>
-            <div class="btn-row" style="margin-bottom:12px">
-                <button onclick="document.getElementById('addForm').classList.toggle('hidden')" class="btn btn-ghost btn-sm">+ Thêm tài khoản</button>
-            </div>
-            <div class="table-wrap">
-                <table>
-                    <thead><tr><th>#</th><th>Email</th><th>2FA</th><th>Proxy</th><th>Phiên</th><th style="text-align:right">Xóa</th></tr></thead>
-                    <tbody id="accTable"><tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-4)">Đang tải...</td></tr></tbody>
-                </table>
-            </div>
+      <!-- Add form (hidden) -->
+      <div id="addForm" class="hidden" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px">
+        <div class="form-row form-2" style="margin-bottom:8px">
+          <div class="field"><label class="label">Email</label><input id="aEmail" type="email" placeholder="user@outlook.com" class="input"></div>
+          <div class="field"><label class="label">Mật khẩu</label><input id="aPass" type="password" placeholder="Mật khẩu" class="input"></div>
         </div>
+        <div class="form-row form-2" style="margin-bottom:10px">
+          <div class="field"><label class="label">TOTP</label><input id="aTotp" type="text" placeholder="Tùy chọn" class="input"></div>
+          <div class="field"><label class="label">Proxy</label><input id="aProxy" type="text" placeholder="http://ip:port" class="input"></div>
+        </div>
+        <button onclick="addAccount()" class="btn btn-primary btn-sm">Lưu tài khoản</button>
+      </div>
 
-        <!-- Schedule -->
-        <div class="drawer-section">
-            <h3>Lịch trình</h3>
-            <div class="toggle-row" style="margin-bottom:12px">
-                <div class="toggle-info"><h4>Tự động chạy</h4><p>Chạy bot theo giờ cố định</p></div>
-                <div id="tSchedule" onclick="tog(this)" class="toggle"></div>
-            </div>
-            <div class="form-row form-2" style="margin-bottom:10px">
-                <div class="field"><label class="label">Giờ chạy</label><input id="sTime" type="time" value="08:00" class="input"></div>
-                <div style="display:flex;align-items:flex-end"><button onclick="saveSchedule()" class="btn btn-primary btn-sm">Lưu</button></div>
-            </div>
-            <button onclick="createWinTask()" class="btn btn-ghost btn-sm" style="margin-bottom:8px">Tạo Windows Task</button>
-            <p id="schInfo" style="font-size:12px;color:var(--text-3)"></p>
-        </div>
-
-        <!-- Browser -->
-        <div class="drawer-section">
-            <h3>Trình duyệt</h3>
-            <div class="toggle-row"><div class="toggle-info"><h4>Chạy ẩn</h4><p>Ẩn cửa sổ trình duyệt</p></div><div id="tHeadless" onclick="tog(this)" class="toggle"></div></div>
-            <div class="toggle-row"><div class="toggle-info"><h4>Edge runtime riêng</h4><p>Profile Edge riêng cho bot</p></div><div id="tNativeEdge" onclick="tog(this)" class="toggle on"></div></div>
-            <div class="toggle-row"><div class="toggle-info"><h4>Stealth</h4><p>Giảm dấu vết bot</p></div><div id="tStealth" onclick="tog(this)" class="toggle on"></div></div>
-            <div class="toggle-row"><div class="toggle-info"><h4>Chặn hình ảnh</h4><p>Tải trang nhanh hơn</p></div><div id="tImages" onclick="tog(this)" class="toggle on"></div></div>
-            <div class="toggle-row"><div class="toggle-info"><h4>Google Trends</h4><p>Từ khóa thịnh hành</p></div><div id="tTrends" onclick="tog(this)" class="toggle on"></div></div>
-        </div>
-
-        <!-- Rewards -->
-        <div class="drawer-section">
-            <h3>Rewards</h3>
-            <div class="toggle-row"><div class="toggle-info"><h4>Bảo vệ streak</h4><p>Theo dõi chuỗi ngày</p></div><div id="tStreak" onclick="tog(this)" class="toggle on"></div></div>
-            <div class="toggle-row"><div class="toggle-info"><h4>Tự đổi thưởng</h4><p>Đổi điểm khi đạt mục tiêu</p></div><div id="tRedeem" onclick="tog(this)" class="toggle"></div></div>
-        </div>
-
-        <!-- Challenge -->
-        <div class="drawer-section">
-            <h3>Challenge & Edge</h3>
-            <div class="toggle-row" style="margin-bottom:10px"><div class="toggle-info"><h4>Handoff challenge</h4><p>Tạm dừng khi có captcha</p></div><div id="tManualCaptcha" onclick="tog(this)" class="toggle on"></div></div>
-            <div class="field" style="margin-bottom:10px"><label class="label">Timeout (giây)</label><input id="sCaptchaTimeout" type="number" value="900" class="input"></div>
-            <div class="toggle-row" style="margin-bottom:10px"><div class="toggle-info"><h4>Attach Edge có sẵn</h4><p>Dùng Edge debug profile</p></div><div id="tAttachBootstrap" onclick="tog(this)" class="toggle on"></div></div>
-            <div class="field"><label class="label">Edge CDP URL</label><input id="sEdgeCDP" type="text" value="http://127.0.0.1:9222" class="input"></div>
-        </div>
-
-        <!-- AI -->
-        <div class="drawer-section">
-            <h3>AI Agent</h3>
-            <div class="toggle-row" style="margin-bottom:10px"><div class="toggle-info"><h4>Kích hoạt AI</h4><p>Fallback AI cho flow phức tạp</p></div><div id="tAI" onclick="tog(this)" class="toggle on"></div></div>
-            <div class="field" style="margin-bottom:10px"><label class="label">API Key</label><input id="sAIKey" type="password" placeholder="sk-or-v1-..." class="input"></div>
-            <div class="field">
-                <label class="label">Model</label>
-                <select id="sAIModel" class="select">
-                    <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B — Free</option>
-                    <option value="nousresearch/hermes-3-llama-3.1-405b:free">Hermes 3 405B — Free</option>
-                    <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 120B — Free</option>
-                    <option value="qwen/qwen3-next-80b-a3b-instruct:free">Qwen3 Next 80B — Free</option>
-                    <option value="qwen/qwen3-coder:free">Qwen3 Coder — Free</option>
-                    <option value="google/gemma-3-27b-it:free">Gemma 3 27B — Free</option>
-                    <option value="deepseek/deepseek-chat">DeepSeek V3 — Paid</option>
-                </select>
-            </div>
-        </div>
-
-        <!-- Notifications -->
-        <div class="drawer-section">
-            <h3>Thông báo</h3>
-            <div class="field" style="margin-bottom:10px"><label class="label">Discord Webhook</label><input id="sDiscord" type="text" placeholder="https://discord.com/api/webhooks/..." class="input"></div>
-            <div class="form-row form-2">
-                <div class="field"><label class="label">Telegram Token</label><input id="sTgToken" type="text" placeholder="123456:ABC..." class="input"></div>
-                <div class="field"><label class="label">Chat ID</label><input id="sTgChat" type="text" placeholder="123456789" class="input"></div>
-            </div>
-        </div>
-
-        <!-- Save -->
-        <div class="drawer-section" style="position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--border);padding:16px 20px">
-            <button onclick="saveSettings()" class="btn btn-primary" style="width:100%">Lưu tất cả cài đặt</button>
-        </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th style="width:40px"><input type="checkbox"></th>
+            <th>Tài khoản</th>
+            <th>Điểm</th>
+            <th>Proxy</th>
+            <th>Session</th>
+            <th>2FA</th>
+            <th style="text-align:right">Hành động</th>
+          </tr></thead>
+          <tbody id="accTable"><tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text-4)">Đang tải...</td></tr></tbody>
+        </table>
+      </div>
     </div>
 
-    <!-- ═══ Delete Modal ═══ -->
-    <div id="delModal" class="modal-bg">
-        <div class="modal">
-            <h3>Xóa tài khoản</h3>
-            <p>Xóa <strong id="delEmail" style="color:#fff"></strong>? Không thể hoàn tác.</p>
-            <div class="modal-actions">
-                <button onclick="closeDelModal()" class="btn btn-ghost">Hủy</button>
-                <button onclick="confirmDelete()" class="btn btn-danger">Xóa</button>
-            </div>
+    <!-- ═══ Page: Controls ═══ -->
+    <div class="page" id="page-controls">
+      <div class="controls-grid">
+        <div class="ctrl-card">
+          <h3>⚡ Chạy nhanh</h3>
+          <div class="run-grid">
+            <button class="btn btn-primary" data-run="1" onclick="runTask('all')" style="grid-column:1/-1;padding:10px">▶ Chạy tất cả</button>
+            <button class="btn btn-ghost" data-run="1" onclick="runTask('bootstrap')" style="padding:10px">Khởi tạo</button>
+            <button class="btn btn-ghost" data-run="1" onclick="runTask('searches')" style="padding:10px">Tìm kiếm</button>
+            <button class="btn btn-ghost" data-run="1" onclick="runTask('daily')" style="padding:10px">Daily Set</button>
+            <button class="btn btn-ghost" data-run="1" onclick="runTask('punch')" style="padding:10px">Punch Cards</button>
+          </div>
+          <button onclick="stopBot()" id="btnStop" class="btn btn-danger hidden" style="width:100%;margin-top:8px;padding:10px">⏹ Dừng ngay</button>
+          <div id="progCard" class="progress-card hidden">
+            <div class="progress-meta"><span id="progLabel">—</span><span id="progCount">0/0</span></div>
+            <div class="progress-bar"><div id="progBar" class="progress-fill" style="width:0"></div></div>
+          </div>
         </div>
+        <div class="ctrl-card">
+          <h3>⏰ Lịch trình</h3>
+          <div class="toggle-row" style="margin-bottom:10px"><div class="toggle-info"><h4>Tự động chạy</h4><p>Chạy bot theo giờ cố định</p></div><div id="tSchedule" onclick="tog(this)" class="toggle"></div></div>
+          <div class="field"><label class="label">Giờ chạy</label><input id="sTime" type="time" value="08:00" class="input"></div>
+          <div style="margin-top:10px;display:flex;gap:8px">
+            <button onclick="saveSchedule()" class="btn btn-primary btn-sm">Lưu lịch</button>
+            <button onclick="createWinTask()" class="btn btn-ghost btn-sm">Tạo Windows Task</button>
+          </div>
+          <p id="schInfo" style="font-size:11px;color:var(--text-3);margin-top:8px"></p>
+        </div>
+      </div>
     </div>
-    <div id="toast" class="toast"><div class="toast-box" id="toastMsg"></div></div>
 
-    <script>
-const API=location.origin;let logIdx=0,poll=null,delTarget="",lastStatus="idle";
+    <!-- ═══ Page: Log ═══ -->
+    <div class="page" id="page-log">
+      <div class="log-toolbar">
+        <div class="log-filters">
+          <button class="log-filter active" onclick="setLogFilter('all',this)">All</button>
+          <button class="log-filter" onclick="setLogFilter('info',this)">Info</button>
+          <button class="log-filter" onclick="setLogFilter('warning',this)">Warning</button>
+          <button class="log-filter" onclick="setLogFilter('error',this)">Error</button>
+        </div>
+        <button onclick="clearLogs()" class="btn btn-ghost btn-sm">Xóa log</button>
+      </div>
+      <div id="dashLogs" class="log-box"><div class="empty-state">Chưa có hoạt động nào.</div></div>
+    </div>
 
-function init(){loadAccounts();loadSettings();loadSchedule();poll=setInterval(tick,2000);tick()}
+    <!-- ═══ Page: Settings ═══ -->
+    <div class="page" id="page-settings">
+      <div class="settings-card">
+        <h3>Trình duyệt</h3>
+        <div class="toggle-row"><div class="toggle-info"><h4>Chạy ẩn</h4><p>Ẩn cửa sổ trình duyệt</p></div><div id="tHeadless" onclick="tog(this)" class="toggle"></div></div>
+        <div class="toggle-row"><div class="toggle-info"><h4>Edge runtime riêng</h4><p>Profile Edge riêng cho bot</p></div><div id="tNativeEdge" onclick="tog(this)" class="toggle on"></div></div>
+        <div class="toggle-row"><div class="toggle-info"><h4>Stealth</h4><p>Giảm dấu vết bot</p></div><div id="tStealth" onclick="tog(this)" class="toggle on"></div></div>
+        <div class="toggle-row"><div class="toggle-info"><h4>Chặn hình ảnh</h4><p>Tải trang nhanh hơn</p></div><div id="tImages" onclick="tog(this)" class="toggle on"></div></div>
+        <div class="toggle-row"><div class="toggle-info"><h4>Google Trends</h4><p>Từ khóa thịnh hành</p></div><div id="tTrends" onclick="tog(this)" class="toggle on"></div></div>
+      </div>
+      <div class="settings-card">
+        <h3>Rewards</h3>
+        <div class="toggle-row"><div class="toggle-info"><h4>Bảo vệ streak</h4><p>Theo dõi chuỗi ngày</p></div><div id="tStreak" onclick="tog(this)" class="toggle on"></div></div>
+        <div class="toggle-row"><div class="toggle-info"><h4>Tự đổi thưởng</h4><p>Đổi điểm khi đạt mục tiêu</p></div><div id="tRedeem" onclick="tog(this)" class="toggle"></div></div>
+      </div>
+      <div class="settings-card">
+        <h3>Challenge & Edge</h3>
+        <div class="toggle-row"><div class="toggle-info"><h4>Handoff challenge</h4><p>Tạm dừng khi có captcha</p></div><div id="tManualCaptcha" onclick="tog(this)" class="toggle on"></div></div>
+        <div class="field"><label class="label">Timeout (giây)</label><input id="sCaptchaTimeout" type="number" value="900" class="input"></div>
+        <div class="toggle-row" style="margin-top:8px"><div class="toggle-info"><h4>Attach Edge có sẵn</h4><p>Dùng Edge debug profile</p></div><div id="tAttachBootstrap" onclick="tog(this)" class="toggle on"></div></div>
+        <div class="field"><label class="label">Edge CDP URL</label><input id="sEdgeCDP" type="text" value="http://127.0.0.1:9222" class="input"></div>
+      </div>
+      <div class="settings-card">
+        <h3>AI Agent</h3>
+        <div class="toggle-row"><div class="toggle-info"><h4>Kích hoạt AI</h4><p>Fallback AI cho flow phức tạp</p></div><div id="tAI" onclick="tog(this)" class="toggle on"></div></div>
+        <div class="field"><label class="label">API Key</label><input id="sAIKey" type="password" placeholder="sk-or-v1-..." class="input"></div>
+        <div class="field">
+          <label class="label">Model</label>
+          <select id="sAIModel" class="select">
+            <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B — Free</option>
+            <option value="nousresearch/hermes-3-llama-3.1-405b:free">Hermes 3 405B — Free</option>
+            <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 120B — Free</option>
+            <option value="qwen/qwen3-next-80b-a3b-instruct:free">Qwen3 Next 80B — Free</option>
+            <option value="qwen/qwen3-coder:free">Qwen3 Coder — Free</option>
+            <option value="google/gemma-3-27b-it:free">Gemma 3 27B — Free</option>
+            <option value="deepseek/deepseek-chat">DeepSeek V3 — Paid</option>
+          </select>
+        </div>
+      </div>
+      <div class="settings-card">
+        <h3>Thông báo</h3>
+        <div class="field"><label class="label">Discord Webhook</label><input id="sDiscord" type="text" placeholder="https://discord.com/api/webhooks/..." class="input"></div>
+        <div class="form-row form-2">
+          <div class="field"><label class="label">Telegram Token</label><input id="sTgToken" type="text" placeholder="123456:ABC..." class="input"></div>
+          <div class="field"><label class="label">Chat ID</label><input id="sTgChat" type="text" placeholder="123456789" class="input"></div>
+        </div>
+      </div>
+      <button onclick="saveSettings()" class="btn btn-primary" style="width:100%;padding:12px">Lưu tất cả cài đặt</button>
+    </div>
+
+  </div>
+</div>
+
+<!-- Delete Modal -->
+<div id="delModal" class="modal-bg">
+  <div class="modal">
+    <h3>Xóa tài khoản</h3>
+    <p>Xóa <strong id="delEmail" style="color:#fff"></strong>? Không thể hoàn tác.</p>
+    <div class="modal-actions">
+      <button onclick="closeDelModal()" class="btn btn-ghost">Hủy</button>
+      <button onclick="confirmDelete()" class="btn btn-danger">Xóa</button>
+    </div>
+  </div>
+</div>
+<div id="toast" class="toast"><div class="toast-box" id="toastMsg"></div></div>
+
+<script>
+const API=location.origin;let logIdx=0,poll=null,delTarget="",lastStatus="idle",currentFilter="all";
+
+// ═══ Navigation ═══
+document.querySelectorAll(".nav-item").forEach(n=>{
+    n.addEventListener("click",()=>{
+        document.querySelectorAll(".nav-item").forEach(x=>x.classList.remove("active"));
+        document.querySelectorAll(".page").forEach(p=>p.classList.remove("active"));
+        n.classList.add("active");
+        const page=n.dataset.page;
+        document.getElementById("page-"+page).classList.add("active");
+        const titles={accounts:"Tài khoản",controls:"Điều khiển",log:"Log",settings:"Cài đặt"};
+        document.getElementById("pageTitle").textContent=titles[page]||page;
+    });
+});
+
+// ═══ Helpers ═══
 function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
 function setHTML(id,v){const e=document.getElementById(id);if(e)e.innerHTML=v}
 function maskEmail(v){if(!v)return"—";const p=v.split("@");return p.length!==2?v:`${p[0].length>4?p[0].slice(0,4)+"**":p[0]}@${p[1]}`}
 function formatTime(v){if(!v)return"—";const n=String(v).replace("T"," ").trim().split(" ");return n.length>1?n[1].slice(0,8):n[0].slice(0,8)}
 function humanizeTask(t){return{all:"Chạy tất cả",bootstrap:"Khởi tạo",searches:"Tìm kiếm",daily:"Daily Set",punch:"Punch Cards",promos:"Promos"}[t]||t||"Sẵn sàng"}
-
 function renderStatus(s){
-    if(s==="running")return'<span class="badge badge-running"><span class="dot"></span>Đang chạy</span>';
-    if(s==="error")return'<span class="badge badge-error"><span class="dot"></span>Lỗi</span>';
-    return'<span class="badge badge-idle"><span class="dot"></span>Sẵn sàng</span>';
+    if(s==="running")return'<span class="badge-status badge-running"><span class="dot"></span>Đang chạy</span>';
+    if(s==="error")return'<span class="badge-status badge-error"><span class="dot"></span>Lỗi</span>';
+    return'<span class="badge-status badge-idle"><span class="dot"></span>Sẵn sàng</span>';
 }
 
+// ═══ API ═══
 async function apiJSON(url,o={}){const r=await fetch(url,o);let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw new Error(d.error||"Thất bại");return d}
 
+// ═══ Tick ═══
 async function tick(){
     try{
         const s=await apiJSON(`${API}/api/status`);
         setText("stPoints",s.total_points?s.total_points.toLocaleString():"—");
-        setText("stAccounts",String((s.accounts_count||0)));
-        const sub=s.status==="running"?`${humanizeTask(s.current_task)} · ${maskEmail(s.current_account)}`
-            :s.last_run?`Lần chạy: ${formatTime(s.last_run)}`:"Sẵn sàng chạy";
-        setText("heroSub",sub);
-
+        setText("stAccounts",String(s.accounts_count||0));
+        setText("stLastRun",s.last_run?formatTime(s.last_run):"—");
         setHTML("stStatus",renderStatus(s.status));
-        setHTML("headerBadge",renderStatus(s.status));
-
         const running=s.status==="running";
         document.querySelectorAll("[data-run='1']").forEach(b=>b.disabled=running);
         const pc=document.getElementById("progCard");
@@ -262,46 +261,65 @@ async function tick(){
         }
         if(lastStatus==="running"&&s.status!=="running")loadAccounts();
         lastStatus=s.status;
-
         const lr=await apiJSON(`${API}/api/logs?since=${logIdx}`);
         if(lr.logs&&lr.logs.length){logIdx+=lr.logs.length;appendLogs(lr.logs)}
     }catch(e){}
 }
 
+// ═══ Logs ═══
 function appendLogs(logs){
     const box=document.getElementById("dashLogs");
     if(!box.querySelector(".log-line"))box.innerHTML="";
     logs.forEach(l=>{
         const r=document.createElement("div");
         r.className="log-line";
+        r.dataset.level=l.level;
+        if(currentFilter!=="all"&&l.level!==currentFilter)r.style.display="none";
         r.innerHTML=`<span class="log-time">${l.time}</span><span class="log-lvl ${l.level==="error"?"error":l.level==="warning"?"warning":"info"}">${l.level}</span><span class="log-msg">${l.message}</span>`;
         box.appendChild(r);
     });
     box.scrollTop=box.scrollHeight;
 }
 function clearLogs(){logIdx=0;document.getElementById("dashLogs").innerHTML='<div class="empty-state">Đã xóa log.</div>'}
+function setLogFilter(f,btn){
+    currentFilter=f;
+    document.querySelectorAll(".log-filter").forEach(x=>x.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".log-line").forEach(l=>{
+        l.style.display=(f==="all"||l.dataset.level===f)?"":"none";
+    });
+}
 
+// ═══ Accounts ═══
 async function loadAccounts(){
     try{
         const r=await apiJSON(`${API}/api/accounts`);
         const a=r.accounts||[];
         setText("stAccounts",String(a.length));
-        // Quick summary on main page
-        const qa=document.getElementById("quickAccounts");
-        if(!a.length){qa.textContent="Chưa có tài khoản";}
-        else{qa.innerHTML=a.map(x=>`<div style="padding:4px 0;border-bottom:1px solid var(--border)">${maskEmail(x.email)} ${x.has_session?'<span class="tag tag-on" style="font-size:10px">Session</span>':'<span class="tag tag-off" style="font-size:10px">Chưa</span>'}</div>`).join("");}
-        // Full table in drawer
+        setText("navBadge",String(a.length));
         const t=document.getElementById("accTable");
-        if(!a.length){t.innerHTML='<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-4)">Chưa có</td></tr>';return}
+        if(!a.length){t.innerHTML='<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text-4)">Chưa có tài khoản</td></tr>';return}
         t.innerHTML=a.map((x,i)=>`<tr>
-            <td style="color:var(--text-4)">${i+1}</td>
+            <td><input type="checkbox"></td>
             <td style="color:#fff;font-weight:600">${x.email}</td>
+            <td style="font-weight:700;color:var(--green)">${x.points?x.points.toLocaleString():"—"}</td>
+            <td style="font-family:monospace;font-size:12px;color:var(--text-2)">${x.proxy||"—"}</td>
+            <td>${x.has_session?'<span class="tag tag-on">Đã lưu</span>':'<span class="tag tag-off">Chưa</span>'}</td>
             <td>${x.has_totp?'<span class="tag tag-on">Có</span>':'<span class="tag tag-off">—</span>'}</td>
-            <td>${x.has_proxy?'<span class="tag tag-on">Có</span>':'<span class="tag tag-off">—</span>'}</td>
-            <td>${x.has_session?'<span class="tag tag-on">Lưu</span>':'<span class="tag tag-off">—</span>'}</td>
-            <td style="text-align:right"><button onclick="openDelModal('${x.email}')" class="btn btn-danger btn-sm">Xóa</button></td>
+            <td><div class="actions-col">
+                <button onclick="runTask('all','${x.email}')" class="btn btn-primary btn-sm" data-run="1">▶ Chạy</button>
+                <button onclick="openDelModal('${x.email}')" class="btn btn-danger btn-sm">🗑</button>
+            </div></td>
         </tr>`).join("");
     }catch(e){toast(e.message||"Lỗi tải accounts")}
+}
+
+function filterAccounts(){
+    const q=document.getElementById("searchInput").value.toLowerCase();
+    document.querySelectorAll("#accTable tr").forEach(r=>{
+        const email=r.querySelector("td:nth-child(2)")?.textContent?.toLowerCase()||"";
+        r.style.display=email.includes(q)?"":"none";
+    });
 }
 
 async function addAccount(){
@@ -322,15 +340,7 @@ async function confirmDelete(){
     catch(e){toast(e.message||"Xóa thất bại")}
 }
 
-// Drawer
-function openDrawer(section){
-    document.getElementById("drawer").classList.add("open");
-    document.getElementById("drawerOverlay").classList.add("open");
-    if(section){const el=document.getElementById("sec-"+section);if(el)setTimeout(()=>el.scrollIntoView({behavior:"smooth"}),100)}
-}
-function closeDrawer(){document.getElementById("drawer").classList.remove("open");document.getElementById("drawerOverlay").classList.remove("open")}
-
-// Settings
+// ═══ Settings ═══
 function setSecretInput(id,v){const e=document.getElementById(id);if(v==="***"){e.value="";e.dataset.masked="1";e.placeholder="Đã lưu";return}e.value=v||"";e.dataset.masked="0"}
 function getSecretValue(id){const e=document.getElementById(id);if(!e.value&&e.dataset.masked==="1")return"__KEEP_EXISTING_SECRET__";return e.value}
 function setTog(id,on){const e=document.getElementById(id);if(on)e.classList.add("on");else e.classList.remove("on");e.dataset.on=on?"1":"0"}
@@ -371,16 +381,19 @@ async function saveSettings(){
     }catch(e){toast(e.message||"Lưu thất bại")}
 }
 
+// ═══ Tasks ═══
 async function runTask(t){
     try{
         await apiJSON(`${API}/api/run`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task:t})});
         logIdx=0;document.getElementById("dashLogs").innerHTML='<div class="empty-state">Đang chờ log...</div>';
         toast(`Bắt đầu: ${humanizeTask(t)}`);tick();
+        // Switch to log page
+        document.querySelector('[data-page="log"]').click();
     }catch(e){toast(e.message||"Không thể chạy")}
 }
-
 async function stopBot(){try{await apiJSON(`${API}/api/stop`,{method:"POST"});toast("Đang dừng...")}catch(e){toast(e.message||"Dừng thất bại")}}
 
+// ═══ Schedule ═══
 async function loadSchedule(){
     try{
         const s=await apiJSON(`${API}/api/schedule`);setTog("tSchedule",s.enabled);
@@ -396,9 +409,13 @@ async function createWinTask(){
     try{await apiJSON(`${API}/api/schedule`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:true,time:document.getElementById("sTime").value,create_task:true})});toast("Đã tạo Windows Task");loadSchedule()}
     catch(e){toast(e.message||"Tạo task thất bại")}
 }
+
+// ═══ Toast ═══
 function toast(m){const e=document.getElementById("toast");setText("toastMsg",m);e.classList.add("show");setTimeout(()=>e.classList.remove("show"),2600)}
 
+// ═══ Init ═══
+function init(){loadAccounts();loadSettings();loadSchedule();poll=setInterval(tick,2000);tick()}
 init();
-    </script>
+</script>
 </body>
 </html>
