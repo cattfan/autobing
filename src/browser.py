@@ -1391,6 +1391,8 @@ class BrowserManager:
             if self.playwright:
                 await self.playwright.stop()
                 self.playwright = None
+            # Kill the native Edge subprocess if we started one
+            self._kill_managed_edge()
             logger.info("Detached from existing Edge browser")
             return
 
@@ -1413,4 +1415,22 @@ class BrowserManager:
             await self.playwright.stop()
             self.playwright = None
 
+        # Kill the native Edge subprocess if we started one
+        self._kill_managed_edge()
+
         logger.info("Browser closed")
+
+    def _kill_managed_edge(self) -> None:
+        """Terminate the native Edge subprocess if it was started by us."""
+        proc = getattr(self, "_managed_edge_process", None)
+        if proc is not None:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+                logger.info("Terminated native Edge subprocess")
+            except Exception:
+                pass
+            self._managed_edge_process = None

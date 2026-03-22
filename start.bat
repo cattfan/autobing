@@ -2,9 +2,9 @@
 chcp 65001 >nul
 title Rewards Bot
 echo.
-echo  ╔══════════════════════════════════════╗
-echo  ║       Rewards Bot — Starting...       ║
-echo  ╚══════════════════════════════════════╝
+echo  ======================================
+echo       Rewards Bot -- Starting...
+echo  ======================================
 echo.
 echo  Dashboard: http://localhost:8080
 echo  (Browser will open automatically)

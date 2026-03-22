@@ -513,41 +513,91 @@ class EdgeBrowsingStreak:
         site_idx = 0
         last_heartbeat = 0
 
-        # ═══ STEP 1: Click the Edge Browsing Streak card to activate tracking ═══
+        # ═══ STEP 1: Activate Edge Browsing Streak tracking ═══
         try:
-            await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(3)
-
-            streak_activated = False
-            edge_selectors = [
-                # Correct selectors from Rewards page DOM
-                '#more-activities mee-card:has-text("Edge") a',
-                '#more-activities mee-card:has-text("Browsing") a',
-                'mee-rewards-more-activities-card-item:has-text("Edge") a',
-                # Text-based fallback
-                'a:has-text("Edge Browsing Streak")',
-                'a:has-text("Edge Browsing")',
-                # Data attribute
-                '[data-bi-id*="EdgeBrowsing"]',
-                '[data-bi-id*="EdgeStreak"]',
-                '[data-bi-name="promotion_item"]:has-text("Edge")',
-                # Broader
-                'mee-card:has-text("Edge") a',
+            # Method 1: Direct activation URL (most reliable)
+            activation_urls = [
+                "https://rewards.bing.com/pointsbreakdown",
+                "https://rewards.bing.com/earn",
+                REWARDS_URL,
             ]
-            for sel in edge_selectors:
+            streak_activated = False
+
+            for act_url in activation_urls:
                 try:
-                    el = page.locator(sel).first
-                    if await el.count() > 0:
-                        await el.click(timeout=5000)
-                        streak_activated = True
-                        logger.debug(f"Clicked Edge Streak card via: {sel}")
-                        await asyncio.sleep(random.uniform(3, 5))
+                    await page.goto(act_url, wait_until="domcontentloaded", timeout=15000)
+                    await asyncio.sleep(3)
+
+                    # Method 2: JS-based card finder (works regardless of DOM structure)
+                    try:
+                        activated_via_js = await page.evaluate("""
+                            () => {
+                                // Search all links and clickable elements for Edge-related text
+                                const allElements = document.querySelectorAll('a, button, [role="link"], [role="button"], mee-card a');
+                                for (const el of allElements) {
+                                    const text = (el.textContent || '').toLowerCase();
+                                    const href = (el.href || '').toLowerCase();
+                                    if ((text.includes('edge') && (text.includes('brows') || text.includes('streak') || text.includes('minute')))
+                                        || href.includes('edge') && href.includes('streak')) {
+                                        el.click();
+                                        return true;
+                                    }
+                                }
+                                // Try shadow DOM elements (mee-card components)
+                                const cards = document.querySelectorAll('mee-card, mee-rewards-more-activities-card-item');
+                                for (const card of cards) {
+                                    const shadow = card.shadowRoot;
+                                    const text = (card.textContent || '').toLowerCase();
+                                    if (text.includes('edge') && (text.includes('brows') || text.includes('streak'))) {
+                                        const link = card.querySelector('a') || (shadow && shadow.querySelector('a'));
+                                        if (link) { link.click(); return true; }
+                                        card.click();
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            }
+                        """)
+                        if activated_via_js:
+                            streak_activated = True
+                            logger.info("Activated Edge Streak via JS card finder")
+                            await asyncio.sleep(random.uniform(3, 5))
+                            break
+                    except Exception:
+                        pass
+
+                    # Method 3: Playwright selector fallback
+                    edge_selectors = [
+                        '#more-activities mee-card:has-text("Edge") a',
+                        '#more-activities mee-card:has-text("Browsing") a',
+                        'mee-rewards-more-activities-card-item:has-text("Edge") a',
+                        'a:has-text("Edge Browsing Streak")',
+                        'a:has-text("Edge Browsing")',
+                        '[data-bi-id*="EdgeBrowsing"]',
+                        '[data-bi-id*="EdgeStreak"]',
+                        '[data-bi-name="promotion_item"]:has-text("Edge")',
+                        'mee-card:has-text("Edge") a',
+                        'a:has-text("Edge")',
+                    ]
+                    for sel in edge_selectors:
+                        try:
+                            el = page.locator(sel).first
+                            if await el.count() > 0:
+                                await el.click(timeout=5000)
+                                streak_activated = True
+                                logger.info(f"Activated Edge Streak card via: {sel}")
+                                await asyncio.sleep(random.uniform(3, 5))
+                                break
+                        except Exception:
+                            continue
+
+                    if streak_activated:
                         break
                 except Exception:
                     continue
 
             if not streak_activated:
-                logger.debug("Could not find Edge Streak card, proceeding with browsing")
+                logger.warning("Could not activate Edge Streak card — browsing may not be tracked")
 
         except Exception:
             pass
@@ -634,22 +684,31 @@ class EdgeBrowsingStreak:
                             }
                         """)
 
-                        # Also try to click the Edge Streak card again (re-activate)
-                        for resel in [
-                            '#more-activities mee-card:has-text("Edge") a',
-                            'mee-rewards-more-activities-card-item:has-text("Edge") a',
-                            'a:has-text("Edge Browsing")',
-                            'mee-card:has-text("Edge") a',
-                        ]:
-                            try:
-                                edge_el = page.locator(resel).first
-                                if await edge_el.count() > 0:
-                                    await edge_el.click(timeout=3000)
-                                    logger.debug(f"Re-clicked Edge card via: {resel}")
-                                    await asyncio.sleep(2)
-                                    break
-                            except Exception:
-                                continue
+                        # Re-activate Edge Streak card via JS
+                        try:
+                            await page.evaluate("""
+                                () => {
+                                    const allElements = document.querySelectorAll('a, button, [role="link"], mee-card a');
+                                    for (const el of allElements) {
+                                        const text = (el.textContent || '').toLowerCase();
+                                        if (text.includes('edge') && (text.includes('brows') || text.includes('streak') || text.includes('minute'))) {
+                                            el.click(); return true;
+                                        }
+                                    }
+                                    const cards = document.querySelectorAll('mee-card, mee-rewards-more-activities-card-item');
+                                    for (const card of cards) {
+                                        const text = (card.textContent || '').toLowerCase();
+                                        if (text.includes('edge') && (text.includes('brows') || text.includes('streak'))) {
+                                            const link = card.querySelector('a');
+                                            if (link) { link.click(); return true; }
+                                            card.click(); return true;
+                                        }
+                                    }
+                                    return false;
+                                }
+                            """)
+                        except Exception:
+                            pass
 
                         await asyncio.sleep(2)
                         try:
@@ -662,30 +721,39 @@ class EdgeBrowsingStreak:
                                 break
 
                             # Mid-session zero-progress detection:
-                            # If >6 min elapsed but API still says 0, retry the card click
+                            # If >6 min elapsed but API still says 0, try pointsbreakdown page
                             if elapsed > 360 and current_minutes == 0:
                                 logger.warning(
                                     "⚠️ 6+ min elapsed but 0 min credited, "
-                                    "retrying card activation..."
+                                    "retrying via pointsbreakdown..."
                                 )
-                                await page.goto(
+                                # Try the points breakdown page which has direct streak links
+                                for retry_url in [
+                                    "https://rewards.bing.com/pointsbreakdown",
+                                    "https://rewards.bing.com/earn",
                                     REWARDS_URL,
-                                    wait_until="domcontentloaded",
-                                    timeout=15000,
-                                )
-                                await asyncio.sleep(3)
-                                for resel2 in [
-                                    '#more-activities mee-card:has-text("Edge") a',
-                                    'a:has-text("Edge Browsing")',
-                                    'mee-card:has-text("Edge") a',
                                 ]:
                                     try:
-                                        edge_el2 = page.locator(resel2).first
-                                        if await edge_el2.count() > 0:
-                                            await edge_el2.click(timeout=3000)
-                                            logger.info(
-                                                f"Re-activated Edge card via: {resel2}"
-                                            )
+                                        await page.goto(
+                                            retry_url,
+                                            wait_until="domcontentloaded",
+                                            timeout=15000,
+                                        )
+                                        await asyncio.sleep(3)
+                                        clicked = await page.evaluate("""
+                                            () => {
+                                                const els = document.querySelectorAll('a, button, mee-card a, [role="link"]');
+                                                for (const el of els) {
+                                                    const text = (el.textContent || '').toLowerCase();
+                                                    if (text.includes('edge') && (text.includes('brows') || text.includes('streak') || text.includes('minute'))) {
+                                                        el.click(); return true;
+                                                    }
+                                                }
+                                                return false;
+                                            }
+                                        """)
+                                        if clicked:
+                                            logger.info(f"Re-activated Edge Streak via {retry_url}")
                                             await asyncio.sleep(3)
                                             break
                                     except Exception:

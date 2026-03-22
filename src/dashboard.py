@@ -922,10 +922,11 @@ async def _run_bot_async(task: str, password: str):
                             except Exception:
                                 pass
 
-                # Post-search: raw API counter dump + credit check (on desktop page)
+                # ═══ Mobile Supplementary Search (deficit retry) ═══
+                # After emulation is cleared, check API for mobile deficit and retry
                 try:
                     await asyncio.sleep(3)
-                    # Navigate desktop page to rewards to ensure we're logged in
+                    # Navigate desktop page to rewards to check mobile credits
                     try:
                         await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
                         await asyncio.sleep(3)
@@ -955,26 +956,165 @@ async def _run_bot_async(task: str, password: str):
                         }
                     """)
                     
+                    mob_current = 0
+                    mob_max_api = 0
                     if raw_data:
                         add_log("info", f"📊 RAW API counters: {json.dumps(raw_data, indent=None)}")
-                        # Extract mobile specifically
                         mob_data = raw_data.get("mobileSearch", {})
                         mob_current = mob_data.get("progress", 0)
-                        mob_max = mob_data.get("max", 0)
-                        add_log("info", f"📱 POST-search mobile credits: {mob_current}/{mob_max}")
+                        mob_max_api = mob_data.get("max", 0)
+                        add_log("info", f"📱 POST-search mobile credits: {mob_current}/{mob_max_api}")
                     else:
                         add_log("warning", "📊 RAW API returned null")
-                        # Fallback to normal check
                         try:
                             post_status = await asyncio.wait_for(
                                 searcher.get_search_points_status(page),
                                 timeout=15,
                             )
-                            post_mob = post_status.get("mobile_current", 0)
-                            post_max = post_status.get("mobile_max", 60)
-                            add_log("info", f"📱 POST-search mobile credits: {post_mob}/{post_max}")
+                            mob_current = post_status.get("mobile_current", 0)
+                            mob_max_api = post_status.get("mobile_max", 60)
+                            add_log("info", f"📱 POST-search mobile credits: {mob_current}/{mob_max_api}")
                         except Exception:
                             pass
+
+                    # Supplementary mobile searches if deficit exists
+                    mob_deficit_pts = max(0, mob_max_api - mob_current)
+                    mob_deficit_searches = (mob_deficit_pts + 2) // 3
+                    max_mobile_retries = 2
+                    retry_round = 0
+
+                    while mob_deficit_searches > 0 and retry_round < max_mobile_retries:
+                        retry_round += 1
+                        add_log("info", f"📱 Mobile deficit: {mob_current}/{mob_max_api} pts "
+                                f"({mob_deficit_searches} more needed, round {retry_round}/{max_mobile_retries})")
+                        
+                        state["current_task"] = "Mobile Supplementary"
+                        state["progress"] = 0
+                        state["progress_total"] = mob_deficit_searches
+
+                        cdp_client2 = None
+                        try:
+                            from src.utils import get_random_user_agent, get_random_viewport
+                            mobile_ua2 = get_random_user_agent("mobile")
+                            mobile_vp2 = get_random_viewport("mobile")
+                            is_iphone2 = "iPhone" in mobile_ua2
+
+                            # Build Client Hints metadata
+                            ua_metadata2 = {"mobile": True, "architecture": "arm64"}
+                            if is_iphone2:
+                                ua_metadata2["platform"] = "iOS"
+                                import re as _re2
+                                ios_match2 = _re2.search(r"OS\s+(\d+_\d+)", mobile_ua2)
+                                ua_metadata2["platformVersion"] = ios_match2.group(1).replace("_", ".") if ios_match2 else "18.0"
+                                ua_metadata2["model"] = "iPhone"
+                                ua_metadata2["brands"] = []
+                                ua_metadata2["fullVersion"] = ""
+                            else:
+                                ua_metadata2["platform"] = "Android"
+                                import re as _re2
+                                android_match2 = _re2.search(r"Android\s+([0-9.]+)", mobile_ua2)
+                                ua_metadata2["platformVersion"] = android_match2.group(1) if android_match2 else "14.0"
+                                model_match2 = _re2.search(r";\s*([^;)]+)\)\s*AppleWebKit", mobile_ua2)
+                                ua_metadata2["model"] = model_match2.group(1).strip() if model_match2 else "Pixel 8 Pro"
+                                chrome_match2 = _re2.search(r"Chrome/(\d+)", mobile_ua2)
+                                chrome_ver2 = chrome_match2.group(1) if chrome_match2 else "131"
+                                brands2 = [
+                                    {"brand": "Not_A Brand", "version": "8"},
+                                    {"brand": "Chromium", "version": chrome_ver2},
+                                    {"brand": "Google Chrome", "version": chrome_ver2},
+                                ]
+                                ua_metadata2["brands"] = brands2
+                                ua_metadata2["fullVersion"] = f"{chrome_ver2}.0.0.0"
+
+                            # Apply CDP emulation
+                            cdp_client2 = await page.context.new_cdp_session(page)
+                            await cdp_client2.send("Emulation.clearDeviceMetricsOverride")
+                            await cdp_client2.send("Emulation.setDeviceMetricsOverride", {
+                                "mobile": True,
+                                "fitWindow": True,
+                                "width": mobile_vp2["width"],
+                                "height": mobile_vp2["height"],
+                                "deviceScaleFactor": 3,
+                                "screenOrientation": {"type": "portraitPrimary", "angle": 0},
+                            })
+                            await cdp_client2.send("Network.setUserAgentOverride", {
+                                "userAgent": mobile_ua2,
+                                "platform": ua_metadata2["platform"],
+                                "userAgentMetadata": {
+                                    "mobile": True,
+                                    "platform": ua_metadata2["platform"],
+                                    "platformVersion": ua_metadata2["platformVersion"],
+                                    "architecture": "arm64",
+                                    "model": ua_metadata2.get("model", ""),
+                                    "brands": ua_metadata2.get("brands", []),
+                                    "fullVersion": ua_metadata2.get("fullVersion", ""),
+                                },
+                            })
+                            add_log("info", f"📱 Supplementary emulation applied: {ua_metadata2.get('model', 'mobile')}")
+
+                            # Clear cookies and re-login for mobile
+                            await page.context.clear_cookies()
+                            await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                            await asyncio.sleep(2)
+                            await page.goto("https://www.bing.com/rewards/signin", wait_until="domcontentloaded", timeout=15000)
+                            await asyncio.sleep(3)
+                            try:
+                                await login_mgr.login(page, email, account.get("password", ""), account.get("totp_secret", ""))
+                            except Exception:
+                                pass
+
+                            # Run supplementary searches
+                            def on_mob_supp(c, t, q):
+                                state["progress"] = c
+                            searcher.on_progress = on_mob_supp
+                            searcher.set_account_context(email)
+                            supp_result = await searcher.run_searches(
+                                page, mob_deficit_searches, mode="mobile",
+                            )
+                            add_log("info", f"📱 Supplementary mobile: {supp_result.get('completed', 0)}/{mob_deficit_searches} OK")
+
+                        except Exception as supp_err:
+                            add_log("warning", f"📱 Supplementary mobile error: {supp_err}")
+                        finally:
+                            if cdp_client2:
+                                try:
+                                    await cdp_client2.send("Emulation.clearDeviceMetricsOverride")
+                                    await cdp_client2.send("Network.setUserAgentOverride", {"userAgent": ""})
+                                    await cdp_client2.send("Network.setBypassServiceWorker", {"bypass": False})
+                                except Exception:
+                                    pass
+                                try:
+                                    await cdp_client2.detach()
+                                except Exception:
+                                    pass
+
+                        # Re-check mobile credits after supplementary round
+                        await asyncio.sleep(5)
+                        try:
+                            await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                            await asyncio.sleep(3)
+                            recheck = await page.evaluate("""
+                                async () => {
+                                    try {
+                                        const resp = await fetch('https://rewards.bing.com/api/getuserinfo?type=1');
+                                        const data = await resp.json();
+                                        const mob = data?.dashboard?.userStatus?.counters?.mobileSearch;
+                                        const m = Array.isArray(mob) ? mob[0] : mob;
+                                        return m ? {progress: m.pointProgress||0, max: m.pointProgressMax||0} : null;
+                                    } catch(e) { return null; }
+                                }
+                            """)
+                            if recheck:
+                                mob_current = recheck.get("progress", 0)
+                                mob_max_api = recheck.get("max", mob_max_api)
+                                add_log("info", f"📱 After supplementary: {mob_current}/{mob_max_api}")
+                                mob_deficit_pts = max(0, mob_max_api - mob_current)
+                                mob_deficit_searches = (mob_deficit_pts + 2) // 3
+                            else:
+                                mob_deficit_searches = 0
+                        except Exception:
+                            mob_deficit_searches = 0
+
                 except asyncio.TimeoutError:
                     add_log("warning", "📱 Post-search check timed out")
                 except Exception as pe:
@@ -995,17 +1135,43 @@ async def _run_bot_async(task: str, password: str):
                     bm3 = BrowserManager(edge_runtime_settings)
                     bm3.set_account(email)
 
-                    # Use persistent Edge profile — preserves telemetry + session
-                    storage_state = (
-                        str(storage_state_path) if storage_state_path.exists() else None
-                    )
-                    ctx3, page3 = await bm3.start_clean_edge_persistent(
-                        account_email=email,
-                        storage_state=storage_state,
-                    )
-                    add_log("info", "Using persistent Edge profile for streak telemetry")
+                    # Use NATIVE Edge runtime (subprocess + CDP) — preserves telemetry!
+                    # Playwright-managed Edge kills telemetry, so Edge Streak gets 0/30.
+                    # Native runtime = real Edge process = full telemetry reporting.
+                    edge_streak_native = False
+                    edge_streak_cdp_url = ""
+                    if bool(settings.get("native_edge_runtime_enabled", True)):
+                        try:
+                            edge_streak_cdp_url = await bm3.start_native_edge_runtime(email)
+                            add_log("info", f"Using native Edge runtime for streak ({edge_streak_cdp_url})")
+                            edge_streak_native = True
+                        except Exception as native_err:
+                            add_log("warning", f"Native Edge runtime failed ({native_err}), falling back to Playwright Edge")
 
-                    # Verify login in the persistent context
+                    if not edge_streak_native:
+                        # Fallback to Playwright-managed persistent Edge
+                        storage_state = (
+                            str(storage_state_path) if storage_state_path.exists() else None
+                        )
+                        ctx3, page3 = await bm3.start_clean_edge_persistent(
+                            account_email=email,
+                            storage_state=storage_state,
+                        )
+                        add_log("info", "Using Playwright-managed Edge (telemetry may be limited)")
+                    else:
+                        # Use _open_account_context with native runtime (same as desktop)
+                        ctx3, page3 = await _open_account_context(
+                            bm3,
+                            login_mgr,
+                            account,
+                            session_proxy,
+                            "desktop",
+                            storage_state_path,
+                            attach_existing_edge=True,
+                            attached_cdp_url=edge_streak_cdp_url,
+                        )
+
+                    # Verify login in the context
                     if not await login_mgr.is_logged_in(page3):
                         add_log("info", "Edge session not logged in, logging in...")
                         page3 = await login_mgr.login(
