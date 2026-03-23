@@ -347,34 +347,47 @@ class UniversalTaskScanner:
 
     async def _verify_task_completion(self, page: Page, task: RewardsTask) -> bool:
         """Re-check the Rewards API so we only count tasks that actually completed."""
-        try:
-            await asyncio.sleep(2)
-            refreshed_tasks = await self._fetch_all_tasks(page)
-            refreshed = next(
-                (
-                    candidate for candidate in refreshed_tasks
-                    if candidate.id == task.id
-                    and candidate.category == task.category
-                    and candidate.parent_id == task.parent_id
-                    and candidate.child_index == task.child_index
-                ),
-                None,
-            )
+        # Punch cards need more time for server-side processing
+        initial_wait = 5 if task.category == "punch_card" else 2
+        max_attempts = 2 if task.category == "punch_card" else 1
 
-            if refreshed is None:
-                return True
+        for attempt in range(max_attempts):
+            try:
+                await asyncio.sleep(initial_wait if attempt == 0 else 5)
+                refreshed_tasks = await self._fetch_all_tasks(page)
+                refreshed = next(
+                    (
+                        candidate for candidate in refreshed_tasks
+                        if candidate.id == task.id
+                        and candidate.category == task.category
+                        and candidate.parent_id == task.parent_id
+                        and candidate.child_index == task.child_index
+                    ),
+                    None,
+                )
 
-            if refreshed.is_complete:
-                return True
+                if refreshed is None:
+                    return True
 
-            self._log(
-                "info",
-                f"  ⚠️ Task did not verify as complete: {task.title[:40]}",
-            )
-            return False
-        except Exception as e:
-            logger.warning(f"Task verification failed for {task.title[:30]}: {e}")
-            return False
+                if refreshed.is_complete:
+                    return True
+
+                if attempt < max_attempts - 1:
+                    self._log(
+                        "info",
+                        f"  ⏳ Waiting for server to register completion... (retry {attempt + 1})",
+                    )
+                    continue
+
+                self._log(
+                    "info",
+                    f"  ⚠️ Task did not verify as complete: {task.title[:40]}",
+                )
+                return False
+            except Exception as e:
+                logger.warning(f"Task verification failed for {task.title[:30]}: {e}")
+                return False
+        return False
 
     # ─── API Data Fetch ────────────────────────────────────────────────
 

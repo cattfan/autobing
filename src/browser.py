@@ -345,6 +345,75 @@ class BrowserManager:
             f"Could not start dedicated Edge runtime on {cdp_url}: {last_error}"
         )
 
+    async def start_native_edge_default_profile(self) -> str:
+        """Launch Edge with the DEFAULT system profile for Edge Streak telemetry.
+
+        Unlike start_native_edge_runtime(), this does NOT pass --user-data-dir,
+        so Edge uses the user's default profile where their MS Account is already
+        signed in at the browser level. This is critical for Edge Browsing Streak
+        because Microsoft tracks browsing time via Edge's internal telemetry,
+        which requires the MS Account to be signed in at the browser (not just
+        on rewards.bing.com).
+
+        IMPORTANT: Edge on Windows is single-instance. We must kill ALL existing
+        Edge processes before launching with --remote-debugging-port, otherwise
+        the flag is ignored and we can't connect via CDP.
+        """
+        streak_port = 9399
+        cdp_url = f"http://127.0.0.1:{streak_port}"
+
+        # If port is already open, just attach
+        if self._is_cdp_port_open(cdp_url):
+            await self.start_connected_edge(cdp_url)
+            return cdp_url
+
+        # Kill ALL existing Edge processes (Windows single-instance requirement)
+        # Without this, --remote-debugging-port is ignored because Edge opens
+        # a tab in the existing instance instead of starting a new one.
+        logger.info("Closing all Edge instances for default profile streak...")
+        try:
+            subprocess.run(
+                ["taskkill", "/f", "/im", "msedge.exe"],
+                capture_output=True, timeout=10,
+            )
+            time.sleep(2)  # Wait for processes to fully terminate
+        except Exception as e:
+            logger.debug(f"taskkill msedge: {e}")
+
+        edge_exe = get_edge_executable_path()
+
+        # Launch Edge WITHOUT --user-data-dir → uses default system profile
+        args = [
+            edge_exe,
+            f"--remote-debugging-port={streak_port}",
+            "--no-first-run",
+            "--start-maximized",
+            "--restore-last-session",
+            "https://rewards.bing.com",
+        ]
+        self._managed_edge_process = subprocess.Popen(args)
+
+        last_error = None
+        for _ in range(30):
+            time.sleep(0.5)
+            try:
+                await self.start_connected_edge(cdp_url)
+                logger.info(
+                    f"Edge Streak runtime ready (DEFAULT profile, port={streak_port})"
+                )
+                return cdp_url
+            except Exception as e:
+                last_error = e
+                if self.playwright:
+                    try:
+                        await self.playwright.stop()
+                    except Exception:
+                        pass
+                    self.playwright = None
+        raise RuntimeError(
+            f"Could not start Edge with default profile on {cdp_url}: {last_error}"
+        )
+
     async def start(self) -> None:
         """Start Playwright and launch browser."""
         self.playwright = await async_playwright().start()

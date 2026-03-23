@@ -193,6 +193,19 @@ class TaskDetector:
                     result["streaks"]["edge"]["minutes"] = progress
                     result["streaks"]["edge"]["target"] = max_progress if max_progress > 0 else 30
                     result["streaks"]["edge"]["done"] = progress >= max_progress or promo.get("complete", False)
+                    # Store promo identifiers for API-based approach
+                    result["streaks"]["edge"]["offerId"] = promo.get("offerId", "")
+                    result["streaks"]["edge"]["hash"] = promo.get("hash", "")
+                    result["streaks"]["edge"]["name"] = promo.get("name", "")
+                    result["streaks"]["edge"]["destinationUrl"] = promo.get("destinationUrl", "")
+                    # Log full promo data for debugging
+                    logger.info(
+                        f"Edge Streak promo: offerId='{promo.get('offerId', '')}', "
+                        f"hash='{promo.get('hash', '')}', name='{promo.get('name', '')}', "
+                        f"progress={progress}/{max_progress}, "
+                        f"attributes={attributes}, "
+                        f"destUrl='{promo.get('destinationUrl', '')}'"
+                    )
 
             # New Rewards UI exposes some progress only in rendered cards.
             need_dom_progress = (
@@ -603,6 +616,9 @@ class EdgeBrowsingStreak:
             pass
 
         # ═══ STEP 2: Browse bing.com pages with periodic heartbeats ═══
+        zero_progress_retries = 0  # How many times mid-session retry found 0 min
+        max_zero_retries = 8  # Bail out after this many (~20 min) — prevents 70 min loop
+
         try:
             current_minutes, current_target, streak_done = await self._read_verified_progress(page)
             verified_minutes = max(verified_minutes, current_minutes)
@@ -723,9 +739,24 @@ class EdgeBrowsingStreak:
                             # Mid-session zero-progress detection:
                             # If >6 min elapsed but API still says 0, try pointsbreakdown page
                             if elapsed > 360 and current_minutes == 0:
+                                zero_progress_retries += 1
+
+                                # EARLY BAIL-OUT: If 0 min after multiple retries,
+                                # the Edge Browsing Streak is likely NOT available
+                                # in the user's region (only US/CA/GB/DE/FR/AU/JP).
+                                if zero_progress_retries >= max_zero_retries:
+                                    logger.warning(
+                                        f"⚠️ Edge Streak: 0 min after {elapsed // 60}+ min "
+                                        f"and {zero_progress_retries} retries. "
+                                        f"This feature may not be available in your region. "
+                                        f"Skipping to save time."
+                                    )
+                                    break
+
                                 logger.warning(
-                                    "⚠️ 6+ min elapsed but 0 min credited, "
-                                    "retrying via pointsbreakdown..."
+                                    f"⚠️ 6+ min elapsed but 0 min credited, "
+                                    f"retrying via pointsbreakdown... "
+                                    f"(attempt {zero_progress_retries}/{max_zero_retries})"
                                 )
                                 # Try the points breakdown page which has direct streak links
                                 for retry_url in [
