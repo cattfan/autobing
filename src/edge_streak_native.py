@@ -2,8 +2,9 @@
 Edge Streak via NATIVE subprocess — NO CDP, NO Playwright, NO Selenium.
 
 Microsoft blocks Edge telemetry when --remote-debugging-port is present.
-This module launches Edge as a completely normal process and uses Win32 API
-(SendInput, FindWindow) to simulate keyboard navigation for browsing.
+This module launches Edge as a completely normal process and uses
+window-targeted PostMessage (NOT SendInput) to simulate scrolling.
+Navigation uses subprocess calls so keystrokes NEVER leak to other windows.
 
 This is the ONLY way to get Edge Browsing Streak working because:
 1. Edge telemetry requires MS Account signed in at browser level
@@ -23,18 +24,13 @@ from pathlib import Path
 from src.utils import logger, get_edge_executable_path
 
 # Win32 constants
-VK_RETURN = 0x0D
-VK_TAB = 0x09
-VK_F5 = 0x74
-VK_ESCAPE = 0x1B
-VK_SPACE = 0x20
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
 VK_DOWN = 0x28
 VK_UP = 0x26
-VK_END = 0x47
-KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_EXTENDEDKEY = 0x0001
-
-INPUT_KEYBOARD = 1
+VK_SPACE = 0x20
+VK_NEXT = 0x22  # Page Down
+VK_F5 = 0x74
 
 # Bing pages to browse (must be bing.com for telemetry tracking)
 BROWSE_URLS = [
@@ -60,110 +56,8 @@ BROWSE_URLS = [
     "https://www.bing.com/search?q=financial+planning+advice",
 ]
 
-# ═══ Win32 Structures ═══
-
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", ctypes.wintypes.WORD),
-        ("wScan", ctypes.wintypes.WORD),
-        ("dwFlags", ctypes.wintypes.DWORD),
-        ("time", ctypes.wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
-
-class HARDWAREINPUT(ctypes.Structure):
-    _fields_ = [
-        ("uMsg", ctypes.wintypes.DWORD),
-        ("wParamL", ctypes.wintypes.WORD),
-        ("wParamH", ctypes.wintypes.WORD),
-    ]
-
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [
-        ("dx", ctypes.wintypes.LONG),
-        ("dy", ctypes.wintypes.LONG),
-        ("mouseData", ctypes.wintypes.DWORD),
-        ("dwFlags", ctypes.wintypes.DWORD),
-        ("time", ctypes.wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
-
-class INPUT_UNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
-
-class INPUT(ctypes.Structure):
-    _anonymous_ = ("_input",)
-    _fields_ = [("type", ctypes.wintypes.DWORD), ("_input", INPUT_UNION)]
-
 
 user32 = ctypes.windll.user32
-
-
-def _send_key(vk: int, extended: bool = False):
-    """Send a single key press and release via Win32 SendInput."""
-    flags = 0
-    if extended:
-        flags |= KEYEVENTF_EXTENDEDKEY
-    
-    # Key down
-    inp_down = INPUT()
-    inp_down.type = INPUT_KEYBOARD
-    inp_down.ki.wVk = vk
-    inp_down.ki.dwFlags = flags
-    
-    # Key up
-    inp_up = INPUT()
-    inp_up.type = INPUT_KEYBOARD
-    inp_up.ki.wVk = vk
-    inp_up.ki.dwFlags = flags | KEYEVENTF_KEYUP
-    
-    user32.SendInput(1, ctypes.byref(inp_down), ctypes.sizeof(INPUT))
-    time.sleep(0.05)
-    user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(INPUT))
-
-
-def _send_char(char: str):
-    """Send a single character via Win32 SendInput (Unicode)."""
-    inp_down = INPUT()
-    inp_down.type = INPUT_KEYBOARD
-    inp_down.ki.wScan = ord(char)
-    inp_down.ki.dwFlags = 0x0004  # KEYEVENTF_UNICODE
-    
-    inp_up = INPUT()
-    inp_up.type = INPUT_KEYBOARD
-    inp_up.ki.wScan = ord(char)
-    inp_up.ki.dwFlags = 0x0004 | KEYEVENTF_KEYUP
-    
-    user32.SendInput(1, ctypes.byref(inp_down), ctypes.sizeof(INPUT))
-    time.sleep(0.02)
-    user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(INPUT))
-
-
-def _type_text(text: str, delay: float = 0.03):
-    """Type text character by character using SendInput."""
-    for ch in text:
-        _send_char(ch)
-        time.sleep(delay + random.uniform(0, 0.02))
-
-
-def _ctrl_key(vk: int):
-    """Send Ctrl+key combination."""
-    VK_CONTROL = 0x11
-    # Ctrl down
-    inp = INPUT()
-    inp.type = INPUT_KEYBOARD
-    inp.ki.wVk = VK_CONTROL
-    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-    time.sleep(0.05)
-    # Key press
-    _send_key(vk)
-    time.sleep(0.05)
-    # Ctrl up
-    inp2 = INPUT()
-    inp2.type = INPUT_KEYBOARD
-    inp2.ki.wVk = VK_CONTROL
-    inp2.ki.dwFlags = KEYEVENTF_KEYUP
-    user32.SendInput(1, ctypes.byref(inp2), ctypes.sizeof(INPUT))
 
 
 def _find_edge_window():
@@ -177,7 +71,6 @@ def _find_edge_window():
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value
-            # Edge window titles end with "- Microsoft Edge" or similar
             if "Edge" in title or "Microsoft\u200b Edge" in title:
                 if user32.IsWindowVisible(hwnd):
                     result.append(hwnd)
@@ -187,44 +80,38 @@ def _find_edge_window():
     return result[0] if result else None
 
 
-def _focus_edge(hwnd):
-    """Bring Edge window to foreground."""
-    SW_RESTORE = 9
-    user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(0.3)
-
-
-def _navigate_to_url(url: str):
-    """Navigate Edge to a URL using Ctrl+L → type URL → Enter."""
-    # Ctrl+L to focus address bar
-    _ctrl_key(0x4C)  # L
-    time.sleep(0.3)
+def _post_key_to_window(hwnd, vk: int):
+    """Send a key press to a SPECIFIC window via PostMessage.
     
-    # Select all existing text
-    _ctrl_key(0x41)  # A
-    time.sleep(0.1)
-    
-    # Type the URL
-    _type_text(url, delay=0.02)
-    time.sleep(0.2)
-    
-    # Press Enter
-    _send_key(VK_RETURN)
+    Unlike SendInput, this targets the window by handle —
+    keystrokes NEVER leak to Chrome, chat windows, or any other app.
+    """
+    lparam_down = 0x00000001  # repeat=1, scancode=0
+    lparam_up = 0xC0000001    # repeat=1, transition=1, previous=1
+    user32.PostMessageW(hwnd, WM_KEYDOWN, vk, lparam_down)
+    time.sleep(0.05)
+    user32.PostMessageW(hwnd, WM_KEYUP, vk, lparam_up)
 
 
-def _scroll_page():
-    """Simulate page scrolling with random amounts."""
+def _scroll_in_window(hwnd):
+    """Simulate page scrolling INSIDE a specific Edge window.
+    
+    Uses PostMessage so scrolling only affects Edge,
+    even if user is focused on Chrome or another app.
+    """
     for _ in range(random.randint(3, 7)):
         if random.random() < 0.7:
-            _send_key(VK_DOWN, extended=True)
+            _post_key_to_window(hwnd, VK_DOWN)
         else:
-            _send_key(VK_SPACE)
+            _post_key_to_window(hwnd, VK_NEXT)  # Page Down
         time.sleep(random.uniform(0.5, 1.5))
 
 
 class NativeEdgeStreak:
-    """Complete Edge Browsing Streak using native Edge + Win32 keyboard simulation.
+    """Complete Edge Browsing Streak using native Edge.
+    
+    Navigation: Opens URLs via `msedge.exe URL` subprocess (no keyboard needed).
+    Scrolling: Uses PostMessage to Edge window handle (never leaks to other apps).
     
     This is the ONLY approach that works because:
     1. No --remote-debugging-port → telemetry is NOT blocked
@@ -235,6 +122,7 @@ class NativeEdgeStreak:
     def __init__(self):
         self.edge_process = None
         self._edge_hwnd = None
+        self._edge_exe = get_edge_executable_path()
     
     async def _kill_all_edge(self):
         """Kill all existing Edge instances."""
@@ -250,12 +138,10 @@ class NativeEdgeStreak:
     
     async def _launch_edge(self, start_url: str = "https://www.bing.com"):
         """Launch Edge as a normal subprocess with NO automation flags."""
-        edge_exe = get_edge_executable_path()
-        
         # CRITICAL: NO --remote-debugging-port, NO --user-data-dir
         # Edge runs 100% normally using the default system profile
         args = [
-            edge_exe,
+            self._edge_exe,
             "--no-first-run",
             "--start-maximized",
             "--disable-features=msEdgeSidebarV2",
@@ -271,25 +157,39 @@ class NativeEdgeStreak:
             hwnd = _find_edge_window()
             if hwnd:
                 self._edge_hwnd = hwnd
-                _focus_edge(hwnd)
                 logger.info(f"Edge window found (hwnd: {hwnd:#x})")
                 return True
         
         logger.warning("Edge window not found after 30 seconds")
         return False
     
+    def _navigate_via_subprocess(self, url: str):
+        """Open a URL in the existing Edge instance via subprocess.
+        
+        When Edge is already running, `msedge.exe URL` opens the URL
+        in the current window. NO keyboard simulation needed.
+        This NEVER interferes with other windows.
+        """
+        try:
+            subprocess.Popen(
+                [self._edge_exe, url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            logger.debug(f"Navigate subprocess error: {e}")
+    
     async def _browse_page(self, url: str):
         """Navigate to a URL and simulate reading behavior."""
-        if self._edge_hwnd:
-            _focus_edge(self._edge_hwnd)
-        
-        _navigate_to_url(url)
+        # Navigate via subprocess — no keyboard, no focus stealing
+        self._navigate_via_subprocess(url)
         
         # Wait for page to load
         await asyncio.sleep(random.uniform(3, 5))
         
-        # Simulate reading behavior — scroll through page
-        _scroll_page()
+        # Scroll inside Edge window via PostMessage (window-targeted)
+        if self._edge_hwnd:
+            _scroll_in_window(self._edge_hwnd)
         
         # Simulate reading time (1-3 minutes per page)
         read_time = random.uniform(60, 180)
@@ -365,6 +265,11 @@ class NativeEdgeStreak:
             if url_index >= len(urls):
                 random.shuffle(urls)
                 url_index = 0
+            
+            # Re-find Edge window in case it was recreated
+            new_hwnd = _find_edge_window()
+            if new_hwnd:
+                self._edge_hwnd = new_hwnd
             
             logger.info(
                 f"[Edge Native Streak] {elapsed_min}/{target_minutes} min — {url}"
