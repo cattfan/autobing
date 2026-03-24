@@ -3,8 +3,10 @@ Edge Streak via NATIVE subprocess — NO CDP, NO Playwright, NO Selenium.
 
 Microsoft blocks Edge telemetry when --remote-debugging-port is present.
 This module launches Edge as a completely normal process and uses
-window-targeted PostMessage (NOT SendInput) to simulate scrolling.
-Navigation uses subprocess calls so keystrokes NEVER leak to other windows.
+window-targeted PostMessage to simulate keyboard navigation.
+
+CRITICAL: All keyboard events are sent via PostMessage to the Edge window
+handle — they NEVER leak to Chrome, chat windows, or any other app.
 
 This is the ONLY way to get Edge Browsing Streak working because:
 1. Edge telemetry requires MS Account signed in at browser level
@@ -26,11 +28,14 @@ from src.utils import logger, get_edge_executable_path
 # Win32 constants
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
+WM_CHAR = 0x0102
+VK_RETURN = 0x0D
 VK_DOWN = 0x28
 VK_UP = 0x26
 VK_SPACE = 0x20
-VK_NEXT = 0x22  # Page Down
-VK_F5 = 0x74
+VK_NEXT = 0x22   # Page Down
+VK_CONTROL = 0x11
+VK_BACK = 0x08   # Backspace
 
 # Bing pages to browse (must be bing.com for telemetry tracking)
 BROWSE_URLS = [
@@ -80,17 +85,64 @@ def _find_edge_window():
     return result[0] if result else None
 
 
-def _post_key_to_window(hwnd, vk: int):
-    """Send a key press to a SPECIFIC window via PostMessage.
+def _post_key(hwnd, vk: int):
+    """Send a single key press+release to a SPECIFIC window via PostMessage.
     
     Unlike SendInput, this targets the window by handle —
-    keystrokes NEVER leak to Chrome, chat windows, or any other app.
+    keystrokes NEVER leak to other applications.
     """
-    lparam_down = 0x00000001  # repeat=1, scancode=0
-    lparam_up = 0xC0000001    # repeat=1, transition=1, previous=1
+    lparam_down = 0x00000001
+    lparam_up = 0xC0000001
     user32.PostMessageW(hwnd, WM_KEYDOWN, vk, lparam_down)
     time.sleep(0.05)
     user32.PostMessageW(hwnd, WM_KEYUP, vk, lparam_up)
+
+
+def _post_char(hwnd, char: str):
+    """Send a single character to a SPECIFIC window via WM_CHAR.
+    
+    WM_CHAR is the proper way to type text into a window —
+    it handles Unicode and doesn't require virtual key translation.
+    """
+    user32.PostMessageW(hwnd, WM_CHAR, ord(char), 0)
+
+
+def _post_ctrl_key(hwnd, vk: int):
+    """Send Ctrl+key combination to a SPECIFIC window via PostMessage."""
+    # Ctrl down
+    user32.PostMessageW(hwnd, WM_KEYDOWN, VK_CONTROL, 0x00000001)
+    time.sleep(0.03)
+    # Key down + up
+    _post_key(hwnd, vk)
+    time.sleep(0.03)
+    # Ctrl up
+    user32.PostMessageW(hwnd, WM_KEYUP, VK_CONTROL, 0xC0000001)
+
+
+def _navigate_same_tab(hwnd, url: str):
+    """Navigate Edge's CURRENT TAB to a URL via PostMessage.
+    
+    Uses Ctrl+L (focus address bar) → Ctrl+A (select all) → type URL → Enter.
+    All keystrokes are sent to the Edge window handle only.
+    This navigates the SAME tab — critical for Edge telemetry tracking.
+    """
+    # Ctrl+L to focus address bar
+    _post_ctrl_key(hwnd, 0x4C)  # L
+    time.sleep(0.3)
+    
+    # Ctrl+A to select all text in address bar
+    _post_ctrl_key(hwnd, 0x41)  # A
+    time.sleep(0.1)
+    
+    # Type the URL character by character via WM_CHAR
+    for ch in url:
+        _post_char(hwnd, ch)
+        time.sleep(0.015 + random.uniform(0, 0.01))
+    
+    time.sleep(0.2)
+    
+    # Press Enter to navigate
+    _post_key(hwnd, VK_RETURN)
 
 
 def _scroll_in_window(hwnd):
@@ -101,22 +153,23 @@ def _scroll_in_window(hwnd):
     """
     for _ in range(random.randint(3, 7)):
         if random.random() < 0.7:
-            _post_key_to_window(hwnd, VK_DOWN)
+            _post_key(hwnd, VK_DOWN)
         else:
-            _post_key_to_window(hwnd, VK_NEXT)  # Page Down
+            _post_key(hwnd, VK_NEXT)
         time.sleep(random.uniform(0.5, 1.5))
 
 
 class NativeEdgeStreak:
     """Complete Edge Browsing Streak using native Edge.
     
-    Navigation: Opens URLs via `msedge.exe URL` subprocess (no keyboard needed).
+    Navigation: Uses PostMessage Ctrl+L → type URL → Enter (same tab, window-targeted).
     Scrolling: Uses PostMessage to Edge window handle (never leaks to other apps).
     
     This is the ONLY approach that works because:
     1. No --remote-debugging-port → telemetry is NOT blocked
     2. No Playwright/CDP → no automation detection
     3. Uses the user's DEFAULT Edge profile → MS Account signed in at browser level
+    4. Navigates same tab (not new tabs) → telemetry tracks correctly
     """
     
     def __init__(self):
@@ -144,7 +197,6 @@ class NativeEdgeStreak:
             self._edge_exe,
             "--no-first-run",
             "--start-maximized",
-            "--disable-features=msEdgeSidebarV2",
             start_url,
         ]
         
@@ -163,33 +215,19 @@ class NativeEdgeStreak:
         logger.warning("Edge window not found after 30 seconds")
         return False
     
-    def _navigate_via_subprocess(self, url: str):
-        """Open a URL in the existing Edge instance via subprocess.
-        
-        When Edge is already running, `msedge.exe URL` opens the URL
-        in the current window. NO keyboard simulation needed.
-        This NEVER interferes with other windows.
-        """
-        try:
-            subprocess.Popen(
-                [self._edge_exe, url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as e:
-            logger.debug(f"Navigate subprocess error: {e}")
-    
     async def _browse_page(self, url: str):
-        """Navigate to a URL and simulate reading behavior."""
-        # Navigate via subprocess — no keyboard, no focus stealing
-        self._navigate_via_subprocess(url)
+        """Navigate to a URL in the SAME TAB and simulate reading."""
+        if not self._edge_hwnd:
+            return
+        
+        # Navigate same tab via PostMessage (Ctrl+L → type → Enter)
+        _navigate_same_tab(self._edge_hwnd, url)
         
         # Wait for page to load
         await asyncio.sleep(random.uniform(3, 5))
         
-        # Scroll inside Edge window via PostMessage (window-targeted)
-        if self._edge_hwnd:
-            _scroll_in_window(self._edge_hwnd)
+        # Scroll inside Edge window via PostMessage
+        _scroll_in_window(self._edge_hwnd)
         
         # Simulate reading time (1-3 minutes per page)
         read_time = random.uniform(60, 180)
@@ -240,6 +278,9 @@ class NativeEdgeStreak:
             f"Native Edge Streak started — will browse for {target_minutes + 5} min "
             f"(target {target_minutes} min + 5 min buffer)"
         )
+        
+        # Wait initial page load before navigating
+        await asyncio.sleep(5)
         
         start_time = time.time()
         urls = list(BROWSE_URLS)
