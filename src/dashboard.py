@@ -35,6 +35,7 @@ from src.crypto import (
 )
 from src.ai_agent import AIAgent
 from src.streaks import EdgeBrowsingStreak, TaskDetector
+from src.edge_streak_native import NativeEdgeStreak
 from src.universal_task import UniversalTaskScanner
 
 
@@ -1322,41 +1323,40 @@ async def _run_bot_async(task: str, password: str):
                                 except Exception as ce:
                                     add_log("debug", f"Card error: {ce}")
 
-                            # Fallback: short browse
+                            # Fallback: Native Edge browsing (no CDP — only way telemetry works)
                             if not streak_credited:
-                                add_log("info", "📖 Trying 15 min in-tab browsing...")
-                                state["progress"] = 0
-                                state["progress_total"] = 15
-                                ebs = EdgeBrowsingStreak(humanizer)
+                                add_log(
+                                    "info",
+                                    "📖 Starting Native Edge browsing (30 min + 5 min buffer)..."
+                                    " CDP will be closed — Edge telemetry requires no automation.",
+                                )
+                                # Close CDP session first — NativeEdgeStreak needs to kill all Edge
+                                await bm_streak.close()
+                                bm_streak = None  # Mark as closed
 
-                                def _on_streak(done, total):
+                                state["progress"] = 0
+                                state["progress_total"] = 30
+                                native_streak = NativeEdgeStreak()
+
+                                def _on_native_streak(done, total):
                                     state["progress"] = min(done, total)
 
-                                await ebs.browse(
-                                    page_s, target_minutes=15,
-                                    on_progress=_on_streak,
-                                    initial_minutes=0, hard_cap_minutes=20,
+                                await native_streak.browse(
+                                    target_minutes=30,
+                                    on_progress=_on_native_streak,
                                 )
-                                t4 = await task_detector.get_all_tasks(page_s)
-                                e4 = t4.get("streaks", {}).get("edge", {})
-                                if e4.get("done") or e4.get("minutes", 0) >= e4.get("target", 30):
-                                    add_log("info", "✅ Edge Streak completed!")
-                                else:
-                                    add_log(
-                                        "warning",
-                                        f"⚠️ Edge Streak not completed "
-                                        f"({e4.get('minutes', 0)}/{e4.get('target', 30)} min) "
-                                        "— may not be available in your region",
-                                    )
+                                add_log("info", "✅ Native Edge browsing session completed (30+ min)")
 
-                        await bm_streak.close()
+                        if bm_streak is not None:
+                            await bm_streak.close()
 
                     except Exception as streak_err:
                         add_log("warning", f"⚠️ Edge Streak error: {streak_err}")
                         import traceback
                         add_log("debug", traceback.format_exc())
                         try:
-                            await bm_streak.close()
+                            if bm_streak is not None:
+                                await bm_streak.close()
                         except Exception:
                             pass
                 except Exception as e:
