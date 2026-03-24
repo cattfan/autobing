@@ -1323,16 +1323,65 @@ async def _run_bot_async(task: str, password: str):
                                 except Exception as ce:
                                     add_log("debug", f"Card error: {ce}")
 
-                            # Fallback: Native Edge browsing (no CDP — only way telemetry works)
+                            # Fallback: Activate card via CDP, then native Edge browsing
                             if not streak_credited:
+                                # CRITICAL: Activate the Edge Streak card on Rewards page FIRST
+                                # Without this, browsing doesn't count toward streak minutes
+                                add_log("info", "🔗 Activating Edge Streak card before native browsing...")
+                                activation_url = None
+                                for act_url in [
+                                    "https://rewards.bing.com/pointsbreakdown",
+                                    "https://rewards.bing.com/earn",
+                                    "https://rewards.bing.com/",
+                                ]:
+                                    try:
+                                        await page_s.goto(act_url, wait_until="domcontentloaded", timeout=15000)
+                                        await asyncio.sleep(3)
+                                        # Click the Edge Streak card via JS
+                                        clicked = await page_s.evaluate("""
+                                            () => {
+                                                const allElements = document.querySelectorAll('a, button, [role="link"], [role="button"], mee-card a');
+                                                for (const el of allElements) {
+                                                    const text = (el.textContent || '').toLowerCase();
+                                                    const href = (el.href || '').toLowerCase();
+                                                    if ((text.includes('edge') && (text.includes('brows') || text.includes('streak') || text.includes('minute')))
+                                                        || href.includes('edge') && href.includes('streak')) {
+                                                        // Capture the destination URL before clicking
+                                                        const dest = el.href || '';
+                                                        el.click();
+                                                        return dest || true;
+                                                    }
+                                                }
+                                                const cards = document.querySelectorAll('mee-card, mee-rewards-more-activities-card-item');
+                                                for (const card of cards) {
+                                                    const text = (card.textContent || '').toLowerCase();
+                                                    if (text.includes('edge') && (text.includes('brows') || text.includes('streak'))) {
+                                                        const link = card.querySelector('a');
+                                                        if (link) { const d = link.href; link.click(); return d || true; }
+                                                        card.click();
+                                                        return true;
+                                                    }
+                                                }
+                                                return false;
+                                            }
+                                        """)
+                                        if clicked:
+                                            add_log("info", f"   ✅ Card activated on {act_url}")
+                                            if isinstance(clicked, str) and clicked.startswith("http"):
+                                                activation_url = clicked
+                                            await asyncio.sleep(3)
+                                            break
+                                    except Exception:
+                                        continue
+
                                 add_log(
                                     "info",
                                     "📖 Starting Native Edge browsing (30 min + 5 min buffer)..."
                                     " CDP will be closed — Edge telemetry requires no automation.",
                                 )
-                                # Close CDP session first — NativeEdgeStreak needs to kill all Edge
+                                # Close CDP session — NativeEdgeStreak needs to kill all Edge
                                 await bm_streak.close()
-                                bm_streak = None  # Mark as closed
+                                bm_streak = None
 
                                 state["progress"] = 0
                                 state["progress_total"] = 30
@@ -1341,9 +1390,12 @@ async def _run_bot_async(task: str, password: str):
                                 def _on_native_streak(done, total):
                                     state["progress"] = min(done, total)
 
+                                # If we got an activation URL, start browsing from there
+                                start_url = activation_url or "https://www.bing.com"
                                 await native_streak.browse(
                                     target_minutes=30,
                                     on_progress=_on_native_streak,
+                                    start_url=start_url,
                                 )
                                 add_log("info", "✅ Native Edge browsing session completed (30+ min)")
 

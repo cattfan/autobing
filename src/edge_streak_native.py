@@ -317,12 +317,14 @@ class NativeEdgeStreak:
         self,
         target_minutes: int = 30,
         on_progress=None,
+        start_url: str = "https://www.bing.com",
     ):
         """Browse Bing pages for the specified duration using native Edge.
         
         Args:
             target_minutes: How many minutes to browse (default 30)
             on_progress: Callback(elapsed_min, target_min)
+            start_url: Initial URL to open Edge with (e.g. activation URL)
         """
         total_seconds = target_minutes * 60
         # Add 5 min buffer to ensure telemetry is captured
@@ -330,7 +332,7 @@ class NativeEdgeStreak:
         
         await self._kill_all_edge()
         
-        if not await self._launch_edge():
+        if not await self._launch_edge(start_url):
             logger.error("Failed to launch native Edge")
             return
         
