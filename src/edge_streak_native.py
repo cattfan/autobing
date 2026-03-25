@@ -5,13 +5,19 @@ Microsoft blocks Edge telemetry when --remote-debugging-port is present.
 This module launches Edge as a NORMAL process and uses Win32 SendInput
 for keyboard simulation.
 
-IMPORTANT: Chromium browsers IGNORE PostMessage keyboard events. Only
-SendInput (system-level) actually reaches Chromium's input pipeline.
-To avoid interfering with user activity, the script:
-  1. Saves the currently focused window
-  2. Briefly focuses Edge (~1 sec) for URL entry
-  3. Restores focus to the user's previous window
-Between navigations (1-3 min reading time), user can freely use any app.
+IMPORTANT — WHY SendInput + SetForegroundWindow (NO focus restore):
+  - March 23: SendInput + SetForegroundWindow, NO restore → 30/30 ✅
+  - March 24: PostMessage (Chromium ignores) → 0/30 ❌
+  - March 24: subprocess msedge URL (new tabs) → 0/30 ❌
+  - March 25: SendInput + restore_focus → 0/30 ❌
+
+Edge telemetry requires Edge to be the foreground window. The bot
+calls SetForegroundWindow before each navigation (~every 2 min).
+Between navigations, Edge stays foreground naturally.
+If user switches to Chrome, next navigation brings Edge back.
+
+SendInput goes ONLY to the foreground window. Since we always call
+SetForegroundWindow(edge) FIRST, keystrokes reliably go to Edge.
 """
 
 import asyncio
@@ -29,22 +35,18 @@ from src.utils import logger, get_edge_executable_path
 
 ULONG_PTR = ctypes.POINTER(ctypes.c_ulong)
 
-# Input types
 INPUT_KEYBOARD = 1
 
-# Key event flags
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_EXTENDEDKEY = 0x0001
 
-# Virtual keys
 VK_RETURN = 0x0D
 VK_DOWN = 0x28
 VK_SPACE = 0x20
 VK_NEXT = 0x22   # Page Down
 VK_CONTROL = 0x11
 
-# ── Win32 structures ──────────────────────────────────────────────────────
 
 class KEYBDINPUT(ctypes.Structure):
     _fields_ = [
@@ -55,14 +57,16 @@ class KEYBDINPUT(ctypes.Structure):
         ("dwExtraInfo", ULONG_PTR),
     ]
 
+
 class INPUT(ctypes.Structure):
     class _INPUT_UNION(ctypes.Union):
         _fields_ = [("ki", KEYBDINPUT), ("padding", ctypes.c_byte * 24)]
     _fields_ = [("type", ctypes.wintypes.DWORD), ("union", _INPUT_UNION)]
 
+
 user32 = ctypes.windll.user32
 
-# Bing pages to browse (must be bing.com for telemetry tracking)
+# Bing pages to browse
 BROWSE_URLS = [
     "https://www.bing.com",
     "https://www.bing.com/news",
@@ -87,10 +91,10 @@ BROWSE_URLS = [
 ]
 
 
-# ── Low-level SendInput helpers ──────────────────────────────────────────
+# ── SendInput helpers ────────────────────────────────────────────────────
 
 def _send_key(vk: int, extended: bool = False):
-    """Send a single key press+release via SendInput (system-level)."""
+    """Send key press+release via SendInput (system-level)."""
     flags_down = KEYEVENTF_EXTENDEDKEY if extended else 0
     flags_up = flags_down | KEYEVENTF_KEYUP
 
@@ -139,7 +143,7 @@ def _ctrl_key(vk: int):
 
 
 def _type_text(text: str, delay: float = 0.02):
-    """Type a string character by character via SendInput."""
+    """Type string character by character via SendInput."""
     for ch in text:
         _send_char(ch)
         time.sleep(delay + random.uniform(0, 0.01))
@@ -167,58 +171,59 @@ def _find_edge_window():
     return result[0] if result else None
 
 
-def _get_foreground_window():
-    """Get the currently focused window handle."""
-    return user32.GetForegroundWindow()
+def _focus_edge(hwnd):
+    """Bring Edge to front and ensure it has keyboard focus.
 
-
-def _set_foreground_window(hwnd):
-    """Bring a window to the foreground."""
-    if hwnd:
-        user32.SetForegroundWindow(hwnd)
-
-
-def _navigate_to_url_safe(edge_hwnd, url: str):
-    """Navigate Edge to a URL using SendInput, with focus save/restore.
-
-    1. Save the user's currently focused window
-    2. Focus Edge briefly (~1 sec)
-    3. Ctrl+L → Select All → Type URL → Enter
-    4. Restore focus to the user's previous window
+    CRITICAL: This is what makes Edge Streak work!
+    Edge MUST be the foreground window for telemetry to count.
+    We do NOT restore focus — Edge stays in front intentionally.
     """
-    # Save user's current window
-    prev_hwnd = _get_foreground_window()
+    if not hwnd:
+        return
 
-    # Focus Edge
-    _set_foreground_window(edge_hwnd)
+    # ShowWindow to restore if minimized
+    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    time.sleep(0.1)
+
+    # SetForegroundWindow to bring to front
+    user32.SetForegroundWindow(hwnd)
     time.sleep(0.3)
+
+    # Verify Edge is now foreground
+    fg = user32.GetForegroundWindow()
+    if fg != hwnd:
+        # Retry with AllowSetForegroundWindow trick
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.2)
+
+
+def _navigate_to_url(hwnd, url: str):
+    """Navigate Edge to a URL using Ctrl+L → type → Enter.
+
+    Always calls _focus_edge FIRST to ensure SendInput goes to Edge.
+    Does NOT restore focus — Edge stays foreground for telemetry.
+    """
+    _focus_edge(hwnd)
 
     # Ctrl+L to focus address bar
     _ctrl_key(0x4C)  # L
     time.sleep(0.2)
 
-    # Ctrl+A to select all existing text
+    # Ctrl+A to select all
     _ctrl_key(0x41)  # A
     time.sleep(0.1)
 
-    # Type the URL
+    # Type URL
     _type_text(url, delay=0.015)
     time.sleep(0.15)
 
     # Press Enter
     _send_key(VK_RETURN)
-    time.sleep(0.3)
-
-    # Restore user's previous window focus
-    if prev_hwnd and prev_hwnd != edge_hwnd:
-        _set_foreground_window(prev_hwnd)
 
 
-def _scroll_page_safe(edge_hwnd):
-    """Scroll the Edge page using SendInput with focus save/restore."""
-    prev_hwnd = _get_foreground_window()
-    _set_foreground_window(edge_hwnd)
-    time.sleep(0.2)
+def _scroll_page(hwnd):
+    """Scroll the page in Edge. Ensures Edge is foreground first."""
+    _focus_edge(hwnd)
 
     for _ in range(random.randint(3, 7)):
         if random.random() < 0.7:
@@ -227,21 +232,16 @@ def _scroll_page_safe(edge_hwnd):
             _send_key(VK_SPACE)
         time.sleep(random.uniform(0.5, 1.5))
 
-    # Restore user's window
-    if prev_hwnd and prev_hwnd != edge_hwnd:
-        _set_foreground_window(prev_hwnd)
-
 
 # ── Main class ───────────────────────────────────────────────────────────
 
 class NativeEdgeStreak:
     """Complete Edge Browsing Streak using native Edge + SendInput.
 
-    Uses SendInput (ONLY method that works with Chromium) with automatic
-    focus save/restore to minimize interference with user activity.
-
-    Between navigations (1-3 min reading time), user can freely use any app.
-    Edge focus is only stolen briefly (~1 sec) during URL entry.
+    Uses the EXACT same approach that worked on March 23 (30/30):
+    - SetForegroundWindow to keep Edge in front
+    - SendInput for keyboard navigation (only method Chromium processes)
+    - NO focus restore (Edge stays foreground for telemetry)
     """
 
     def __init__(self):
@@ -289,17 +289,17 @@ class NativeEdgeStreak:
         if not self._edge_hwnd:
             return
 
-        # Navigate with focus save/restore (~1 sec focus steal)
-        _navigate_to_url_safe(self._edge_hwnd, url)
+        # Navigate (focuses Edge, types URL, presses Enter)
+        _navigate_to_url(self._edge_hwnd, url)
 
         # Wait for page to load
         await asyncio.sleep(random.uniform(3, 5))
 
-        # Scroll with focus save/restore (~3 sec focus steal)
-        _scroll_page_safe(self._edge_hwnd)
+        # Scroll (re-focuses Edge if user switched away)
+        _scroll_page(self._edge_hwnd)
 
-        # Simulate reading time (1-3 min) — user is FREE during this time
-        read_time = random.uniform(60, 180)
+        # Simulate reading time (2-3 minutes per page)
+        read_time = random.uniform(120, 180)
         logger.debug(f"Reading {url} for {read_time:.0f}s")
         await asyncio.sleep(read_time)
 
