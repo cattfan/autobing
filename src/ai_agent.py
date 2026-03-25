@@ -14,7 +14,7 @@ import asyncio
 import json
 import random
 import re
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import httpx
 from playwright.async_api import Page
@@ -71,35 +71,117 @@ RULES:
 class AIAgent:
     """AI Agent that uses LLM to navigate and complete rewards tasks."""
 
-    def __init__(self, settings: dict):
+    def __init__(self, settings: dict, on_event: Optional[Callable[[str, str, dict], None]] = None):
         self.api_key = settings.get("ai_api_key", "")
         self.model = settings.get("ai_model", "meta-llama/llama-3.3-70b-instruct:free")
         self.enabled = bool(
             settings.get("ai_enabled", False) and self.api_key
         )
+        self._settings_enabled = bool(settings.get("ai_enabled", False))
         self._conversation: list[dict] = []
         self._max_steps = 25  # Safety limit
+        self._on_event = on_event
         # Fallback free models (tried in order if primary model is rate-limited)
         self._fallback_models = [
+            "openrouter/auto",
+            "openrouter/free",
             "meta-llama/llama-3.3-70b-instruct:free",
+            "meta-llama/llama-3.3-70b-instruct",
+            "meta-llama/llama-4-maverick",
+            "meta-llama/llama-4-scout",
             "qwen/qwen3-4b:free",
-            "google/gemma-3-27b-it:free",
-            "nvidia/nemotron-3-super-120b-a12b:free",
+            "qwen/qwen3-coder:free",
             "qwen/qwen3-next-80b-a3b-instruct:free",
-            "google/gemma-3-12b-it:free",
-            "google/gemma-3n-e4b-it:free",
-            "nousresearch/hermes-3-llama-3.1-405b:free",
+            "qwen/qwen3.5-27b",
+            "qwen/qwen3.5-35b-a3b",
+            "qwen/qwen3.5-9b",
+            "google/gemma-3-27b-it:free",
+            "google/gemini-2.5-flash-lite",
+            "google/gemini-2.5-flash",
+            "deepseek/deepseek-chat",
+            "deepseek/deepseek-chat-v3.1",
+            "mistralai/mistral-small-3.1-24b-instruct:free",
+            "mistralai/mistral-small-2603",
+            "anthropic/claude-haiku-4.5",
         ]
         # Smart rotation: remember last model that worked
         self._last_working_model: Optional[str] = None
+        self._current_model = self.model
 
-    async def _call_llm(self, messages: list[dict]) -> Optional[dict]:
-        """Call OpenRouter API and parse JSON response."""
-        if not self.api_key:
-            return None
+    def _emit(self, level: str, message: str, **meta: Any) -> None:
+        """Write AI logs to the app logger and optional dashboard callback."""
+        tagged = f"[AI] {message}"
 
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
+        if self._on_event:
+            try:
+                self._on_event(level, message, meta)
+                return
+            except Exception as e:
+                logger.debug(f"[AI] Event callback failed: {e}")
+
+        if level == "warning":
+            logger.warning(tagged)
+        elif level == "debug":
+            logger.debug(tagged)
+        else:
+            logger.info(tagged)
+
+    @staticmethod
+    def _short_task_label(task_description: str, limit: int = 80) -> str:
+        """Keep task labels compact for logs and dashboard status."""
+        cleaned = " ".join((task_description or "").split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: limit - 3] + "..."
+
+    def _request_models(self) -> list[str]:
+        """Return a de-duplicated model chain for OpenRouter fallback routing."""
+        ordered: list[str] = []
+        for model in [self.model, self._last_working_model, *self._fallback_models]:
+            if model and model not in ordered:
+                ordered.append(model)
+        return ordered
+
+    def _request_payload(self, messages: list[dict], model: str | None = None) -> dict:
+        """Build the OpenRouter payload with explicit fallback routing."""
+        selected_model = model or self.model
+        routed_models = []
+        for fallback_model in [self._last_working_model, *self._fallback_models]:
+            if fallback_model and fallback_model != selected_model and fallback_model not in routed_models:
+                routed_models.append(fallback_model)
+        return {
+            "model": selected_model,
+            "models": routed_models[:3],
+            "messages": messages,
+            "max_tokens": 300,
+            "temperature": 0.1,
+        }
+
+    async def _try_fallback_models(
+        self,
+        client: httpx.AsyncClient,
+        messages: list[dict],
+        *,
+        exclude_model: str = "",
+    ) -> httpx.Response | None:
+        """Try additional fallback models manually when the primary request fails."""
+        ordered_fallbacks = list(self._fallback_models)
+        if self._last_working_model and self._last_working_model in ordered_fallbacks:
+            ordered_fallbacks.remove(self._last_working_model)
+            ordered_fallbacks.insert(0, self._last_working_model)
+
+        for fb_model in ordered_fallbacks:
+            if not fb_model or fb_model == exclude_model:
+                continue
+            self._emit(
+                "info",
+                f"Thử fallback model {fb_model}.",
+                active=True,
+                model=fb_model,
+                reason="fallback_model",
+            )
+            await asyncio.sleep(2)
+            try:
                 response = await client.post(
                     OPENROUTER_API_URL,
                     headers={
@@ -107,17 +189,63 @@ class AIAgent:
                         "Content-Type": "application/json",
                         "HTTP-Referer": "https://rewards.bing.com",
                     },
-                    json={
-                        "model": self.model,
-                        "messages": messages,
-                        "max_tokens": 300,
-                        "temperature": 0.1,  # Low temp for precise actions
+                    json=self._request_payload(messages, fb_model),
+                )
+                if response.status_code == 200:
+                    try:
+                        fb_data = response.json()
+                        fb_content = fb_data.get("choices", [{}])[0].get("message", {}).get("content")
+                        if fb_content and fb_content.strip():
+                            self._last_working_model = fb_model
+                            self._current_model = fb_model
+                            return response
+                        self._emit(
+                            "warning",
+                            f"Model {fb_model} trả về nội dung rỗng, chuyển model khác.",
+                            active=True,
+                            model=fb_model,
+                            reason="empty_content",
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+        return None
+
+    async def _call_llm(self, messages: list[dict]) -> Optional[dict]:
+        """Call OpenRouter API and parse JSON response."""
+        if not self.api_key:
+            self._emit(
+                "warning",
+                "Bỏ qua AI vì chưa có API key.",
+                active=False,
+                reason="missing_api_key",
+            )
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                self._current_model = self.model
+                response = await client.post(
+                    OPENROUTER_API_URL,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://rewards.bing.com",
                     },
+                    json=self._request_payload(messages, self.model),
                 )
 
                 if response.status_code == 429:
                     # Quick retry once (5s) before fallback
-                    logger.info("AI rate limited, retrying in 5s...")
+                    self._emit(
+                        "warning",
+                        f"Model {self.model} bị rate limit, thử lại sau 5 giây.",
+                        active=True,
+                        model=self.model,
+                        reason="rate_limited",
+                    )
                     await asyncio.sleep(5)
                     response = await client.post(
                         OPENROUTER_API_URL,
@@ -126,65 +254,54 @@ class AIAgent:
                             "Content-Type": "application/json",
                             "HTTP-Referer": "https://rewards.bing.com",
                         },
-                        json={
-                            "model": self.model,
-                            "messages": messages,
-                            "max_tokens": 300,
-                            "temperature": 0.1,
-                        },
+                        json=self._request_payload(messages, self.model),
                     )
 
                     if response.status_code == 429:
-                        # Smart rotation: try last working model first
-                        ordered_fallbacks = list(self._fallback_models)
-                        if self._last_working_model and self._last_working_model in ordered_fallbacks:
-                            ordered_fallbacks.remove(self._last_working_model)
-                            ordered_fallbacks.insert(0, self._last_working_model)
-
-                        for fb_model in ordered_fallbacks:
-                            if fb_model == self.model:
-                                continue
-                            logger.info(f"Trying fallback model: {fb_model}")
-                            await asyncio.sleep(2)
-                            try:
-                                response = await client.post(
-                                    OPENROUTER_API_URL,
-                                    headers={
-                                        "Authorization": f"Bearer {self.api_key}",
-                                        "Content-Type": "application/json",
-                                        "HTTP-Referer": "https://rewards.bing.com",
-                                    },
-                                    json={
-                                        "model": fb_model,
-                                        "messages": messages,
-                                        "max_tokens": 300,
-                                        "temperature": 0.1,
-                                    },
-                                )
-                                if response.status_code == 200:
-                                    try:
-                                        fb_data = response.json()
-                                        fb_content = fb_data.get("choices", [{}])[0].get("message", {}).get("content")
-                                        if fb_content and fb_content.strip():
-                                            self._last_working_model = fb_model
-                                            break
-                                        else:
-                                            logger.info(f"Model {fb_model} returned empty content, trying next")
-                                            continue
-                                    except Exception:
-                                        continue
-                            except Exception:
-                                pass
-                            await asyncio.sleep(2)
+                        fallback_response = await self._try_fallback_models(
+                            client,
+                            messages,
+                            exclude_model=self.model,
+                        )
+                        if fallback_response is not None:
+                            response = fallback_response
 
                 if response.status_code != 200:
-                    logger.warning(f"AI API error {response.status_code}: {response.text[:100]}")
+                    if response.status_code not in (401, 402, 403):
+                        fallback_response = await self._try_fallback_models(
+                            client,
+                            messages,
+                            exclude_model=self._current_model,
+                        )
+                        if fallback_response is not None:
+                            response = fallback_response
+
+                if response.status_code != 200:
+                    self._emit(
+                        "warning",
+                        f"AI API lỗi {response.status_code}: {response.text[:100]}",
+                        active=False,
+                        model=self._current_model,
+                        status_code=response.status_code,
+                    )
                     if response.status_code in (401, 402, 403):
                         self.enabled = False
-                        logger.warning("AI agent disabled for this run due auth/billing error")
+                        self._emit(
+                            "warning",
+                            "AI bị tắt cho run này do lỗi auth/billing.",
+                            active=False,
+                            model=self._current_model,
+                            reason="auth_or_billing",
+                        )
                     elif response.status_code == 429:
                         self.enabled = False
-                        logger.warning("AI agent disabled for this run due persistent rate limiting")
+                        self._emit(
+                            "warning",
+                            "AI bị tắt cho run này do rate limit kéo dài.",
+                            active=False,
+                            model=self._current_model,
+                            reason="persistent_rate_limit",
+                        )
                     return None
 
                 data = response.json()
@@ -216,10 +333,22 @@ class AIAgent:
                 return action
 
         except json.JSONDecodeError as e:
-            logger.warning(f"AI returned invalid JSON: {e}")
+            self._emit(
+                "warning",
+                f"AI trả JSON không hợp lệ: {e}",
+                active=True,
+                model=self._current_model,
+                reason="invalid_json",
+            )
             return None
         except Exception as e:
-            logger.warning(f"AI call failed: {e}")
+            self._emit(
+                "warning",
+                f"AI call thất bại: {e}",
+                active=True,
+                model=self._current_model,
+                reason="call_failed",
+            )
             return None
 
     async def _get_page_snapshot(self, page: Page, max_text_len: int = 3000) -> str:
@@ -389,10 +518,25 @@ class AIAgent:
             Dict with {success, steps, actions}
         """
         if not self.enabled:
-            logger.debug("AI agent not enabled, skipping")
+            reason = "disabled_in_settings" if not self._settings_enabled else "missing_api_key"
+            self._emit(
+                "info",
+                "AI đang tắt nên bỏ qua fallback này.",
+                active=False,
+                model=self.model,
+                reason=reason,
+                task=self._short_task_label(task_description),
+            )
             return {"success": False, "steps": 0, "actions": []}
 
-        logger.info(f"🤖 AI Agent starting: {task_description[:60]}...")
+        task_label = self._short_task_label(task_description)
+        self._emit(
+            "info",
+            f"Bắt đầu xử lý: {task_label}",
+            active=True,
+            model=self.model,
+            task=task_label,
+        )
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -421,7 +565,14 @@ class AIAgent:
                 # Call LLM
                 action = await self._call_llm(messages)
                 if action is None:
-                    logger.warning("AI returned no action, stopping")
+                    self._emit(
+                        "warning",
+                        "Model không trả action hợp lệ, dừng fallback AI.",
+                        active=False,
+                        model=self._current_model,
+                        task=task_label,
+                        reason="no_action",
+                    )
                     break
 
                 # Record action in conversation
@@ -432,20 +583,57 @@ class AIAgent:
 
                 result["steps"] = step + 1
                 result["actions"].append(action)
+                action_name = action.get("action", "unknown")
+                reason = action.get("reason", "")
+                self._emit(
+                    "info",
+                    f"Bước {step + 1}/{self._max_steps}: {action_name}"
+                    + (f" - {reason}" if reason else ""),
+                    active=True,
+                    model=self._current_model,
+                    task=task_label,
+                    step=step + 1,
+                    action=action_name,
+                )
 
                 # Check if done
                 if action.get("action") == "done":
                     result["success"] = True
-                    logger.info(f"✅ AI Agent completed in {step + 1} steps: {action.get('reason', '')}")
+                    self._emit(
+                        "info",
+                        f"Hoàn tất sau {step + 1} bước.",
+                        active=False,
+                        model=self._current_model,
+                        task=task_label,
+                        steps=step + 1,
+                    )
                     break
 
                 if action.get("action") == "skip":
-                    logger.info(f"⏭️ AI Agent skipped: {action.get('reason', '')}")
+                    self._emit(
+                        "info",
+                        f"Bỏ qua: {action.get('reason', '') or 'không xử lý được'}",
+                        active=False,
+                        model=self._current_model,
+                        task=task_label,
+                        steps=step + 1,
+                        reason="skip",
+                    )
                     break
 
                 # Execute action
                 success = await self._execute_action(page, action)
                 if not success:
+                    self._emit(
+                        "warning",
+                        f"Action '{action_name}' thất bại, sẽ thử cách khác.",
+                        active=True,
+                        model=self._current_model,
+                        task=task_label,
+                        step=step + 1,
+                        action=action_name,
+                        reason="action_failed",
+                    )
                     # Tell AI the action failed
                     messages.append({
                         "role": "user",
@@ -456,11 +644,26 @@ class AIAgent:
                 await asyncio.sleep(random.uniform(0.5, 1.5))
 
             except Exception as e:
-                logger.debug(f"AI step {step + 1} error: {e}")
+                self._emit(
+                    "warning",
+                    f"Lỗi ở bước {step + 1}: {e}",
+                    active=True,
+                    model=self._current_model,
+                    task=task_label,
+                    step=step + 1,
+                    reason="step_error",
+                )
                 continue
 
         if not result["success"] and result["steps"] >= self._max_steps:
-            logger.warning(f"AI Agent reached max steps ({self._max_steps})")
+            self._emit(
+                "warning",
+                f"Chạm giới hạn {self._max_steps} bước.",
+                active=False,
+                model=self._current_model,
+                task=task_label,
+                reason="max_steps",
+            )
 
         return result
 

@@ -6,6 +6,7 @@ Streak automation for Microsoft Rewards.
 """
 
 import asyncio
+import json
 import random
 import re
 from typing import Optional
@@ -52,6 +53,67 @@ class TaskDetector:
     """Reads Rewards dashboard API to detect incomplete tasks."""
 
     @staticmethod
+    def _emit_debug(debug_log, level: str, message: str) -> None:
+        """Send optional diagnostics to the dashboard log without breaking callers."""
+        if debug_log:
+            try:
+                debug_log(level, message)
+                return
+            except Exception as e:
+                logger.debug(f"Debug callback failed: {e}")
+
+        if level == "warning":
+            logger.warning(message)
+        elif level == "debug":
+            logger.debug(message)
+        else:
+            logger.info(message)
+
+    @staticmethod
+    def _summarize_edge_promo(promo: dict) -> dict:
+        """Keep raw Edge-related promo diagnostics compact and predictable."""
+        attributes = promo.get("attributes", {}) or {}
+        return {
+            "title": promo.get("title", ""),
+            "name": promo.get("name", ""),
+            "offerId": promo.get("offerId", ""),
+            "hash": promo.get("hash", ""),
+            "destinationUrl": promo.get("destinationUrl", ""),
+            "complete": promo.get("complete", False),
+            "pointProgress": promo.get("pointProgress", 0),
+            "pointProgressMax": promo.get("pointProgressMax", 0),
+            "attributesType": attributes.get("type", ""),
+        }
+
+    @staticmethod
+    def _looks_like_edge_promo(promo: dict) -> bool:
+        """Capture promos that mention Edge even if the streak heuristic misses them."""
+        haystack = " ".join([
+            promo.get("title", "") or "",
+            promo.get("name", "") or "",
+            promo.get("destinationUrl", "") or "",
+        ]).lower()
+        return "edge" in haystack
+
+    @staticmethod
+    def _extract_edge_card_excerpt(page_text: str) -> str:
+        """Pull a small excerpt around the first Edge-related line from rendered DOM text."""
+        if not page_text:
+            return ""
+
+        lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+        for idx, line in enumerate(lines):
+            lowered = line.lower()
+            if "edge" in lowered and (
+                "brows" in lowered or "streak" in lowered or "minute" in lowered
+            ):
+                start = max(0, idx - 2)
+                end = min(len(lines), idx + 3)
+                excerpt = " | ".join(lines[start:end])
+                return excerpt[:500]
+        return ""
+
+    @staticmethod
     def _parse_card_progress(page_text: str) -> dict[str, tuple[int, int] | None]:
         """Extract streak and daily-set progress from rendered card text."""
         if not page_text:
@@ -85,7 +147,13 @@ class TaskDetector:
         }
 
     @staticmethod
-    async def get_all_tasks(page: Page) -> dict:
+    async def get_all_tasks(
+        page: Page,
+        *,
+        edge_debug_label: str = "",
+        debug_log=None,
+        include_edge_diagnostics: bool = False,
+    ) -> dict:
         """
         Fetch complete task status from Rewards API.
 
@@ -97,6 +165,9 @@ class TaskDetector:
             - total_points: int
             - level: str
         """
+        if edge_debug_label:
+            include_edge_diagnostics = True
+
         result = {
             "searches": {
                 "pc_current": 0, "pc_max": 0,
@@ -106,7 +177,17 @@ class TaskDetector:
             "daily_set": {"completed": 0, "total": 0},
             "streaks": {
                 "bing_app": {"current": 0, "done": False},
-                "edge": {"minutes": 0, "target": 30, "done": False},
+                "edge": {
+                    "minutes": 0,
+                    "target": 30,
+                    "done": False,
+                    "offerId": "",
+                    "hash": "",
+                    "name": "",
+                    "destinationUrl": "",
+                    "debugPromos": [],
+                    "domSnapshots": [],
+                },
             },
             "more_activities": {"completed": 0, "total": 0},
             "total_points": 0,
@@ -177,7 +258,11 @@ class TaskDetector:
                 # Detect streak tasks
                 title = (promo.get("title", "") or promo.get("name", "")).lower()
                 attributes = promo.get("attributes", {})
-                promo_type = attributes.get("type", "")
+
+                if TaskDetector._looks_like_edge_promo(promo):
+                    result["streaks"]["edge"]["debugPromos"].append(
+                        TaskDetector._summarize_edge_promo(promo)
+                    )
 
                 # Bing App Streak
                 if "bing" in title and ("app" in title or "streak" in title or "check" in title):
@@ -219,10 +304,15 @@ class TaskDetector:
                     and result["streaks"]["bing_app"]["current"] == 0
                 )
             )
-            if need_dom_progress:
-                pages_to_probe = [page.url]
-                if "https://rewards.bing.com/earn" not in pages_to_probe:
-                    pages_to_probe.append("https://rewards.bing.com/earn")
+            if need_dom_progress or include_edge_diagnostics:
+                pages_to_probe = []
+                for rewards_url in [
+                    page.url,
+                    "https://rewards.bing.com/pointsbreakdown",
+                    "https://rewards.bing.com/earn",
+                ]:
+                    if rewards_url not in pages_to_probe:
+                        pages_to_probe.append(rewards_url)
 
                 for rewards_url in pages_to_probe:
                     try:
@@ -238,6 +328,22 @@ class TaskDetector:
                         continue
 
                     card_progress = TaskDetector._parse_card_progress(page_text)
+                    edge_excerpt = TaskDetector._extract_edge_card_excerpt(page_text)
+
+                    if include_edge_diagnostics:
+                        edge_progress = card_progress.get("edge")
+                        edge_progress_payload = (
+                            {
+                                "minutes": edge_progress[0],
+                                "target": edge_progress[1],
+                            }
+                            if edge_progress else None
+                        )
+                        result["streaks"]["edge"]["domSnapshots"].append({
+                            "url": rewards_url,
+                            "progress": edge_progress_payload,
+                            "excerpt": edge_excerpt,
+                        })
 
                     daily_set_progress = card_progress.get("daily_set")
                     if daily_set_progress:
@@ -285,6 +391,39 @@ class TaskDetector:
                         )
                     ):
                         break
+
+            if include_edge_diagnostics:
+                label = edge_debug_label or "snapshot"
+                edge_state = result["streaks"]["edge"]
+                promos_json = json.dumps(
+                    edge_state.get("debugPromos", []),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                TaskDetector._emit_debug(
+                    debug_log,
+                    "info",
+                    f"[EdgeDiag:{label}] API edge promos: {promos_json}",
+                )
+                TaskDetector._emit_debug(
+                    debug_log,
+                    "info",
+                    f"[EdgeDiag:{label}] Edge state: "
+                    f"minutes={edge_state.get('minutes', 0)}/"
+                    f"{edge_state.get('target', 30)}, "
+                    f"done={edge_state.get('done', False)}, "
+                    f"offerId='{edge_state.get('offerId', '')}', "
+                    f"hash='{edge_state.get('hash', '')}', "
+                    f"destinationUrl='{edge_state.get('destinationUrl', '')}'",
+                )
+                for snapshot in edge_state.get("domSnapshots", []):
+                    excerpt = snapshot.get("excerpt", "") or "<no edge card excerpt>"
+                    TaskDetector._emit_debug(
+                        debug_log,
+                        "info",
+                        f"[EdgeDiag:{label}] DOM {snapshot.get('url')}: "
+                        f"progress={snapshot.get('progress')}, excerpt={excerpt}",
+                    )
 
             logger.info(
                 f"Tasks detected — PC: {result['searches']['pc_current']}/{result['searches']['pc_max']}, "

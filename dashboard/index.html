@@ -123,6 +123,31 @@
           </div>
           <p id="schInfo" style="font-size:11px;color:var(--text-3);margin-top:8px"></p>
         </div>
+        <div class="ctrl-card ai-card">
+          <h3>🤖 AI Runtime</h3>
+          <div class="ai-grid">
+            <div class="ai-metric">
+              <span class="ai-label">Trạng thái</span>
+              <strong id="aiStateText">Tắt</strong>
+            </div>
+            <div class="ai-metric">
+              <span class="ai-label">Cấu hình</span>
+              <strong id="aiConfigText">Chưa có key</strong>
+            </div>
+            <div class="ai-metric ai-metric-wide">
+              <span class="ai-label">Model</span>
+              <strong id="aiModelText">—</strong>
+            </div>
+          </div>
+          <div class="ai-runtime-box">
+            <div class="ai-runtime-head">
+              <span>Event gần nhất</span>
+              <span id="aiUpdateText">—</span>
+            </div>
+            <p id="aiEventText">AI chưa được gọi trong phiên này.</p>
+            <p id="aiTaskText" class="ai-task">Chưa có task AI.</p>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -134,6 +159,7 @@
           <button class="log-filter" onclick="setLogFilter('info',this)">Info</button>
           <button class="log-filter" onclick="setLogFilter('warning',this)">Warning</button>
           <button class="log-filter" onclick="setLogFilter('error',this)">Error</button>
+          <button class="log-filter" onclick="setLogFilter('ai',this)">AI</button>
         </div>
         <button onclick="clearLogs()" class="btn btn-ghost btn-sm">Xóa log</button>
       </div>
@@ -164,7 +190,7 @@
       </div>
       <div class="settings-card">
         <h3>AI Agent</h3>
-        <div class="toggle-row"><div class="toggle-info"><h4>Kích hoạt AI</h4><p>Fallback AI cho flow phức tạp</p></div><div id="tAI" onclick="tog(this)" class="toggle on"></div></div>
+        <div class="toggle-row"><div class="toggle-info"><h4>Kích hoạt AI</h4><p>Fallback AI cho flow phức tạp</p></div><div id="tAI" onclick="tog(this)" class="toggle"></div></div>
         <div class="field"><label class="label">API Key</label><input id="sAIKey" type="password" placeholder="sk-or-v1-..." class="input"></div>
         <div class="field">
           <label class="label">Model</label>
@@ -227,12 +253,32 @@ function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
 function setHTML(id,v){const e=document.getElementById(id);if(e)e.innerHTML=v}
 function maskEmail(v){if(!v)return"—";const p=v.split("@");return p.length!==2?v:`${p[0].length>4?p[0].slice(0,4)+"**":p[0]}@${p[1]}`}
 function formatTime(v){if(!v)return"—";const n=String(v).replace("T"," ").trim().split(" ");return n.length>1?n[1].slice(0,8):n[0].slice(0,8)}
+function formatDateTime(v){if(!v)return"—";const d=new Date(v);if(Number.isNaN(d.getTime()))return formatTime(v);return d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}
 function humanizeTask(t){return{all:"Chạy tất cả",bootstrap:"Khởi tạo",searches:"Tìm kiếm",daily:"Daily Set",punch:"Punch Cards",promos:"Promos"}[t]||t||"Sẵn sàng"}
 function renderStatus(s){
     if(s==="running")return'<span class="badge-status badge-running"><span class="dot"></span>Đang chạy</span>';
     if(s==="error")return'<span class="badge-status badge-error"><span class="dot"></span>Lỗi</span>';
     return'<span class="badge-status badge-idle"><span class="dot"></span>Sẵn sàng</span>';
 }
+function renderAIState(ai){
+    if(!ai||!ai.enabled)return"Đang tắt";
+    if(ai.active)return"Đang chạy";
+    if(ai.configured)return"Sẵn sàng";
+    return"Thiếu key";
+}
+function renderAIConfig(ai){
+    if(!ai||!ai.enabled)return"Chưa bật";
+    return ai.configured?"Sẵn sàng":"Chưa có key";
+}
+function renderAIStatus(ai={}){
+    setText("aiStateText",renderAIState(ai));
+    setText("aiConfigText",renderAIConfig(ai));
+    setText("aiModelText",ai.model||"—");
+    setText("aiUpdateText",formatDateTime(ai.last_update));
+    setText("aiEventText",ai.last_event||"AI chưa được gọi trong phiên này.");
+    setText("aiTaskText",ai.task?`Task: ${ai.task}`:"Chưa có task AI.");
+}
+function isAILogMessage(msg){return String(msg||"").includes("[AI]")}
 
 // ═══ API ═══
 async function apiJSON(url,o={}){const r=await fetch(url,o);let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw new Error(d.error||"Thất bại");return d}
@@ -245,6 +291,7 @@ async function tick(){
         setText("stAccounts",String(s.accounts_count||0));
         setText("stLastRun",s.last_run?formatTime(s.last_run):"—");
         setHTML("stStatus",renderStatus(s.status));
+        renderAIStatus(s.ai||{});
         const running=s.status==="running";
         document.querySelectorAll("[data-run='1']").forEach(b=>b.disabled=running);
         const pc=document.getElementById("progCard");
@@ -272,9 +319,15 @@ function appendLogs(logs){
     if(!box.querySelector(".log-line"))box.innerHTML="";
     logs.forEach(l=>{
         const r=document.createElement("div");
-        r.className="log-line";
+        const aiLine=isAILogMessage(l.message);
+        r.className=`log-line${aiLine?" ai":""}`;
         r.dataset.level=l.level;
-        if(currentFilter!=="all"&&l.level!==currentFilter)r.style.display="none";
+        r.dataset.ai=aiLine?"1":"0";
+        if(currentFilter==="ai"){
+            r.style.display=aiLine?"":"none";
+        }else if(currentFilter!=="all"&&l.level!==currentFilter){
+            r.style.display="none";
+        }
         r.innerHTML=`<span class="log-time">${l.time}</span><span class="log-lvl ${l.level==="error"?"error":l.level==="warning"?"warning":"info"}">${l.level}</span><span class="log-msg">${l.message}</span>`;
         box.appendChild(r);
     });
@@ -286,6 +339,10 @@ function setLogFilter(f,btn){
     document.querySelectorAll(".log-filter").forEach(x=>x.classList.remove("active"));
     btn.classList.add("active");
     document.querySelectorAll(".log-line").forEach(l=>{
+        if(f==="ai"){
+            l.style.display=l.dataset.ai==="1"?"":"none";
+            return;
+        }
         l.style.display=(f==="all"||l.dataset.level===f)?"":"none";
     });
 }

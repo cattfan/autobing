@@ -604,6 +604,31 @@ class UniversalTaskScanner:
                     self._log("info", "  ⚠️ Daily Set task still not found on Rewards panel")
                     return True
 
+                if self.ai_agent and self.ai_agent.enabled:
+                    try:
+                        self._log("info", "  🤖 Trying AI Rewards-page fallback")
+                        ai_result = await self.ai_agent.complete_task_on_page(
+                            page,
+                            "On Microsoft Rewards, locate and complete this task if possible. "
+                            f"Title: {task.title}. "
+                            f"Description: {task.description}. "
+                            f"Category: {task.category}. "
+                            f"Points: {task.points or task.points_max}.",
+                        )
+                        if ai_result.get("success"):
+                            try:
+                                await page.goto(
+                                    REWARDS_URL,
+                                    wait_until="domcontentloaded",
+                                    timeout=15000,
+                                )
+                                await asyncio.sleep(2)
+                            except Exception:
+                                pass
+                            return True
+                    except Exception as e:
+                        logger.debug(f"AI Rewards-page fallback failed: {e}")
+
                 # Fallback: try destination URL directly (less reliable)
                 if task.destination_url:
                     self._log("info", f"  ⚠️ Could not find on page, trying direct URL")
@@ -643,6 +668,18 @@ class UniversalTaskScanner:
             elif "poll" in (task.title or "").lower() or task.task_type == "poll":
                 # Poll: click a random option
                 await self._complete_poll(working_page, task)
+            elif task.task_type == "unknown" and self.ai_agent and self.ai_agent.enabled:
+                self._log("info", "  🤖 Trying AI fallback on unknown activity")
+                ai_result = await self.ai_agent.complete_task_on_page(
+                    working_page,
+                    "Complete this Microsoft Rewards activity. "
+                    f"Title: {task.title}. "
+                    f"Description: {task.description}. "
+                    "Use the current page context to finish the task or reach a completed state.",
+                )
+                if not ai_result.get("success"):
+                    self._log("info", "  ⚠️ AI could not finish unknown activity, falling back to visit flow")
+                    await self._complete_visit(working_page, task)
             else:
                 # URL reward / visit: just visit and interact
                 await self._complete_visit(working_page, task)

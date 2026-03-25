@@ -57,6 +57,15 @@ state = {
     "accounts_count": 0,
     "total_points": 0,
     "master_password": "",      # No auth required
+    "ai": {
+        "enabled": False,
+        "configured": False,
+        "active": False,
+        "model": "",
+        "task": "",
+        "last_event": "",
+        "last_update": None,
+    },
 }
 
 LOG_MAX = 500
@@ -80,6 +89,44 @@ def add_log(level: str, message: str):
         logger.error(message)
     else:
         logger.info(message)
+
+
+def _snapshot_ai_state(settings: dict | None = None) -> dict:
+    """Merge configured AI settings with the live runtime snapshot."""
+    resolved = settings or load_settings()
+    ai_state = state.setdefault("ai", {})
+    ai_state["enabled"] = bool(resolved.get("ai_enabled", False))
+    ai_state["configured"] = bool(str(resolved.get("ai_api_key", "")).strip())
+    ai_state["model"] = str(resolved.get("ai_model", "")).strip()
+    ai_state.setdefault("active", False)
+    ai_state.setdefault("task", "")
+    ai_state.setdefault("last_event", "")
+    ai_state.setdefault("last_update", None)
+    return dict(ai_state)
+
+
+def _update_ai_state(
+    *,
+    settings: dict | None = None,
+    active: bool | None = None,
+    model: str | None = None,
+    task: str | None = None,
+    event: str | None = None,
+):
+    """Update the runtime AI state so the dashboard can show live activity."""
+    ai_state = state.setdefault("ai", {})
+    snapshot = _snapshot_ai_state(settings)
+    ai_state.update(snapshot)
+
+    if active is not None:
+        ai_state["active"] = bool(active)
+    if model:
+        ai_state["model"] = model
+    if task is not None:
+        ai_state["task"] = task
+    if event is not None:
+        ai_state["last_event"] = event
+        ai_state["last_update"] = datetime.now().isoformat(timespec="seconds")
 
 
 def _storage_state_path(email: str) -> Path:
@@ -256,6 +303,7 @@ def get_accounts():
             for a in accounts
             for storage_state in [_storage_state_path(a["email"])]
         ]
+        state["accounts_count"] = len(safe)
         return jsonify({"accounts": safe})
     except FileNotFoundError:
         return jsonify({"accounts": []})
@@ -293,6 +341,7 @@ def add_account():
 
         accounts.append(account)
         save_encrypted_accounts(accounts, state["master_password"])
+        state["accounts_count"] = len(accounts)
         add_log("info", f"Account added: {email[:5]}***")
         return jsonify({"status": "ok"})
     except Exception as e:
@@ -307,6 +356,7 @@ def delete_account(email):
         accounts = load_encrypted_accounts(state["master_password"])
         accounts = [a for a in accounts if a["email"] != email]
         save_encrypted_accounts(accounts, state["master_password"])
+        state["accounts_count"] = len(accounts)
         storage_state = _storage_state_path(email)
         if storage_state.exists():
             storage_state.unlink()
@@ -353,6 +403,7 @@ def update_settings():
             settings[key] = value
 
     save_settings(settings)
+    _snapshot_ai_state(settings)
     add_log("info", "Settings updated")
     return jsonify({"status": "ok"})
 
@@ -398,6 +449,7 @@ def stop_bot():
 @app.route("/api/status", methods=["GET"])
 def get_status():
     """Get current bot status."""
+    ai_state = _snapshot_ai_state()
     return jsonify({
         "status": state["status"],
         "current_account": state["current_account"],
@@ -406,6 +458,8 @@ def get_status():
         "progress_total": state["progress_total"],
         "last_run": state["last_run"],
         "total_points": state["total_points"],
+        "accounts_count": state["accounts_count"],
+        "ai": ai_state,
     })
 
 
@@ -446,6 +500,84 @@ async def _collect_final_verification(page, searcher, humanizer, settings) -> di
         logger.debug(f"Final task verification scan failed: {e}")
 
     return snapshot
+
+
+def _edge_streak_is_complete(tasks: dict | None) -> bool:
+    """Treat Edge streak completion consistently across immediate and delayed checks."""
+    edge = (tasks or {}).get("streaks", {}).get("edge", {})
+    target = edge.get("target", 30) or 30
+    minutes = edge.get("minutes", 0)
+    return bool(edge.get("done") or (target > 0 and minutes >= target))
+
+
+async def _collect_edge_streak_diagnostics(
+    *,
+    browser_settings: dict,
+    email: str,
+    account: dict,
+    login_mgr,
+    session_proxy: dict | None,
+    storage_state_path: Path,
+    label: str,
+) -> dict | None:
+    """Open a fresh Rewards session and dump raw Edge promo/card state."""
+    from src.browser import BrowserManager
+
+    add_log("info", f"🧪 Edge diagnostics snapshot: {label}")
+    bm_diag = None
+    try:
+        bm_diag = BrowserManager(browser_settings)
+        bm_diag.set_account(email)
+        attach_runtime = False
+        diag_cdp_url = ""
+        if bool(browser_settings.get("native_edge_runtime_enabled", True)):
+            try:
+                diag_cdp_url = await bm_diag.start_native_edge_runtime(email)
+                attach_runtime = True
+            except Exception as diag_runtime_error:
+                add_log(
+                    "debug",
+                    f"[EdgeDiag:{label}] Native runtime unavailable: {diag_runtime_error}",
+                )
+        if not attach_runtime:
+            await bm_diag.start()
+
+        ctx_diag, page_diag = await _open_account_context(
+            bm_diag,
+            login_mgr,
+            account,
+            session_proxy,
+            "desktop",
+            storage_state_path,
+            attach_existing_edge=attach_runtime,
+            attached_cdp_url=diag_cdp_url if attach_runtime else "",
+        )
+
+        if not await login_mgr.is_logged_in(page_diag):
+            page_diag = await login_mgr.login(
+                page_diag,
+                email,
+                account["password"],
+                account.get("totp_secret"),
+            )
+
+        snapshot = await TaskDetector().get_all_tasks(
+            page_diag,
+            edge_debug_label=label,
+            debug_log=add_log,
+            include_edge_diagnostics=True,
+        )
+        await _persist_storage_state(ctx_diag, storage_state_path)
+        return snapshot
+    except Exception as e:
+        add_log("warning", f"⚠️ Edge diagnostic snapshot '{label}' failed: {e}")
+        return None
+    finally:
+        if bm_diag is not None:
+            try:
+                await bm_diag.close()
+            except Exception:
+                pass
 
 
 def _describe_remaining_items(snapshot: dict) -> list[str]:
@@ -596,6 +728,18 @@ async def _run_bot_async(task: str, password: str):
     settings = load_settings()
     accounts = load_encrypted_accounts(password)
     overall_complete = True
+    state["accounts_count"] = len(accounts)
+    _snapshot_ai_state(settings)
+    _update_ai_state(
+        settings=settings,
+        active=False,
+        task="",
+        event=(
+            "AI sẵn sàng cho fallback."
+            if bool(settings.get("ai_enabled", False)) and bool(settings.get("ai_api_key"))
+            else "AI đang tắt hoặc chưa có API key."
+        ),
+    )
 
     humanizer = Humanizer(
         delay_min=settings.get("delay_min", 3),
@@ -734,10 +878,27 @@ async def _run_bot_async(task: str, password: str):
                 # ══ Universal Task Scanner (Daily Set + Punch Cards + Quests + Promos) ══
                 if task in ("all", "daily", "punch", "promos"):
                     state["current_task"] = "All Tasks (Smart Scanner)"
-                    ai = AIAgent(settings)
+                    def _on_ai_event(level: str, message: str, meta: dict | None = None):
+                        meta = meta or {}
+                        _update_ai_state(
+                            settings=settings,
+                            active=meta.get("active"),
+                            model=meta.get("model"),
+                            task=meta.get("task"),
+                            event=message,
+                        )
+                        add_log(level, f"[AI] {message}")
+
+                    ai = AIAgent(settings, on_event=_on_ai_event)
                     add_log("info", "🧠 Smart Task Scanner starting...")
                     if ai.enabled:
                         add_log("info", "🤖 AI Agent enabled for complex tasks")
+                    else:
+                        _update_ai_state(
+                            settings=settings,
+                            active=False,
+                            event="AI chưa được dùng trong run này.",
+                        )
 
                     scanner = UniversalTaskScanner(
                         humanizer=humanizer,
@@ -748,6 +909,11 @@ async def _run_bot_async(task: str, password: str):
                     )
                     scan_result = await scanner.scan_and_complete(
                         page, account_email=email,
+                    )
+                    _update_ai_state(
+                        settings=settings,
+                        active=False,
+                        event="Smart Scanner đã hoàn tất.",
                     )
                     add_log("info",
                             f"🧠 Smart Scanner: {scan_result['completed']}/{scan_result['total']} completed, "
@@ -1232,7 +1398,12 @@ async def _run_bot_async(task: str, password: str):
                             )
 
                         task_detector = TaskDetector()
-                        tasks = await task_detector.get_all_tasks(page_s)
+                        tasks = await task_detector.get_all_tasks(
+                            page_s,
+                            edge_debug_label="pre-native",
+                            debug_log=add_log,
+                            include_edge_diagnostics=True,
+                        )
                         edge_info = tasks.get("streaks", {}).get("edge", {})
 
                         # Check if Edge Streak promo exists in API at all
@@ -1297,7 +1468,12 @@ async def _run_bot_async(task: str, password: str):
                                 """, offer_id)
                                 add_log("info", f"   API: {json.dumps(api_result)}")
                                 await asyncio.sleep(5)
-                                t2 = await task_detector.get_all_tasks(page_s)
+                                t2 = await task_detector.get_all_tasks(
+                                    page_s,
+                                    edge_debug_label="post-api-credit",
+                                    debug_log=add_log,
+                                    include_edge_diagnostics=True,
+                                )
                                 e2 = t2.get("streaks", {}).get("edge", {})
                                 if e2.get("done") or e2.get("minutes", 0) >= e2.get("target", 30):
                                     add_log("info", "✅ Edge Streak credited via API!")
@@ -1315,7 +1491,12 @@ async def _run_bot_async(task: str, password: str):
                                     await asyncio.sleep(5)
                                     await page_s.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
                                     await asyncio.sleep(3)
-                                    t3 = await task_detector.get_all_tasks(page_s)
+                                    t3 = await task_detector.get_all_tasks(
+                                        page_s,
+                                        edge_debug_label="post-card-click",
+                                        debug_log=add_log,
+                                        include_edge_diagnostics=True,
+                                    )
                                     e3 = t3.get("streaks", {}).get("edge", {})
                                     if e3.get("done") or e3.get("minutes", 0) >= e3.get("target", 30):
                                         add_log("info", "✅ Edge Streak credited via card!")
@@ -1369,6 +1550,12 @@ async def _run_bot_async(task: str, password: str):
                                             add_log("info", f"   ✅ Card activated on {act_url}")
                                             if isinstance(clicked, str) and clicked.startswith("http"):
                                                 activation_url = clicked
+                                            await task_detector.get_all_tasks(
+                                                page_s,
+                                                edge_debug_label=f"post-activation:{act_url}",
+                                                debug_log=add_log,
+                                                include_edge_diagnostics=True,
+                                            )
                                             await asyncio.sleep(3)
                                             break
                                     except Exception:
@@ -1396,7 +1583,42 @@ async def _run_bot_async(task: str, password: str):
                                     target_minutes=30,
                                     on_progress=_on_native_streak,
                                     start_url=start_url,
+                                    diagnostic_log=add_log,
                                 )
+                                add_log("info", "Native Edge browsing session completed (30+ min)")
+                                post_native_tasks = await _collect_edge_streak_diagnostics(
+                                    browser_settings=edge_runtime_settings,
+                                    email=email,
+                                    account=account,
+                                    login_mgr=login_mgr,
+                                    session_proxy=session_proxy,
+                                    storage_state_path=storage_state_path,
+                                    label="post-native-immediate",
+                                )
+
+                                if not _edge_streak_is_complete(post_native_tasks):
+                                    try:
+                                        delay_seconds = max(
+                                            0,
+                                            int(settings.get("edge_streak_verify_delay_seconds", 600)),
+                                        )
+                                    except (TypeError, ValueError):
+                                        delay_seconds = 600
+                                    if delay_seconds > 0:
+                                        add_log(
+                                            "info",
+                                            f"Waiting {delay_seconds // 60} min for delayed Edge verification...",
+                                        )
+                                        await asyncio.sleep(delay_seconds)
+                                        post_native_tasks = await _collect_edge_streak_diagnostics(
+                                            browser_settings=edge_runtime_settings,
+                                            email=email,
+                                            account=account,
+                                            login_mgr=login_mgr,
+                                            session_proxy=session_proxy,
+                                            storage_state_path=storage_state_path,
+                                            label="post-native-delayed",
+                                        )
                                 add_log("info", "✅ Native Edge browsing session completed (30+ min)")
 
                         if bm_streak is not None:
