@@ -3,6 +3,7 @@ Quiz solver for Microsoft Rewards quizzes.
 Handles: This or That, Polls, Lightspeed Quiz, Supersonic, Warpspeed.
 """
 
+from __future__ import annotations
 import asyncio
 import random
 

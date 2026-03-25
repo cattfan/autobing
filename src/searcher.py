@@ -6,6 +6,7 @@ Bing search automation with advanced anti-detection patterns.
 - Referrer chain simulation
 """
 
+from __future__ import annotations
 import asyncio
 import random
 import re
@@ -197,7 +198,7 @@ class Searcher:
         page: Page,
         count: int,
         mode: str = "desktop",
-        credit_probe_fn: callable | None = None,
+        credit_probe_fn: Optional[Callable] = None,
     ) -> dict:
         """Perform searches with variable timing and patterns.
         

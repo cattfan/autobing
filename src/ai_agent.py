@@ -10,6 +10,7 @@ Uses LLM to intelligently navigate and complete rewards tasks:
 Supports any OpenRouter model (DeepSeek, Gemini, GPT, Claude, Llama...)
 """
 
+from __future__ import annotations
 import asyncio
 import json
 import random

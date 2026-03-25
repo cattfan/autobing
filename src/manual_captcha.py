@@ -6,6 +6,7 @@ notifies the user, and waits for the challenge to be solved manually
 in the open browser window before resuming.
 """
 
+from __future__ import annotations
 import asyncio
 from datetime import datetime
 from pathlib import Path

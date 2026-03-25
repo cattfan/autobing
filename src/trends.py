@@ -2,6 +2,7 @@
 Google Trends RSS + Vietnamese query generation with typo simulation.
 """
 
+from __future__ import annotations
 import random
 import re
 import xml.etree.ElementTree as ET

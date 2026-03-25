@@ -9,6 +9,7 @@ Usage:
     python main.py --auto    # Auto-run all tasks (for scheduled execution)
 """
 
+from __future__ import annotations
 import asyncio
 import sys
 import json

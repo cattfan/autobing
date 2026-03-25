@@ -4,6 +4,7 @@ Based on TheNetsky/Microsoft-Rewards-Script v3 selectors & flow.
 Handles 15+ login states: email, password, 2FA, passkey, KMSI, locked, etc.
 """
 
+from __future__ import annotations
 import asyncio
 from typing import Optional
 from enum import Enum

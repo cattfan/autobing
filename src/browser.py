@@ -6,6 +6,7 @@ Playwright browser management with advanced stealth and fingerprint spoofing.
 - playwright-stealth integration
 """
 
+from __future__ import annotations
 import os
 import random
 import json

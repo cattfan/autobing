@@ -12,6 +12,7 @@ This is the ONLY task handler needed — Daily Set, Punch Cards,
 Quests, Promotions are ALL handled here.
 """
 
+from __future__ import annotations
 import asyncio
 import json
 import random

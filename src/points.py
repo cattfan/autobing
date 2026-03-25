@@ -2,6 +2,7 @@
 Points tracker, CSV logging, graph generation, auto-redeem, and streak protection.
 """
 
+from __future__ import annotations
 import csv
 import asyncio
 import re

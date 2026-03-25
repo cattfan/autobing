@@ -6,6 +6,7 @@ This module launches Edge as a normal process, finds the real address bar
 control via UI Automation, and navigates with real window interaction.
 """
 
+from __future__ import annotations
 import asyncio
 import ctypes
 import ctypes.wintypes

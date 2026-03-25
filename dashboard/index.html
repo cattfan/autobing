@@ -49,11 +49,7 @@
         <h2 id="pageTitle">Tài khoản</h2>
         <span id="stStatus"></span>
       </div>
-      <div class="topbar-stats">
-        <div class="stat"><div class="stat-label">Tổng điểm</div><div class="stat-value" style="color:var(--green)" id="stPoints">—</div></div>
-        <div class="stat"><div class="stat-label">Tài khoản</div><div class="stat-value" id="stAccounts">—</div></div>
-        <div class="stat"><div class="stat-label">Lần chạy</div><div class="stat-value" style="font-size:13px;color:var(--text-2)" id="stLastRun">—</div></div>
-      </div>
+
     </div>
 
     <!-- ═══ Page: Accounts ═══ -->
@@ -287,9 +283,6 @@ async function apiJSON(url,o={}){const r=await fetch(url,o);let d={};try{d=await
 async function tick(){
     try{
         const s=await apiJSON(`${API}/api/status`);
-        setText("stPoints",s.total_points?s.total_points.toLocaleString():"—");
-        setText("stAccounts",String(s.accounts_count||0));
-        setText("stLastRun",s.last_run?formatTime(s.last_run):"—");
         setHTML("stStatus",renderStatus(s.status));
         renderAIStatus(s.ai||{});
         const running=s.status==="running";
@@ -352,7 +345,6 @@ async function loadAccounts(){
     try{
         const r=await apiJSON(`${API}/api/accounts`);
         const a=r.accounts||[];
-        setText("stAccounts",String(a.length));
         setText("navBadge",String(a.length));
         const t=document.getElementById("accTable");
         if(!a.length){t.innerHTML='<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text-4)">Chưa có tài khoản</td></tr>';return}

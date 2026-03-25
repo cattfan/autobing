@@ -3,6 +3,7 @@ Flask Web Dashboard — Full GUI for Rewards Search Automator.
 Provides API endpoints for accounts, settings, running tasks, logs, and status.
 """
 
+from __future__ import annotations
 import os
 import json
 import random
@@ -56,6 +57,7 @@ state = {
     "last_run": None,
     "accounts_count": 0,
     "total_points": 0,
+    "account_points": {},       # {email: points} — persisted per-account
     "master_password": "",      # No auth required
     "ai": {
         "enabled": False,
@@ -294,6 +296,7 @@ def get_accounts():
                 "has_totp": bool(a.get("totp_secret")),
                 "has_proxy": bool(a.get("proxy")),
                 "has_session": storage_state.exists(),
+                "points": state["account_points"].get(a["email"], 0),
                 "session_updated": (
                     datetime.fromtimestamp(storage_state.stat().st_mtime).strftime("%H:%M:%S")
                     if storage_state.exists()
@@ -606,10 +609,6 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
     daily_total = daily_set.get("total", 0)
     if daily_total > 0 and daily_done < daily_total:
         remaining.append(f"Daily Set {daily_done}/{daily_total}")
-
-    bing_app = task_overview.get("streaks", {}).get("bing_app", {})
-    if not bing_app.get("done", False):
-        remaining.append(f"Mobile App Check-in {bing_app.get('current', 0)}/1")
 
     edge_streak = task_overview.get("streaks", {}).get("edge", {})
     edge_minutes = edge_streak.get("minutes", 0)
@@ -924,6 +923,7 @@ async def _run_bot_async(task: str, password: str):
                 try:
                     points_info = await points_tracker.read_points(page)
                     state["total_points"] = points_info.get("total_points", 0)
+                    state["account_points"][email] = state["total_points"]
                     add_log("info", f"💰 Points: {state['total_points']:,}")
                 except Exception:
                     pass
@@ -1688,40 +1688,6 @@ async def _run_bot_async(task: str, password: str):
                     await bm_verify.close()
                 except Exception as e:
                     add_log("warning", f"⚠️ Verification error: {e}")
-
-            # ── Bing App Streak ──
-            if task == "all":
-                add_log("info", "🔥 Bing App Streak check-in...")
-                state["current_task"] = "Bing App Streak"
-                try:
-                    import random as _rng
-                    bing_app_settings = dict(settings)
-                    bing_app_settings["use_stealth"] = False
-                    bm_app = BrowserManager(bing_app_settings)
-                    bm_app.set_account(email)
-                    await bm_app.start()
-                    bing_app_ua = _rng.choice(BingAppStreak.BING_APP_UA)
-                    ctx_app, page_app = await _open_account_context(
-                        bm_app,
-                        login_mgr,
-                        account,
-                        session_proxy,
-                        "mobile",
-                        storage_state_path,
-                        user_agent=bing_app_ua,
-                        use_persistent_profile=False,
-                    )
-
-                    bing_streak = BingAppStreak(humanizer)
-                    success = await bing_streak.check_in(page_app)
-                    if success:
-                        add_log("info", "✅ Bing App Streak check-in done")
-                    else:
-                        add_log("warning", "⚠️ Bing App Streak check-in may have failed")
-                    await _persist_storage_state(ctx_app, storage_state_path)
-                    await bm_app.close()
-                except Exception as e:
-                    add_log("warning", f"⚠️ Bing App Streak error: {e}")
 
             # Edge Browsing Streak is already handled above in the Edge Session block
             # (lines 573-600) — no duplicate needed

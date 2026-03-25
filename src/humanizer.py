@@ -7,6 +7,7 @@ Human-like behavior simulation for stealth automation.
 - Natural scroll patterns (deceleration)
 """
 
+from __future__ import annotations
 import random
 import math
 import asyncio

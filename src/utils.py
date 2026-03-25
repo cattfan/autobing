@@ -2,6 +2,7 @@
 Utility functions and retry logic for the Rewards Search Automator.
 """
 
+from __future__ import annotations
 import asyncio
 import json
 import os

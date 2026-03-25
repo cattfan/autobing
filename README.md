@@ -2,84 +2,92 @@
 
 Automated Microsoft Rewards farming bot — **Python + Playwright**.
 
-## ⚡ Quick Install
+## ⚡ Cài đặt
 
-### Windows (recommended)
+### Windows
 ```
-1. Install Python 3.10+ from python.org (check "Add to PATH")
+1. Cài Python 3.10+ từ python.org (tick "Add to PATH")
 2. Double-click setup.bat
-3. Done!
+3. Xong!
 ```
 
-### Manual
+### Thủ công
 ```bash
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-## 🚀 Usage
+## 🚀 Cách chạy
 
-| Command | Description |
-|---------|-------------|
-| `python main.py` | Interactive CLI menu |
-| `python main.py --web` | Web Dashboard at `localhost:8080` |
-| `python main.py --auto` | Auto-run all tasks (for scheduler) |
+| File | Mô tả |
+|------|-------|
+| `start_web.bat` | Mở Web Dashboard tại `localhost:8080` |
+| `start_cmd.bat` | Chạy trực tiếp trong CMD (menu CLI) |
 
-### First Time
-1. Run `python main.py --web`
-2. Open `http://localhost:8080`
-3. Click ⚙️ **Cài đặt** → **Thêm tài khoản** → add your Microsoft account
-4. Click **Chạy tất cả** to start!
+### Command line
+| Lệnh | Mô tả |
+|-------|-------|
+| `python main.py` | Web Dashboard (mặc định) |
+| `python main.py --cli` | Menu CLI tương tác |
+| `python main.py --auto` | Chạy tự động tất cả (dùng cho lập lịch) |
 
-## ✨ Features
+### Lần đầu
+1. Chạy `start_web.bat`
+2. Browser tự mở `http://localhost:8080`
+3. Click ⚙️ **Cài đặt** → **Thêm tài khoản** → thêm tài khoản Microsoft
+4. Click **Chạy tất cả** để bắt đầu!
 
-| Category | Details |
-|----------|---------|
-| 🔎 **Search** | Desktop, Mobile (CDP emulation), Edge — auto-calculated from API |
-| 🎯 **Tasks** | Daily Set, Punch Cards, Promotions, Quizzes (6 types) |
+## ✨ Tính năng
+
+| Nhóm | Chi tiết |
+|------|----------|
+| 🔎 **Tìm kiếm** | Desktop, Mobile (CDP emulation), Edge — tự tính từ API |
+| 🎯 **Nhiệm vụ** | Daily Set, Punch Cards, Promotions, Quizzes (6 loại) |
+| 🌐 **Edge Streak** | Duyệt Edge 30 phút/ngày — native Win32 (SendInput) |
 | 🛡️ **Stealth** | playwright-stealth, fingerprint spoofing, Edge UA |
-| 🧠 **Smart** | Google Trends queries, retry with backoff, credit probe |
-| 💰 **Points** | CSV logging, auto-redeem, streak protection |
-| 📩 **Notify** | Discord webhook + Telegram bot |
-| ⏰ **Schedule** | Windows Task Scheduler integration |
-| 🔐 **Security** | Fernet encrypted credentials, master password |
-| 🌐 **Dashboard** | Web UI at `localhost:8080` with settings drawer |
-| 🤖 **AI** | OpenRouter AI fallback for complex tasks |
+| 🧠 **Thông minh** | Google Trends queries, retry tự động, credit probe |
+| 💰 **Điểm** | CSV logging, auto-redeem, bảo vệ streak |
+| 📩 **Thông báo** | Discord webhook + Telegram bot |
+| ⏰ **Lập lịch** | Windows Task Scheduler |
+| 🌐 **Dashboard** | Web UI tại `localhost:8080` |
+| 🤖 **AI** | OpenRouter AI fallback cho task phức tạp |
 
-## 📂 Structure
+## 📂 Cấu trúc
 
 ```
-rewards-bot/
+autofarmbing/
 ├── main.py                 # Entry point
-├── setup.bat               # One-click Windows installer
-├── requirements.txt        # Python dependencies
+├── start_web.bat           # Chạy Web Dashboard
+├── start_cmd.bat           # Chạy CLI trong CMD
+├── setup.bat               # Cài đặt tự động
+├── requirements.txt        # Dependencies
 ├── config/
-│   ├── accounts.example.json   # Account template
-│   ├── settings.json           # Bot settings (auto-created)
-│   └── search_topics.txt       # Fallback search keywords
+│   ├── accounts.json.enc   # Tài khoản (tự tạo)
+│   ├── settings.json       # Cài đặt (tự tạo)
+│   └── search_topics.txt   # Từ khóa tìm kiếm fallback
 ├── dashboard/
-│   ├── index.html              # Web dashboard
-│   └── style.css               # Dashboard styling
-├── src/                        # Core modules (22 files)
-└── data/                       # Runtime data (auto-created)
+│   ├── index.html          # Web dashboard
+│   └── style.css           # Dashboard styling
+├── src/                    # Core modules
+└── data/                   # Runtime data (tự tạo)
 ```
 
-## ⚙️ Settings
+## ⚙️ Cài đặt
 
-All settings are managed via the web dashboard (⚙️ button). Key options:
+Tất cả cài đặt qua Web Dashboard (⚙️). Các tuỳ chọn chính:
 
-| Setting | Default | Notes |
-|---------|---------|-------|
-| Headless | `false` | Hide browser window |
-| Stealth | `true` | Anti-detection |
-| Google Trends | `true` | Real trending queries |
-| Block Images | `true` | Faster page loads |
-| Streak Protection | `true` | Monitor daily streaks |
+| Cài đặt | Mặc định | Ghi chú |
+|----------|----------|---------|
+| Chạy ẩn (Headless) | `false` | Ẩn cửa sổ browser |
+| Stealth | `true` | Chống phát hiện |
+| Google Trends | `true` | Dùng từ khóa trending thật |
+| Chặn hình ảnh | `true` | Tải trang nhanh hơn |
+| Bảo vệ streak | `true` | Giám sát streak hàng ngày |
 | AI Agent | `true` | OpenRouter fallback |
-| Auto Redeem | `false` | Auto-redeem points |
+| Tự đổi thưởng | `false` | Tự động đổi điểm |
 
 ## ⚠️ Disclaimer
 
-This project is for **educational purposes only**. Automating Microsoft Rewards
-may violate their Terms of Service and could result in account suspension.
-Use at your own risk.
+Dự án này chỉ dùng cho mục đích **học tập**. Tự động hoá Microsoft Rewards
+có thể vi phạm Điều khoản Dịch vụ và có thể bị khoá tài khoản.
+Sử dụng tự chịu rủi ro.
