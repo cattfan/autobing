@@ -120,16 +120,41 @@ class TaskDetector:
         if not page_text:
             return {"daily_set": None, "edge": None, "bing_app": None}
 
+        # Edge Browsing Streak — try multiple patterns
+        # Pattern 1: "Edge ... Minutes: X / Y"
         edge_match = re.search(
             r"Edge(?:\s+Browsing(?:\s+Streak)?)?.*?Minutes:\s*(\d+)\s*/\s*(\d+)",
             page_text,
             re.IGNORECASE | re.DOTALL,
         )
+        # Pattern 2: "Edge ... Activity: X/Y" or "Edge ... Activity: X / Y"
+        if not edge_match:
+            edge_match = re.search(
+                r"Edge(?:\s+Browsing(?:\s+Streak)?)?.*?Activit(?:y|ies):\s*(\d+)\s*/\s*(\d+)",
+                page_text,
+                re.IGNORECASE | re.DOTALL,
+            )
+        # Pattern 3: "Edge Browsing Streak" followed by generic X/Y digits
+        if not edge_match:
+            edge_match = re.search(
+                r"Edge\s+Browsing\s+Streak.*?(\d+)\s*/\s*(\d+)",
+                page_text,
+                re.IGNORECASE | re.DOTALL,
+            )
+
         bing_app_match = re.search(
             r"(?:Mobile\s+App|Bing\s+App(?:\s+Streak)?).*?Check-?in:\s*(\d+)\s*/\s*(\d+)",
             page_text,
             re.IGNORECASE | re.DOTALL,
         )
+        # Bing App fallback: "Bing App ... Activity: X/Y"
+        if not bing_app_match:
+            bing_app_match = re.search(
+                r"(?:Mobile\s+App|Bing\s+App(?:\s+Streak)?).*?Activit(?:y|ies):\s*(\d+)\s*/\s*(\d+)",
+                page_text,
+                re.IGNORECASE | re.DOTALL,
+            )
+
         daily_set_match = re.search(
             r"Daily\s+Set(?:\s+Streak)?.*?Activit(?:y|ies):\s*(\d+)\s*/\s*(\d+)",
             page_text,
@@ -292,6 +317,37 @@ class TaskDetector:
                         f"attributes={attributes}, "
                         f"destUrl='{promo.get('destinationUrl', '')}'"
                     )
+
+            # New Rewards UI sometimes puts streak promos inside dailySetPromotions,
+            # punchCards, or other sections. Scan them if we haven't found Edge yet.
+            if not result["streaks"]["edge"]["done"] and result["streaks"]["edge"]["minutes"] == 0:
+                # Scan daily set items for streak promos
+                all_daily_items = []
+                for _ds_key, _ds_items in dashboard.get("dailySetPromotions", {}).items():
+                    if isinstance(_ds_items, list):
+                        all_daily_items.extend(_ds_items)
+                # Scan punch card children too
+                for pc in dashboard.get("punchCards", []):
+                    for child in pc.get("childPromotions", []):
+                        all_daily_items.append(child)
+
+                for promo in all_daily_items:
+                    title = (promo.get("title", "") or promo.get("name", "")).lower()
+                    if "edge" in title and ("brows" in title or "streak" in title):
+                        progress = promo.get("pointProgress", 0)
+                        max_progress = promo.get("pointProgressMax", 1)
+                        result["streaks"]["edge"]["minutes"] = progress
+                        result["streaks"]["edge"]["target"] = max_progress if max_progress > 0 else 30
+                        result["streaks"]["edge"]["done"] = progress >= max_progress or promo.get("complete", False)
+                        result["streaks"]["edge"]["offerId"] = promo.get("offerId", "")
+                        result["streaks"]["edge"]["hash"] = promo.get("hash", "")
+                        result["streaks"]["edge"]["name"] = promo.get("name", "")
+                        result["streaks"]["edge"]["destinationUrl"] = promo.get("destinationUrl", "")
+                        logger.info(
+                            f"Edge Streak found in dailySetPromotions/punchCards: "
+                            f"progress={progress}/{max_progress}"
+                        )
+                        break
 
             # New Rewards UI exposes some progress only in rendered cards.
             need_dom_progress = (

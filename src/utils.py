@@ -207,26 +207,31 @@ async def close_other_tabs(page) -> int:
     Returns number of tabs closed.
     """
     try:
+        # Guard: if the page itself is already closed, skip cleanup entirely
+        if page.is_closed():
+            logger.debug("close_other_tabs: active page already closed, skipping")
+            return 0
+
         context = page.context
         pages = context.pages
         closed = 0
-        preserve_external_tabs = bool(
-            getattr(context, "_codex_preserve_external_tabs", False)
-        )
         for p in pages:
-            if p != page:
-                if preserve_external_tabs and not getattr(p, "_codex_owned", False):
-                    try:
-                        opener = await p.opener()
-                    except Exception:
-                        opener = None
-                    if opener is None or not getattr(opener, "_codex_owned", False):
-                        continue
-                try:
-                    await p.close()
-                    closed += 1
-                except Exception:
-                    pass
+            if p == page:
+                continue
+            # Never close the active page; skip pages that look like
+            # user-owned Edge tabs (about:blank, newtab, settings, etc.)
+            p_url = ""
+            try:
+                p_url = p.url or ""
+            except Exception:
+                pass
+            if p_url in ("about:blank", "chrome://newtab/", "edge://newtab/"):
+                continue
+            try:
+                await p.close()
+                closed += 1
+            except Exception:
+                pass
         if closed > 0:
             logger.info(f"🧹 Closed {closed} leftover tab(s)")
         return closed

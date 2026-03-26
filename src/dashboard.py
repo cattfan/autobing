@@ -148,6 +148,36 @@ async def _persist_storage_state(context, storage_state_path: Path | None) -> No
         logger.debug(f"Could not persist storage state {storage_state_path}: {e}")
 
 
+async def _ensure_page_alive(page, context, browser_mgr, add_log):
+    """Return a usable page, recovering if the current one died."""
+    try:
+        if not page.is_closed():
+            # Quick sanity check — try to read the URL
+            _ = page.url
+            return page
+    except Exception:
+        pass
+
+    add_log("warning", "⚠️ Active page died — recovering fresh page from context")
+    try:
+        # Try to reuse an existing live page in the context
+        for p in context.pages:
+            if not p.is_closed():
+                add_log("info", "♻️ Reusing existing live page")
+                return p
+    except Exception:
+        pass
+
+    # Create a brand-new page
+    try:
+        new_page = await browser_mgr.new_page(context)
+        add_log("info", "✅ Created new page after recovery")
+        return new_page
+    except Exception as e:
+        add_log("error", f"❌ Page recovery failed: {e}")
+        raise RuntimeError(f"Cannot recover page: {e}")
+
+
 async def _open_account_context(
     browser_mgr,
     login_mgr,
@@ -721,7 +751,7 @@ async def _run_bot_async(task: str, password: str):
     from src.notifier import Notifier
     from src.trends import TrendsManager
     from src.humanizer import Humanizer
-    from src.streaks import TaskDetector, BingAppStreak, EdgeBrowsingStreak
+    from src.streaks import TaskDetector, EdgeBrowsingStreak
     from src.manual_captcha import ManualCaptchaHandler
 
     settings = load_settings()
@@ -874,6 +904,9 @@ async def _run_bot_async(task: str, password: str):
                     else:
                         add_log("info", f"⏭️ Desktop searches already complete ({pc_done}/{pc_max})")
 
+                    # ── Page recovery after desktop searches ──
+                    page = await _ensure_page_alive(page, ctx, bm, add_log)
+
                 # ══ Universal Task Scanner (Daily Set + Punch Cards + Quests + Promos) ══
                 if task in ("all", "daily", "punch", "promos"):
                     state["current_task"] = "All Tasks (Smart Scanner)"
@@ -919,6 +952,9 @@ async def _run_bot_async(task: str, password: str):
                             f"{scan_result['skipped_locked']} locked, {scan_result['failed']} failed")
                     await close_other_tabs(page)
 
+                    # ── Page recovery after Smart Scanner ──
+                    page = await _ensure_page_alive(page, ctx, bm, add_log)
+
                 # Read points
                 try:
                     points_info = await points_tracker.read_points(page)
@@ -946,6 +982,9 @@ async def _run_bot_async(task: str, password: str):
                     add_log("info", f"⏭️ Mobile searches already complete ({mob_done}/{mob_max})")
                 else:
                     add_log("info", f"📱 Mobile — {mob_done}/{mob_max} pts ({mob_searches} searches needed)")
+
+                    # ── Page recovery before mobile searches ──
+                    page = await _ensure_page_alive(page, ctx, bm, add_log)
 
                     cdp_client = None
                     try:
@@ -1634,7 +1673,9 @@ async def _run_bot_async(task: str, password: str):
                         except Exception:
                             pass
                 except Exception as e:
-                    add_log("warning", f"⚠️ Edge session error: {e}")
+                    add_log("error", f"⚠️ Edge session error: {e}")
+                    import traceback
+                    add_log("error", f"Edge session traceback: {traceback.format_exc()[:800]}")
                     try:
                         await bm3.close()
                     except Exception:
