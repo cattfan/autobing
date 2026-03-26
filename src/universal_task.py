@@ -1034,36 +1034,40 @@ class UniversalTaskScanner:
     async def _complete_visit(self, page: Page, task: RewardsTask) -> None:
         """Complete a visit-type task: scroll, read, interact."""
         try:
-            reward_tracked_visit = False
+            # 1. Wait out any mandatory timers (some punch cards require ~10-15 seconds)
+            wait_time = random.uniform(12, 18) if task.category == "punch_card" else random.uniform(5, 10)
+            
+            # 2. Scroll to simulate reading while waiting
+            scroll_delay = wait_time / 3
+            await asyncio.sleep(scroll_delay)
             try:
-                reward_tracked_visit = (
-                    "bing.com/search" in page.url
-                    and "PUBL=RewardsDO" in page.url
-                    and "form=" in page.url
-                )
+                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
             except Exception:
-                reward_tracked_visit = False
-
-            # Preserve reward-tracked landing URLs. Re-submitting a new search can
-            # strip the tracking params before Rewards records completion.
-            if not reward_tracked_visit:
+                pass
+            await asyncio.sleep(scroll_delay)
+            try:
+                await page.evaluate('window.scrollTo(0, 0)')
+            except Exception:
+                pass
+            await asyncio.sleep(scroll_delay)
+            
+            # 3. Only do a forced search if it's explicitly a "search" task,
+            # NOT for "visit" punch cards. Doing a search on a visit task
+            # can navigate away from the promo URL before tracking fires.
+            if task.task_type == "search":
                 try:
                     searchbar = page.locator('#sb_form_q')
                     if await searchbar.count() > 0 and await searchbar.is_visible(timeout=3000):
                         await searchbar.click(timeout=3000)
-                        await searchbar.fill(task.title[:30])
+                        await searchbar.fill(task.title[:30] + " info")
                         await asyncio.sleep(1)
                         await page.keyboard.press("Enter")
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(4)
                 except Exception:
                     pass
 
-            # Scroll to simulate reading
-            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            await asyncio.sleep(random.uniform(1, 2))
-            await self.humanizer.simulate_reading(page, random.uniform(3, 8))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Visit completion soft-failed: {e}")
 
     async def _complete_poll(self, page: Page, task: RewardsTask) -> None:
         """Complete a poll: click a random option."""
