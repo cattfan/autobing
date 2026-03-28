@@ -6,7 +6,7 @@ echo  ======================================
 echo       Rewards Bot -- Web Dashboard
 echo  ======================================
 echo.
-echo  Dashboard: http://localhost:8080
+echo  Dashboard: http://localhost:23900
 echo  (Browser will open automatically)
 echo.
 python main.py

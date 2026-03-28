@@ -2,9 +2,15 @@
 Edge Streak via native Edge CDP connection with stealth JS injection.
 
 Microsoft blocks Edge telemetry when webdriver=true.
-This module launches Edge as a normal process, uses Win32 to push it to the background
-(HWND_BOTTOM) so it doesn't interrupt the user, and connects via Playwright CDP to
-inject JS stealth scripts (mocking visibilityState and hasFocus).
+This module launches Edge as a normal process using the BOT's profile directory
+(which already has Microsoft login cookies), uses Win32 to push it to the
+background (HWND_BOTTOM) so it doesn't interrupt the user, and connects via
+Playwright CDP to inject JS stealth scripts (mocking visibilityState and
+hasFocus).
+
+CRITICAL: The Edge instance MUST be logged into the Microsoft account for
+browsing minutes to count toward the streak. We use --user-data-dir to point
+to the bot's existing profile directory where login cookies are stored.
 """
 
 from __future__ import annotations
@@ -13,13 +19,14 @@ import ctypes
 import random
 import subprocess
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import urllib.request
 import json
 from playwright.async_api import async_playwright
 
-from src.utils import get_edge_executable_path, logger
+from src.utils import get_edge_executable_path, logger, DATA_DIR, PROFILES_DIR
 
 user32 = ctypes.windll.user32
 
@@ -50,25 +57,38 @@ BROWSE_URLS = [
 ]
 
 class NativeEdgeStreak:
-    """Handles the Edge Browsing Streak specifically by running MS Edge fully natively
-    via CDP connection. This hides 'webdriver=true' so Microsoft tracking thinks it's a
-    real user. We use Win32 to push Edge to the bottom of the screen stack so it
-    never interrupts the user, and inject JS stealth scripts to spoof visibility.
+    """Handles the Edge Browsing Streak specifically by running MS Edge fully
+    natively via CDP connection. This hides 'webdriver=true' so Microsoft
+    tracking thinks it's a real user. We use Win32 to push Edge to the bottom
+    of the screen stack so it never interrupts the user, and inject JS stealth
+    scripts to spoof visibility.
+
+    IMPORTANT: Must be initialized with account_email so we can use the correct
+    logged-in profile directory. Without this, Edge opens with default profile
+    and Microsoft doesn't know who is browsing → 0/30 minutes.
     """
 
-    def __init__(self):
+    def __init__(self, account_email: str = "", storage_state_path: Optional[Path] = None):
         self._edge_exe = get_edge_executable_path()
         self.edge_process: Optional[subprocess.Popen] = None
         self._edge_hwnd = None
         self._cdp_port = 9323
+        self._account_email = account_email
+        self._storage_state_path = storage_state_path
+        # Build the profile directory path matching browser.py's convention
+        if account_email:
+            safe_email = account_email.replace("@", "_at_").replace(".", "_")
+            self._profile_dir = DATA_DIR / "edge_runtime" / safe_email
+        else:
+            self._profile_dir = None
 
-    def _wait_for_cdp(self, timeout=10) -> Optional[str]:
+    def _wait_for_cdp(self, timeout=15) -> Optional[str]:
         """Poll the CDP endpoint until it responds or timeout."""
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
                 req = urllib.request.Request(f"http://127.0.0.1:{self._cdp_port}/json/version")
-                with urllib.request.urlopen(req) as response:
+                with urllib.request.urlopen(req, timeout=3) as response:
                     data = json.loads(response.read())
                     return data["webSocketDebuggerUrl"]
             except Exception:
@@ -109,7 +129,7 @@ class NativeEdgeStreak:
             logger.debug(f"taskkill msedge: {e}")
 
     async def _launch_edge(self, start_url: str = "https://www.bing.com") -> bool:
-        """Launch Edge natively with background telemetry flags and CDP."""
+        """Launch Edge natively with the BOT's profile (logged-in cookies)."""
         await self._kill_all_edge()
 
         args = [
@@ -122,18 +142,127 @@ class NativeEdgeStreak:
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
+            # CRITICAL: Suppress navigator.webdriver = true
+            "--disable-blink-features=AutomationControlled",
             f"--remote-debugging-port={self._cdp_port}",
-            start_url,
         ]
 
+        # CRITICAL: Use the bot's profile directory where login cookies exist
+        if self._profile_dir:
+            self._profile_dir.mkdir(parents=True, exist_ok=True)
+            args.append(f"--user-data-dir={self._profile_dir}")
+            logger.info(f"Using bot profile: {self._profile_dir.name}")
+        else:
+            logger.warning("No profile directory specified — Edge will use default profile (may not be logged in!)")
+
+        args.append(start_url)
+
         logger.info(f"Launching native Edge (CDP port {self._cdp_port})")
-        # CREATE_NO_WINDOW is not used here because Edge still needs a real window for rendering stealth properly
         self.edge_process = subprocess.Popen(args)
         
         # Give it a moment to initialize its GUI, then push to bottom
         await asyncio.sleep(3)
         self._push_edge_to_background()
         return True
+
+    async def _ensure_login(self, page) -> bool:
+        """Verify the Edge session is logged into Microsoft. 
+        If not, import cookies from storage_state and reload."""
+        try:
+            # Navigate to bing.com to check login status
+            await page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(2)
+
+            # Check if logged in by looking for the profile element
+            logged_in = await page.evaluate("""
+                () => {
+                    const profileEl = document.querySelector('#id_n');
+                    const signInEl = document.querySelector('#id_s, #id_l');
+                    if (profileEl) return true;
+                    if (signInEl) {
+                        const text = (signInEl.textContent || '').toLowerCase();
+                        return !text.includes('sign in') && !text.includes('đăng nhập');
+                    }
+                    return false;
+                }
+            """)
+
+            if logged_in:
+                logger.info("Edge session is logged in ✅")
+                return True
+
+            logger.warning("Edge session NOT logged in — importing cookies from storage state...")
+            
+            # Try to import cookies from the bot's storage state file
+            if self._storage_state_path and self._storage_state_path.exists():
+                try:
+                    with open(self._storage_state_path, "r", encoding="utf-8") as f:
+                        state_data = json.load(f)
+                    
+                    cookies = state_data.get("cookies", [])
+                    if cookies:
+                        # Convert Playwright cookies format to CDP format
+                        cdp_cookies = []
+                        for c in cookies:
+                            cdp_cookie = {
+                                "name": c["name"],
+                                "value": c["value"],
+                                "domain": c["domain"],
+                                "path": c.get("path", "/"),
+                            }
+                            if c.get("expires", -1) > 0:
+                                cdp_cookie["expires"] = c["expires"]
+                            if c.get("httpOnly"):
+                                cdp_cookie["httpOnly"] = True
+                            if c.get("secure"):
+                                cdp_cookie["secure"] = True
+                            if c.get("sameSite"):
+                                cdp_cookie["sameSite"] = c["sameSite"]
+                            cdp_cookies.append(cdp_cookie)
+
+                        await page.context.add_cookies(cdp_cookies)
+                        logger.info(f"Imported {len(cdp_cookies)} cookies into Edge streak session")
+                        
+                        # Reload to apply cookies
+                        await page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=15000)
+                        await asyncio.sleep(3)
+                        
+                        # Verify again
+                        logged_in_2 = await page.evaluate("""
+                            () => {
+                                const profileEl = document.querySelector('#id_n');
+                                return !!profileEl;
+                            }
+                        """)
+                        if logged_in_2:
+                            logger.info("Edge session logged in after cookie import ✅")
+                            return True
+                        else:
+                            logger.warning("Cookie import didn't establish login — trying login flow")
+                except Exception as e:
+                    logger.warning(f"Cookie import failed: {e}")
+
+            # Last resort: navigate to rewards login URL which may auto-login with existing cookies
+            try:
+                await page.goto(
+                    "https://login.live.com/login.srf?wa=wsignin1.0&wp=MBI_SSL&wreply=https://rewards.bing.com/",
+                    wait_until="domcontentloaded",
+                    timeout=20000,
+                )
+                await asyncio.sleep(5)
+                
+                if "rewards.bing.com" in page.url or "bing.com" in page.url:
+                    logger.info("Auto-login via redirect succeeded ✅")
+                    return True
+            except Exception as e:
+                logger.warning(f"Auto-login redirect failed: {e}")
+
+            logger.error("Could not establish login for Edge Streak — minutes may not count!")
+            return False
+
+        except Exception as e:
+            logger.warning(f"Login check failed: {e}")
+            return False
 
     async def browse(self, target_minutes: int, on_progress: Callable[[int, int], None], start_url: str = "https://www.bing.com", diagnostic_log=None):
         """Run the automated browsing loop over CDP with stealth mocks."""
@@ -165,21 +294,39 @@ class NativeEdgeStreak:
                 context = browser.contexts[0]
                 
                 # INJECT STEALTH SCRIPT TO TRICK TELEMETRY
-                # 1. Force visibilityState to 'visible'
-                # 2. Force document.hidden to false
-                # 3. Force document.hasFocus to true 
-                # 4. Suppress blur/mouseleave events
                 await context.add_init_script("""
+                    // 1. Force visibilityState to 'visible'
                     Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});
+                    // 2. Force document.hidden to false
                     Object.defineProperty(document, 'hidden', {get: () => false});
+                    // 3. Force document.hasFocus to true 
                     document.hasFocus = () => true;
+                    // 4. Suppress blur/mouseleave events
                     window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
                     window.addEventListener('blur', e => e.stopImmediatePropagation(), true);
                     window.addEventListener('mouseleave', e => e.stopImmediatePropagation(), true);
+                    // 5. Override navigator.webdriver (belt and suspenders)
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                 """)
                 logger.info("Stealth scripts injected for telemetry spoofing.")
                 
                 page = context.pages[0] if context.pages else await context.new_page()
+
+                # CRITICAL: Verify Edge is logged into Microsoft account
+                login_ok = await self._ensure_login(page)
+                if not login_ok:
+                    logger.warning("⚠️ Edge may not be logged in — streak minutes may not count!")
+
+                # Navigate to Rewards page first to activate telemetry tracking
+                try:
+                    await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                    await asyncio.sleep(3)
+                    logger.info("Visited rewards.bing.com to activate tracking")
+                except Exception:
+                    pass
+
+                # Reset start time (login/setup may have taken time)
+                start_time = time.time()
 
                 while True:
                     elapsed_min = int((time.time() - start_time) / 60)
@@ -198,6 +345,16 @@ class NativeEdgeStreak:
                     try:
                         logger.info(f"[Edge Native Streak] {elapsed_min}/{target_minutes} min - {next_url}")
                         await page.goto(next_url, wait_until="domcontentloaded", timeout=15000)
+                        
+                        # Re-inject stealth on each navigation (belt and suspenders)
+                        try:
+                            await page.evaluate("""
+                                Object.defineProperty(document, 'visibilityState', {get: () => 'visible', configurable: true});
+                                Object.defineProperty(document, 'hidden', {get: () => false, configurable: true});
+                                document.hasFocus = () => true;
+                            """)
+                        except Exception:
+                            pass
                         
                         # Read and scroll actively
                         read_time = random.uniform(60, 180)

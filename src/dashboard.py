@@ -1611,7 +1611,10 @@ async def _run_bot_async(task: str, password: str):
 
                                 state["progress"] = 0
                                 state["progress_total"] = 30
-                                native_streak = NativeEdgeStreak()
+                                native_streak = NativeEdgeStreak(
+                                    account_email=email,
+                                    storage_state_path=storage_state_path,
+                                )
 
                                 def _on_native_streak(done, total):
                                     state["progress"] = min(done, total)
