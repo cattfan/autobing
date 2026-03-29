@@ -714,22 +714,29 @@ class Searcher:
     async def get_search_points_status(self, page: Page) -> dict:
         """Read search points via in-page fetch (same as Rewards page JS does)."""
         try:
-            # Visit Rewards page first (natural navigation)
-            current_url = page.url
-            if "rewards.bing.com" not in current_url:
-                await page.goto(
-                    "https://rewards.bing.com/",
-                    wait_until="domcontentloaded", timeout=15000,
-                )
-                await asyncio.sleep(2)
-            else:
+            # Always navigate explicitly to rewards.bing.com for a clean context
+            max_nav_retries = 3
+            for nav_attempt in range(max_nav_retries):
                 try:
-                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
-                except Exception:
-                    pass
+                    await page.goto(
+                        "https://rewards.bing.com/",
+                        wait_until="domcontentloaded", timeout=20000,
+                    )
+                    await asyncio.sleep(3)
+                    # Verify we're on the right page
+                    if "rewards.bing.com" in page.url:
+                        break
+                except Exception as nav_err:
+                    logger.debug(
+                        f"Rewards nav attempt {nav_attempt + 1}/{max_nav_retries} failed: {nav_err}"
+                    )
+                    if nav_attempt < max_nav_retries - 1:
+                        await asyncio.sleep(2)
+                    else:
+                        raise
 
             data = None
-            for attempt in range(2):
+            for attempt in range(3):
                 try:
                     # Fetch API from within the page context (like the page's own JS)
                     data = await page.evaluate("""
@@ -743,20 +750,24 @@ class Searcher:
                             } catch(e) { return null; }
                         }
                     """)
-                    break
+                    if data:
+                        break
                 except Exception as exc:
-                    if (
-                        attempt == 0
-                        and "Execution context was destroyed" in str(exc)
+                    if attempt < 2 and (
+                        "Execution context was destroyed" in str(exc)
+                        or "navigat" in str(exc).lower()
                     ):
+                        logger.debug(
+                            f"API fetch attempt {attempt + 1}/3 failed: {exc}, retrying..."
+                        )
                         try:
                             await page.wait_for_load_state(
                                 "domcontentloaded",
-                                timeout=5000,
+                                timeout=8000,
                             )
                         except Exception:
                             pass
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(2)
                         continue
                     raise
 

@@ -31,10 +31,14 @@ from src.utils import get_edge_executable_path, logger, DATA_DIR, PROFILES_DIR
 user32 = ctypes.windll.user32
 
 HWND_BOTTOM = 1
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
+SWP_SHOWWINDOW = 0x0040
 SW_SHOWNOACTIVATE = 4
+SW_RESTORE = 9
 
 # Bing pages to browse (must be bing.com for telemetry tracking)
 BROWSE_URLS = [
@@ -95,28 +99,80 @@ class NativeEdgeStreak:
                 time.sleep(1)
         return None
 
-    def _push_edge_to_background(self):
-        """Find the launched Edge window and push it to the bottom Z-order."""
+    def _position_edge_corner(self):
+        """Position Edge as a small window at the bottom-right corner of the screen.
+        
+        CRITICAL: Do NOT use HWND_BOTTOM. Microsoft Edge telemetry uses native Win32
+        focus signals to track browsing time. Pushing Edge to HWND_BOTTOM causes the
+        timer to stop counting. Instead, we keep Edge in normal Z-order but make it
+        small and position it at the screen corner so it's non-intrusive.
+        """
         if not self.edge_process:
             return
 
+        # Wait a moment for Edge windows to appear
+        import time as _time
+        max_wait = 8
+        start = _time.time()
         hwnds = []
-        def callback(hwnd, extra):
-            pid = ctypes.c_ulong(0)
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value == self.edge_process.pid and user32.IsWindowVisible(hwnd):
-                hwnds.append(hwnd)
-            return True
+        while _time.time() - start < max_wait:
+            hwnds = []
+            def callback(hwnd, extra):
+                pid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value == self.edge_process.pid and user32.IsWindowVisible(hwnd):
+                    hwnds.append(hwnd)
+                return True
+            user32.EnumWindows(
+                ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)(callback), 0
+            )
+            if hwnds:
+                break
+            _time.sleep(0.5)
 
-        user32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)(callback), 0)
+        if not hwnds:
+            logger.warning("Could not find Edge window to reposition")
+            return
+
+        self._edge_hwnd = hwnds[0]
+
+        # Get screen dimensions
+        screen_w = user32.GetSystemMetrics(0)  # SM_CXSCREEN
+        screen_h = user32.GetSystemMetrics(1)  # SM_CYSCREEN
+
+        # Small window at bottom-right corner (non-intrusive but still "visible" to OS)
+        win_w = 500
+        win_h = 400
+        pos_x = screen_w - win_w - 10
+        pos_y = screen_h - win_h - 50  # 50px above taskbar
+
+        # Restore window if minimized and reposition
+        user32.ShowWindow(self._edge_hwnd, SW_RESTORE)
+        # Place at corner WITHOUT SWP_NOACTIVATE — let it be "active" 
+        user32.SetWindowPos(
+            self._edge_hwnd, HWND_NOTOPMOST,
+            pos_x, pos_y, win_w, win_h,
+            SWP_SHOWWINDOW,
+        )
+        logger.info(
+            f"Edge window positioned at bottom-right corner ({pos_x},{pos_y} {win_w}x{win_h}) — "
+            f"staying in normal Z-order for telemetry tracking."
+        )
+
+    def _pulse_edge_focus(self):
+        """Briefly bring Edge window to foreground to refresh telemetry tracking.
         
-        if hwnds:
-            self._edge_hwnd = hwnds[0]
-            # Push to bottom immediately without stealing focus
-            user32.SetWindowPos(self._edge_hwnd, HWND_BOTTOM, 0, 0, 0, 0, 
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-            user32.ShowWindow(self._edge_hwnd, SW_SHOWNOACTIVATE)
-            logger.info("Edge window successfully moved to non-intrusive HWND_BOTTOM.")
+        Microsoft telemetry may stop counting if Edge loses foreground status.
+        This method brings Edge briefly to foreground then releases it.
+        """
+        if not self._edge_hwnd:
+            return
+        try:
+            # Restore and bring to foreground
+            user32.ShowWindow(self._edge_hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(self._edge_hwnd)
+        except Exception:
+            pass
 
     async def _kill_all_edge(self):
         """Ensure no lingering instances prevent our clean launch."""
@@ -135,7 +191,7 @@ class NativeEdgeStreak:
         args = [
             self._edge_exe,
             "--no-first-run",
-            "--window-size=900,700",
+            "--window-size=500,400",
             "--hide-crash-restore-bubble",
             "--disable-session-crashed-bubble",
             "--disable-features=msEdgeSessionRestore",
@@ -162,7 +218,7 @@ class NativeEdgeStreak:
         
         # Give it a moment to initialize its GUI, then push to bottom
         await asyncio.sleep(3)
-        self._push_edge_to_background()
+        self._position_edge_corner()
         return True
 
     async def _ensure_login(self, page) -> bool:
@@ -327,6 +383,8 @@ class NativeEdgeStreak:
 
                 # Reset start time (login/setup may have taken time)
                 start_time = time.time()
+                last_focus_pulse = time.time()
+                FOCUS_PULSE_INTERVAL = 300  # Pulse focus every 5 minutes
 
                 while True:
                     elapsed_min = int((time.time() - start_time) / 60)
@@ -335,6 +393,12 @@ class NativeEdgeStreak:
 
                     if on_progress:
                         on_progress(elapsed_min, target_minutes)
+
+                    # Periodic focus pulse to keep telemetry tracking
+                    if time.time() - last_focus_pulse >= FOCUS_PULSE_INTERVAL:
+                        self._pulse_edge_focus()
+                        last_focus_pulse = time.time()
+                        logger.debug(f"[Edge Streak] Focus pulse at {elapsed_min} min")
 
                     if not urls_pool:
                         urls_pool = list(BROWSE_URLS)
@@ -356,13 +420,26 @@ class NativeEdgeStreak:
                         except Exception:
                             pass
                         
-                        # Read and scroll actively
+                        # Read and scroll actively with mouse movements
                         read_time = random.uniform(60, 180)
                         scroll_interval = random.uniform(10, 20)
                         read_elapsed = 0
                         
                         while read_elapsed < read_time:
-                            await page.evaluate("window.scrollBy(0, 400)")
+                            # Scroll down
+                            try:
+                                await page.evaluate("window.scrollBy(0, 400)")
+                            except Exception:
+                                pass
+
+                            # Random mouse movement (makes browsing look natural)
+                            if random.random() < 0.4:
+                                try:
+                                    x = random.randint(50, 450)
+                                    y = random.randint(50, 350)
+                                    await page.mouse.move(x, y)
+                                except Exception:
+                                    pass
                             
                             wait_chunk = min(scroll_interval, read_time - read_elapsed)
                             await asyncio.sleep(wait_chunk)

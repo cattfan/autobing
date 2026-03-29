@@ -879,10 +879,20 @@ async def _run_bot_async(task: str, password: str):
                     # Desktop searches (API returns points, 3 points per search)
                     pc_done = status_before.get("pc_current", 0)
                     pc_max = status_before.get("pc_max", 0)
+
+                    # If API returned zeros, retry once after a short wait
+                    if pc_max == 0:
+                        add_log("info", "🔄 API returned 0, retrying credit check...")
+                        await asyncio.sleep(3)
+                        status_before = await searcher.get_search_points_status(page)
+                        pc_done = status_before.get("pc_current", 0)
+                        pc_max = status_before.get("pc_max", 0)
+
                     remaining_points = max(0, pc_max - pc_done)
                     # Convert points to search count (3 points per search)
                     remaining_desktop = (remaining_points + 2) // 3  # ceil division
                     if pc_max == 0:
+                        add_log("warning", "⚠️ Could not read search credits from API, using defaults")
                         remaining_desktop = settings.get("desktop_searches", 30)
 
                     if remaining_desktop > 0:
@@ -976,6 +986,7 @@ async def _run_bot_async(task: str, password: str):
                 mob_remaining_pts = max(0, mob_max - mob_done)
                 mob_searches = (mob_remaining_pts + 2) // 3  # ceil division (3 pts per search)
                 if mob_max == 0:
+                    add_log("warning", "⚠️ Could not read mobile credits from API, using defaults")
                     mob_searches = settings.get("mobile_searches", 20)
 
                 if mob_searches <= 0:
