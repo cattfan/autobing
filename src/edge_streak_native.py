@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import random
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -72,11 +73,23 @@ class NativeEdgeStreak:
     and Microsoft doesn't know who is browsing → 0/30 minutes.
     """
 
+    @staticmethod
+    def _find_available_port(start: int = 9323, end: int = 9399) -> int:
+        """Find an available TCP port for CDP to avoid conflicts."""
+        for port in range(start, end):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("127.0.0.1", port))
+                    return port
+                except OSError:
+                    continue
+        return start  # fallback
+
     def __init__(self, account_email: str = "", storage_state_path: Optional[Path] = None):
         self._edge_exe = get_edge_executable_path()
         self.edge_process: Optional[subprocess.Popen] = None
         self._edge_hwnd = None
-        self._cdp_port = 9323
+        self._cdp_port = self._find_available_port()  # Dynamic port allocation
         self._account_email = account_email
         self._storage_state_path = storage_state_path
         self._diagnostic_log = None  # Set by browse() for Web Dashboard logging
@@ -87,41 +100,67 @@ class NativeEdgeStreak:
         else:
             self._profile_dir = None
 
-    def _wait_for_cdp(self, timeout=15) -> Optional[str]:
-        """Poll the CDP endpoint until it responds or timeout."""
+    def _cdp_version_sync(self) -> Optional[str]:
+        """Blocking CDP version check (called from thread)."""
+        req = urllib.request.Request(f"http://127.0.0.1:{self._cdp_port}/json/version")
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read())
+            return data.get("webSocketDebuggerUrl")
+
+    async def _wait_for_cdp(self, timeout=15) -> Optional[str]:
+        """Poll CDP endpoint without blocking the event loop."""
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
-                req = urllib.request.Request(f"http://127.0.0.1:{self._cdp_port}/json/version")
-                with urllib.request.urlopen(req, timeout=3) as response:
-                    data = json.loads(response.read())
-                    return data["webSocketDebuggerUrl"]
+                ws_url = await asyncio.to_thread(self._cdp_version_sync)
+                if ws_url:
+                    return ws_url
             except Exception:
-                time.sleep(1)
+                pass
+            await asyncio.sleep(1)
         return None
 
+    def _get_edge_tree_pids(self) -> set:
+        """Get all PIDs in our Edge process tree (parent + children).
+        Edge spawns child processes (GPU, renderer) that own the visible windows."""
+        if not self.edge_process:
+            return set()
+        root_pid = self.edge_process.pid
+        pids = {root_pid}
+        try:
+            result = subprocess.run(
+                ["wmic", "process", "where", f"ParentProcessId={root_pid}",
+                 "get", "ProcessId"],
+                capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            for line in result.stdout.strip().split('\n')[1:]:
+                pid_str = line.strip()
+                if pid_str.isdigit():
+                    pids.add(int(pid_str))
+        except Exception:
+            pass
+        return pids
+
     def _position_edge_corner(self):
-        """Position Edge as a small window at the bottom-right corner of the screen.
-        
-        CRITICAL: Do NOT use HWND_BOTTOM. Microsoft Edge telemetry uses native Win32
-        focus signals to track browsing time. Pushing Edge to HWND_BOTTOM causes the
-        timer to stop counting. Instead, we keep Edge in normal Z-order but make it
-        small and position it at the screen corner so it's non-intrusive.
-        """
+        """Position Edge at bottom-right corner with normal Z-order for telemetry."""
         if not self.edge_process:
             return
 
-        # Wait a moment for Edge windows to appear
-        import time as _time
+        # Get all PIDs in our process tree (child processes own the windows)
+        tree_pids = self._get_edge_tree_pids()
+        if not tree_pids:
+            return
+
         max_wait = 8
-        start = _time.time()
+        start = time.time()
         hwnds = []
-        while _time.time() - start < max_wait:
+        while time.time() - start < max_wait:
             hwnds = []
             def callback(hwnd, extra):
                 pid = ctypes.c_ulong(0)
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value == self.edge_process.pid and user32.IsWindowVisible(hwnd):
+                if pid.value in tree_pids and user32.IsWindowVisible(hwnd):
                     hwnds.append(hwnd)
                 return True
             user32.EnumWindows(
@@ -129,7 +168,7 @@ class NativeEdgeStreak:
             )
             if hwnds:
                 break
-            _time.sleep(0.5)
+            time.sleep(0.5)
 
         if not hwnds:
             logger.warning("Could not find Edge window to reposition")
@@ -137,27 +176,21 @@ class NativeEdgeStreak:
 
         self._edge_hwnd = hwnds[0]
 
-        # Get screen dimensions
-        screen_w = user32.GetSystemMetrics(0)  # SM_CXSCREEN
-        screen_h = user32.GetSystemMetrics(1)  # SM_CYSCREEN
-
-        # Small window at bottom-right corner (non-intrusive but still "visible" to OS)
-        win_w = 500
-        win_h = 400
+        screen_w = user32.GetSystemMetrics(0)
+        screen_h = user32.GetSystemMetrics(1)
+        win_w, win_h = 500, 400
         pos_x = screen_w - win_w - 10
-        pos_y = screen_h - win_h - 50  # 50px above taskbar
+        pos_y = screen_h - win_h - 50
 
-        # Restore window if minimized and reposition
         user32.ShowWindow(self._edge_hwnd, SW_RESTORE)
-        # Place at corner WITHOUT SWP_NOACTIVATE — let it be "active" 
         user32.SetWindowPos(
             self._edge_hwnd, HWND_NOTOPMOST,
             pos_x, pos_y, win_w, win_h,
             SWP_SHOWWINDOW,
         )
         logger.info(
-            f"Edge window positioned at bottom-right corner ({pos_x},{pos_y} {win_w}x{win_h}) — "
-            f"staying in normal Z-order for telemetry tracking."
+            f"Edge window positioned at ({pos_x},{pos_y} {win_w}x{win_h}) — "
+            f"normal Z-order for telemetry."
         )
 
     def _pulse_edge_focus(self):
@@ -175,19 +208,25 @@ class NativeEdgeStreak:
         except Exception:
             pass
 
-    async def _kill_all_edge(self):
-        """Ensure no lingering instances prevent our clean launch."""
-        try:
-            logger.debug("Killing all existing msedge.exe processes...")
-            subprocess.run(["taskkill", "/f", "/im", "msedge.exe", "/t"], 
-                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            await asyncio.sleep(2)
-        except Exception as e:
-            logger.debug(f"taskkill msedge: {e}")
+    async def _cleanup_edge(self):
+        """Kill only our Edge process tree — never kills user's personal Edge windows."""
+        if self.edge_process and self.edge_process.poll() is None:
+            try:
+                logger.debug(f"Killing Edge process tree (PID {self.edge_process.pid})...")
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["taskkill", "/f", "/pid", str(self.edge_process.pid), "/t"],
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            except Exception as e:
+                logger.debug(f"taskkill edge tree: {e}")
+        self.edge_process = None
+        await asyncio.sleep(2)
 
     async def _launch_edge(self, start_url: str = "https://www.bing.com") -> bool:
         """Launch Edge natively with the BOT's profile (logged-in cookies)."""
-        await self._kill_all_edge()
+        await self._cleanup_edge()
 
         args = [
             self._edge_exe,
@@ -337,33 +376,44 @@ class NativeEdgeStreak:
             except Exception:
                 pass
 
-    async def _check_current_streak_progress(self, context) -> int:
-        """Silently query the Rewards API in a background tab to check current tracking progress.
-        
-        FIX #1: Uses rewards.bing.com directly (no bing.com navigation needed)
-        to minimize latency and network overhead.
-        """
-        progress_min = 0
-        bg_page = None
+    def _raw_api_request(self, url: str, cookie_header: str) -> Optional[dict]:
+        """Make raw HTTP GET with cookies. Runs in thread to avoid blocking."""
         try:
-            bg_page = await context.new_page()
-            # Navigate directly to rewards — cookies are shared across the context
-            await bg_page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=10000)
-            data = await bg_page.evaluate("""
-                async () => {
-                    try {
-                        const r = await fetch('/api/getuserinfo?type=1', {
-                            credentials: 'include',
-                            headers: {'Accept': 'application/json'}
-                        });
-                        return await r.json();
-                    } catch(e) { return null; }
-                }
-            """)
+            req = urllib.request.Request(url, headers={
+                "Cookie": cookie_header,
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0"
+                ),
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read())
+        except Exception:
+            return None
+
+    async def _check_current_streak_progress(self, context) -> int:
+        """Check streak progress via raw HTTP (no browser tab needed).
+        
+        Uses context.cookies() to extract auth cookies then makes a direct
+        HTTP request outside the browser. This avoids tab switching which
+        would disrupt stealth scripts and telemetry tracking.
+        """
+        try:
+            # Extract cookies from browser context (CDP command, no tab opened)
+            cookies = await context.cookies(["https://rewards.bing.com"])
+            cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+
+            # Raw HTTP request in background thread (non-blocking)
+            data = await asyncio.to_thread(
+                self._raw_api_request,
+                "https://rewards.bing.com/api/getuserinfo?type=1",
+                cookie_header,
+            )
+
             if data:
                 dashboard = data.get("dashboard", {})
                 
-                # Check promotions for edge streak
                 for _ds_key, _ds_items in dashboard.get("dailySetPromotions", {}).items():
                     if isinstance(_ds_items, list):
                         for item in _ds_items:
@@ -384,13 +434,7 @@ class NativeEdgeStreak:
 
         except Exception as e:
             logger.debug(f"Failed to check streak progress: {e}")
-        finally:
-            if bg_page:
-                try:
-                    await bg_page.close()
-                except Exception:
-                    pass
-        return progress_min
+        return 0
 
     async def _activate_edge_streak_card(self, page) -> bool:
         """Click the Edge Browsing Streak card on rewards.bing.com to activate tracking.
@@ -479,7 +523,7 @@ class NativeEdgeStreak:
                 self._log("error", "Failed to launch Edge Native")
                 return
                 
-            ws_url = self._wait_for_cdp(timeout=15)
+            ws_url = await self._wait_for_cdp(timeout=15)
             if not ws_url:
                 self._log("error", "Could not get CDP endpoint from native Edge. Aborting streak.")
                 if self.edge_process:
@@ -513,6 +557,9 @@ class NativeEdgeStreak:
                         window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
                         window.addEventListener('blur', e => e.stopImmediatePropagation(), true);
                         window.addEventListener('mouseleave', e => e.stopImmediatePropagation(), true);
+                        // Page Lifecycle API: block freeze/resume events
+                        window.addEventListener('freeze', e => e.stopImmediatePropagation(), true);
+                        window.addEventListener('resume', e => e.stopImmediatePropagation(), true);
                         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                     """)
                     self._log("info", "Stealth scripts injected for telemetry spoofing.")
@@ -630,7 +677,7 @@ class NativeEdgeStreak:
                     except subprocess.TimeoutExpired:
                         self.edge_process.kill()
                 self._edge_hwnd = None  # FIX #5: Clear stale HWND
-                await self._kill_all_edge()
+                await self._cleanup_edge()
                 
             if baseline_minutes >= target_minutes:
                 break
