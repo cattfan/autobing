@@ -361,7 +361,16 @@ class NativeEdgeStreak:
             return False
 
     def _log(self, level: str, message: str):
-        """Log to both logger and diagnostic_log callback (for Web Dashboard)."""
+        """Log to both logger and diagnostic_log callback (for Web Dashboard).
+        Avoids duplicates: if diagnostic_log is set, only use that (it internally logs too).
+        """
+        if self._diagnostic_log:
+            try:
+                self._diagnostic_log(level, message)
+                return  # diagnostic_log already logs to console
+            except Exception:
+                pass
+        # Fallback: direct logger
         if level == "warning":
             logger.warning(message)
         elif level == "debug":
@@ -370,71 +379,69 @@ class NativeEdgeStreak:
             logger.error(message)
         else:
             logger.info(message)
-        if self._diagnostic_log:
-            try:
-                self._diagnostic_log(level, message)
-            except Exception:
-                pass
 
-    def _raw_api_request(self, url: str, cookie_header: str) -> Optional[dict]:
-        """Make raw HTTP GET with cookies. Runs in thread to avoid blocking."""
-        try:
-            req = urllib.request.Request(url, headers={
-                "Cookie": cookie_header,
-                "Accept": "application/json",
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0"
-                ),
-            })
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read())
-        except Exception:
-            return None
-
-    async def _check_current_streak_progress(self, context) -> int:
-        """Check streak progress via raw HTTP (no browser tab needed).
+    async def _check_current_streak_progress(self, page) -> int:
+        """Check streak progress via DOM scraping on the CURRENT page.
         
-        Uses context.cookies() to extract auth cookies then makes a direct
-        HTTP request outside the browser. This avoids tab switching which
-        would disrupt stealth scripts and telemetry tracking.
+        The Rewards API (getuserinfo?type=1) does NOT contain Edge streak
+        minutes in pointProgress — it's always 0. The actual minutes are
+        only available in the rendered DOM of rewards.bing.com/earn.
+        
+        We navigate the main page to rewards.bing.com/earn, scrape the
+        progress text, then navigate back to continue browsing.
+        Returns -1 if unable to read progress (DOM not found).
         """
+        import re
         try:
-            # Extract cookies from browser context (CDP command, no tab opened)
-            cookies = await context.cookies(["https://rewards.bing.com"])
-            cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
-
-            # Raw HTTP request in background thread (non-blocking)
-            data = await asyncio.to_thread(
-                self._raw_api_request,
-                "https://rewards.bing.com/api/getuserinfo?type=1",
-                cookie_header,
+            # Save where we were
+            original_url = page.url
+            
+            # Navigate to the /earn page which contains Edge streak card
+            await page.goto(
+                "https://rewards.bing.com/earn",
+                wait_until="domcontentloaded",
+                timeout=12000,
             )
-
-            if data:
-                dashboard = data.get("dashboard", {})
-                
-                for _ds_key, _ds_items in dashboard.get("dailySetPromotions", {}).items():
-                    if isinstance(_ds_items, list):
-                        for item in _ds_items:
-                            title = (item.get("title", "") or item.get("name", "")).lower()
-                            if "edge" in title and ("brows" in title or "streak" in title or "minute" in title):
-                                return item.get("pointProgress", 0)
-                                
-                for promo in dashboard.get("morePromotions", []):
-                    title = (promo.get("title", "") or promo.get("name", "")).lower()
-                    if "edge" in title and ("brows" in title or "streak" in title or "minute" in title):
-                        return promo.get("pointProgress", 0)
-                        
-                for pc in dashboard.get("punchCards", []):
-                    for child in pc.get("childPromotions", []):
-                        title = (child.get("title", "") or child.get("name", "")).lower()
-                        if "edge" in title and ("brows" in title or "streak" in title or "minute" in title):
-                            return child.get("pointProgress", 0)
+            await asyncio.sleep(2)
+            
+            # Get the entire page text for regex parsing
+            page_text = await page.locator("body").inner_text(timeout=5000)
+            
+            # Use exact same regex patterns as TaskDetector._parse_card_progress
+            edge_match = re.search(
+                r"Edge(?:\s+Browsing(?:\s+Streak)?)?.*?Minutes:\s*(\d+)\s*/\s*(\d+)",
+                page_text, re.IGNORECASE | re.DOTALL,
+            )
+            if not edge_match:
+                edge_match = re.search(
+                    r"Edge(?:\s+Browsing(?:\s+Streak)?)?.*?Activit(?:y|ies):\s*(\d+)\s*/\s*(\d+)",
+                    page_text, re.IGNORECASE | re.DOTALL,
+                )
+            if not edge_match:
+                edge_match = re.search(
+                    r"Edge\s+Browsing\s+Streak.*?(\d+)\s*/\s*(\d+)",
+                    page_text, re.IGNORECASE | re.DOTALL,
+                )
+            
+            # Navigate back to a browsing page
+            browse_url = original_url if "bing.com" in original_url else "https://www.bing.com"
+            await page.goto(browse_url, wait_until="domcontentloaded", timeout=10000)
+            
+            if edge_match:
+                minutes = int(edge_match.group(1))
+                return minutes
+            else:
+                self._log("debug", "DOM scraping: Edge streak card not found on /earn")
+                return -1  # Signal: couldn't read
 
         except Exception as e:
-            logger.debug(f"Failed to check streak progress: {e}")
-        return 0
+            self._log("debug", f"DOM scraping failed: {e}")
+            # Try to navigate back
+            try:
+                await page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=8000)
+            except Exception:
+                pass
+            return -1
 
     async def _activate_edge_streak_card(self, page) -> bool:
         """Click the Edge Browsing Streak card on rewards.bing.com to activate tracking.
@@ -538,8 +545,8 @@ class NativeEdgeStreak:
             last_increase_time = time.time()
             
             FOCUS_PULSE_INTERVAL = 300  # Pulse focus every 5 minutes
-            PROGRESS_CHECK_INTERVAL = 360  # Check progress every ~6 minutes
-            STUCK_TIMEOUT = 540  # Consider stuck if no progress for 9 minutes
+            PROGRESS_CHECK_INTERVAL = 900  # Check DOM every ~15 minutes
+            STUCK_TIMEOUT = 1200  # Consider stuck only after 20 min with no progress
             
             urls_pool = list(BROWSE_URLS)
             tracking_stuck = False
@@ -575,10 +582,10 @@ class NativeEdgeStreak:
                     await self._activate_edge_streak_card(page)
 
                     # Fetch initial baseline minutes for this session
-                    current_prog = await self._check_current_streak_progress(context)
-                    if current_prog > baseline_minutes:
+                    current_prog = await self._check_current_streak_progress(page)
+                    if current_prog > 0 and current_prog > baseline_minutes:
                         baseline_minutes = current_prog
-                    self._log("info", f"📊 Initial API progress: {baseline_minutes}/{target_minutes} min")
+                    self._log("info", f"📊 Initial DOM progress: {current_prog if current_prog >= 0 else 'unreadable'}/{target_minutes} min")
 
                     if baseline_minutes >= target_minutes:
                         self._log("info", f"✅ Edge Streak already complete ({baseline_minutes}/{target_minutes} min)")
@@ -602,23 +609,35 @@ class NativeEdgeStreak:
                             last_focus_pulse = time.time()
                             logger.debug(f"[Edge Streak] Focus pulse executed")
 
-                        # Periodic progress validation
+                        # Periodic progress validation via DOM scraping
                         if time.time() - last_progress_check >= PROGRESS_CHECK_INTERVAL:
-                            self._log("info", "🔍 Verifying tracking progress via API...")
-                            api_val = await self._check_current_streak_progress(context)
-                            self._log("info", f"📊 API progress: {api_val}/{target_minutes} min")
+                            self._log("info", "🔍 Checking progress via DOM scraping...")
+                            dom_val = await self._check_current_streak_progress(page)
                             
-                            if api_val > baseline_minutes:
-                                # We made progress! Telemetry is alive.
-                                baseline_minutes = api_val
-                                last_increase_time = time.time()
-                                self._log("info", f"✅ Tracking confirmed alive — {baseline_minutes}/{target_minutes} min")
-                            elif time.time() - last_increase_time > STUCK_TIMEOUT:
-                                # Oh no, we've been browsing for > 9 minutes with 0 progress.
-                                self._log("warning", f"⚠️ Tracking stuck at {baseline_minutes}/{target_minutes} min "
-                                          f"for over {STUCK_TIMEOUT // 60} min! Restarting Edge...")
-                                tracking_stuck = True
-                                break
+                            if dom_val >= 0:  # DOM readable
+                                self._log("info", f"📊 DOM progress: {dom_val}/{target_minutes} min")
+                                if dom_val > baseline_minutes:
+                                    baseline_minutes = dom_val
+                                    last_increase_time = time.time()
+                                    self._log("info", f"✅ Tracking alive — {baseline_minutes}/{target_minutes} min")
+                                elif dom_val >= target_minutes:
+                                    baseline_minutes = dom_val
+                                    self._log("info", f"✅ Edge Streak COMPLETE: {baseline_minutes}/{target_minutes} min")
+                                    break
+                                elif time.time() - last_increase_time > STUCK_TIMEOUT:
+                                    self._log("warning", f"⚠️ Tracking stuck at {baseline_minutes}/{target_minutes} min "
+                                              f"for over {STUCK_TIMEOUT // 60} min! Restarting Edge...")
+                                    tracking_stuck = True
+                                    break
+                            else:
+                                # DOM unreadable — use elapsed time as a rough estimate
+                                elapsed_min = int((time.time() - overall_start_time) / 60)
+                                self._log("info", f"📊 DOM unreadable, elapsed ~{elapsed_min} min (blind mode)")
+                                # Don't restart — just keep browsing
+                                if elapsed_min > target_minutes + 10:
+                                    self._log("info", f"⏱️ Elapsed {elapsed_min} min > target+10, assuming complete")
+                                    baseline_minutes = target_minutes
+                                    break
                             last_progress_check = time.time()
 
                         if not urls_pool:
