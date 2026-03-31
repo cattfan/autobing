@@ -162,7 +162,7 @@ class BrowserManager:
 
         # Minimal flags — only anti-detection, NO telemetry blocking
         clean_args = [
-            "--disable-blink-features=AutomationControlled",
+
             "--disable-infobars",
             "--no-first-run",
             "--start-maximized",
@@ -203,7 +203,7 @@ class BrowserManager:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         clean_args = [
-            "--disable-blink-features=AutomationControlled",
+
             "--disable-infobars",
             "--no-first-run",
             "--start-maximized",
@@ -424,7 +424,7 @@ class BrowserManager:
 
         launch_args = [
             # Core anti-detection (minimal footprint)
-            "--disable-blink-features=AutomationControlled",
+
             "--disable-infobars",
             "--no-first-run",
             "--start-maximized",
@@ -528,7 +528,7 @@ class BrowserManager:
                 await self.browser.close()
 
             launch_args = [
-                "--disable-blink-features=AutomationControlled",
+
                 "--disable-infobars",
     
                 "--disable-automation",
@@ -1180,7 +1180,7 @@ class BrowserManager:
             headless=False,
             args=[
                 "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
+
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--disable-infobars",
             ],

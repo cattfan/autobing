@@ -59,6 +59,13 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
     return bot_logger
 
 
+import sys
+if sys.stdout.encoding.lower() != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 logger = setup_logging()
 
 ENV_SETTING_OVERRIDES = {

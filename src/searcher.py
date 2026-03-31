@@ -326,14 +326,16 @@ class Searcher:
     ) -> dict:
         """Retry small deficits so a single run is more likely to finish credits."""
         try:
-            max_rounds = max(1, int(self.settings.get("search_deficit_rounds", 2)))
+            # Increased to 15 to accommodate slow Microsoft tracking updates and ensure full points
+            max_rounds = max(1, int(self.settings.get("search_deficit_rounds", 15)))
             max_extra_per_round = max(
                 3,
                 int(self.settings.get("search_deficit_max_extra", 15)),
             )
 
             for round_idx in range(max_rounds):
-                await asyncio.sleep(5)
+                logger.info(f"Checking for any missing points (Attempt {round_idx + 1}/{max_rounds})...")
+                await asyncio.sleep(8)
                 status_after = await self.get_search_points_status(page)
 
                 if mode == "desktop":

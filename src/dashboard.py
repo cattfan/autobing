@@ -1,9 +1,8 @@
-"""
-Flask Web Dashboard — Full GUI for Rewards Search Automator.
+﻿"""
+Flask Web Dashboard ΓÇö Full GUI for Rewards Search Automator.
 Provides API endpoints for accounts, settings, running tasks, logs, and status.
 """
 
-from __future__ import annotations
 import os
 import json
 import random
@@ -45,7 +44,7 @@ app = Flask(
     static_folder=None,
 )
 
-# ─── Global State ──────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Global State ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 state = {
     "status": "idle",          # idle, running, error
@@ -57,17 +56,7 @@ state = {
     "last_run": None,
     "accounts_count": 0,
     "total_points": 0,
-    "account_points": {},       # {email: points} — persisted per-account
     "master_password": "",      # No auth required
-    "ai": {
-        "enabled": False,
-        "configured": False,
-        "active": False,
-        "model": "",
-        "task": "",
-        "last_event": "",
-        "last_update": None,
-    },
 }
 
 LOG_MAX = 500
@@ -93,44 +82,6 @@ def add_log(level: str, message: str):
         logger.info(message)
 
 
-def _snapshot_ai_state(settings: dict | None = None) -> dict:
-    """Merge configured AI settings with the live runtime snapshot."""
-    resolved = settings or load_settings()
-    ai_state = state.setdefault("ai", {})
-    ai_state["enabled"] = bool(resolved.get("ai_enabled", False))
-    ai_state["configured"] = bool(str(resolved.get("ai_api_key", "")).strip())
-    ai_state["model"] = str(resolved.get("ai_model", "")).strip()
-    ai_state.setdefault("active", False)
-    ai_state.setdefault("task", "")
-    ai_state.setdefault("last_event", "")
-    ai_state.setdefault("last_update", None)
-    return dict(ai_state)
-
-
-def _update_ai_state(
-    *,
-    settings: dict | None = None,
-    active: bool | None = None,
-    model: str | None = None,
-    task: str | None = None,
-    event: str | None = None,
-):
-    """Update the runtime AI state so the dashboard can show live activity."""
-    ai_state = state.setdefault("ai", {})
-    snapshot = _snapshot_ai_state(settings)
-    ai_state.update(snapshot)
-
-    if active is not None:
-        ai_state["active"] = bool(active)
-    if model:
-        ai_state["model"] = model
-    if task is not None:
-        ai_state["task"] = task
-    if event is not None:
-        ai_state["last_event"] = event
-        ai_state["last_update"] = datetime.now().isoformat(timespec="seconds")
-
-
 def _storage_state_path(email: str) -> Path:
     """Return the shared storage-state file for an account."""
     safe_email = email.replace("@", "_at_").replace(".", "_")
@@ -146,36 +97,6 @@ async def _persist_storage_state(context, storage_state_path: Path | None) -> No
         await context.storage_state(path=str(storage_state_path))
     except Exception as e:
         logger.debug(f"Could not persist storage state {storage_state_path}: {e}")
-
-
-async def _ensure_page_alive(page, context, browser_mgr, add_log):
-    """Return a usable page, recovering if the current one died."""
-    try:
-        if not page.is_closed():
-            # Quick sanity check — try to read the URL
-            _ = page.url
-            return page
-    except Exception:
-        pass
-
-    add_log("warning", "⚠️ Active page died — recovering fresh page from context")
-    try:
-        # Try to reuse an existing live page in the context
-        for p in context.pages:
-            if not p.is_closed():
-                add_log("info", "♻️ Reusing existing live page")
-                return p
-    except Exception:
-        pass
-
-    # Create a brand-new page
-    try:
-        new_page = await browser_mgr.new_page(context)
-        add_log("info", "✅ Created new page after recovery")
-        return new_page
-    except Exception as e:
-        add_log("error", f"❌ Page recovery failed: {e}")
-        raise RuntimeError(f"Cannot recover page: {e}")
 
 
 async def _open_account_context(
@@ -274,7 +195,7 @@ async def _open_account_context(
     return ctx, page
 
 
-# ─── Static Files ──────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Static Files ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
 
@@ -299,11 +220,11 @@ def dashboard_file(filename):
     return send_file(DASHBOARD_DIR / "index.html")
 
 
-# ─── Auth ──────────────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Auth ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 @app.route("/api/auth", methods=["POST"])
 def auth():
-    """No-op auth — always succeeds."""
+    """No-op auth ΓÇö always succeeds."""
     return jsonify({"status": "ok", "message": "Authenticated"})
 
 
@@ -313,7 +234,7 @@ def auth_check():
     return jsonify({"authenticated": True})
 
 
-# ─── Accounts ──────────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Accounts ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
@@ -326,7 +247,6 @@ def get_accounts():
                 "has_totp": bool(a.get("totp_secret")),
                 "has_proxy": bool(a.get("proxy")),
                 "has_session": storage_state.exists(),
-                "points": state["account_points"].get(a["email"], 0),
                 "session_updated": (
                     datetime.fromtimestamp(storage_state.stat().st_mtime).strftime("%H:%M:%S")
                     if storage_state.exists()
@@ -336,7 +256,6 @@ def get_accounts():
             for a in accounts
             for storage_state in [_storage_state_path(a["email"])]
         ]
-        state["accounts_count"] = len(safe)
         return jsonify({"accounts": safe})
     except FileNotFoundError:
         return jsonify({"accounts": []})
@@ -374,7 +293,6 @@ def add_account():
 
         accounts.append(account)
         save_encrypted_accounts(accounts, state["master_password"])
-        state["accounts_count"] = len(accounts)
         add_log("info", f"Account added: {email[:5]}***")
         return jsonify({"status": "ok"})
     except Exception as e:
@@ -389,7 +307,6 @@ def delete_account(email):
         accounts = load_encrypted_accounts(state["master_password"])
         accounts = [a for a in accounts if a["email"] != email]
         save_encrypted_accounts(accounts, state["master_password"])
-        state["accounts_count"] = len(accounts)
         storage_state = _storage_state_path(email)
         if storage_state.exists():
             storage_state.unlink()
@@ -408,7 +325,7 @@ def import_accounts():
     return jsonify({"error": "No accounts.json found"}), 404
 
 
-# ─── Settings ──────────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Settings ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
@@ -436,12 +353,11 @@ def update_settings():
             settings[key] = value
 
     save_settings(settings)
-    _snapshot_ai_state(settings)
     add_log("info", "Settings updated")
     return jsonify({"status": "ok"})
 
 
-# ─── Bot Control ───────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Bot Control ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 @app.route("/api/run", methods=["POST"])
 def run_bot():
@@ -482,7 +398,6 @@ def stop_bot():
 @app.route("/api/status", methods=["GET"])
 def get_status():
     """Get current bot status."""
-    ai_state = _snapshot_ai_state()
     return jsonify({
         "status": state["status"],
         "current_account": state["current_account"],
@@ -491,8 +406,6 @@ def get_status():
         "progress_total": state["progress_total"],
         "last_run": state["last_run"],
         "total_points": state["total_points"],
-        "accounts_count": state["accounts_count"],
-        "ai": ai_state,
     })
 
 
@@ -535,84 +448,6 @@ async def _collect_final_verification(page, searcher, humanizer, settings) -> di
     return snapshot
 
 
-def _edge_streak_is_complete(tasks: dict | None) -> bool:
-    """Treat Edge streak completion consistently across immediate and delayed checks."""
-    edge = (tasks or {}).get("streaks", {}).get("edge", {})
-    target = edge.get("target", 30) or 30
-    minutes = edge.get("minutes", 0)
-    return bool(edge.get("done") or (target > 0 and minutes >= target))
-
-
-async def _collect_edge_streak_diagnostics(
-    *,
-    browser_settings: dict,
-    email: str,
-    account: dict,
-    login_mgr,
-    session_proxy: dict | None,
-    storage_state_path: Path,
-    label: str,
-) -> dict | None:
-    """Open a fresh Rewards session and dump raw Edge promo/card state."""
-    from src.browser import BrowserManager
-
-    add_log("info", f"🧪 Edge diagnostics snapshot: {label}")
-    bm_diag = None
-    try:
-        bm_diag = BrowserManager(browser_settings)
-        bm_diag.set_account(email)
-        attach_runtime = False
-        diag_cdp_url = ""
-        if bool(browser_settings.get("native_edge_runtime_enabled", True)):
-            try:
-                diag_cdp_url = await bm_diag.start_native_edge_runtime(email)
-                attach_runtime = True
-            except Exception as diag_runtime_error:
-                add_log(
-                    "debug",
-                    f"[EdgeDiag:{label}] Native runtime unavailable: {diag_runtime_error}",
-                )
-        if not attach_runtime:
-            await bm_diag.start()
-
-        ctx_diag, page_diag = await _open_account_context(
-            bm_diag,
-            login_mgr,
-            account,
-            session_proxy,
-            "desktop",
-            storage_state_path,
-            attach_existing_edge=attach_runtime,
-            attached_cdp_url=diag_cdp_url if attach_runtime else "",
-        )
-
-        if not await login_mgr.is_logged_in(page_diag):
-            page_diag = await login_mgr.login(
-                page_diag,
-                email,
-                account["password"],
-                account.get("totp_secret"),
-            )
-
-        snapshot = await TaskDetector().get_all_tasks(
-            page_diag,
-            edge_debug_label=label,
-            debug_log=add_log,
-            include_edge_diagnostics=True,
-        )
-        await _persist_storage_state(ctx_diag, storage_state_path)
-        return snapshot
-    except Exception as e:
-        add_log("warning", f"⚠️ Edge diagnostic snapshot '{label}' failed: {e}")
-        return None
-    finally:
-        if bm_diag is not None:
-            try:
-                await bm_diag.close()
-            except Exception:
-                pass
-
-
 def _describe_remaining_items(snapshot: dict) -> list[str]:
     """Flatten the final verification payload into human-readable remaining work."""
     remaining = []
@@ -640,6 +475,10 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
     if daily_total > 0 and daily_done < daily_total:
         remaining.append(f"Daily Set {daily_done}/{daily_total}")
 
+    bing_app = task_overview.get("streaks", {}).get("bing_app", {})
+    if not bing_app.get("done", False):
+        remaining.append(f"Mobile App Check-in {bing_app.get('current', 0)}/1")
+
     edge_streak = task_overview.get("streaks", {}).get("edge", {})
     edge_minutes = edge_streak.get("minutes", 0)
     edge_target = edge_streak.get("target", 30)
@@ -655,7 +494,7 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
     return remaining
 
 
-# ─── Statistics ────────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Statistics ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 @app.route("/api/stats", methods=["GET"])
 def get_stats():
@@ -691,7 +530,7 @@ def get_graph():
     return jsonify({"error": "No graph available"}), 404
 
 
-# ─── Schedule ──────────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Schedule ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 @app.route("/api/schedule", methods=["GET"])
 def get_schedule():
@@ -724,7 +563,7 @@ def set_schedule():
     return jsonify({"status": "ok"})
 
 
-# ─── Background Bot Runner ────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Background Bot Runner ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 def _run_bot_thread(task: str, password: str):
     """Run bot tasks in a new event loop thread."""
@@ -751,24 +590,12 @@ async def _run_bot_async(task: str, password: str):
     from src.notifier import Notifier
     from src.trends import TrendsManager
     from src.humanizer import Humanizer
-    from src.streaks import TaskDetector, EdgeBrowsingStreak
+    from src.streaks import TaskDetector, BingAppStreak, EdgeBrowsingStreak
     from src.manual_captcha import ManualCaptchaHandler
 
     settings = load_settings()
     accounts = load_encrypted_accounts(password)
     overall_complete = True
-    state["accounts_count"] = len(accounts)
-    _snapshot_ai_state(settings)
-    _update_ai_state(
-        settings=settings,
-        active=False,
-        task="",
-        event=(
-            "AI sẵn sàng cho fallback."
-            if bool(settings.get("ai_enabled", False)) and bool(settings.get("ai_api_key"))
-            else "AI đang tắt hoặc chưa có API key."
-        ),
-    )
 
     humanizer = Humanizer(
         delay_min=settings.get("delay_min", 3),
@@ -796,11 +623,11 @@ async def _run_bot_async(task: str, password: str):
             state["status"] = "idle"
             return
 
-        # ── Inter-account delay (except first) ──
+        # ΓöÇΓöÇ Inter-account delay (except first) ΓöÇΓöÇ
         if idx > 0:
             import random as _rng
             delay = _rng.randint(30, 120)
-            add_log("info", f"⏳ Waiting {delay}s before next account (anti-detection)...")
+            add_log("info", f"ΓÅ│ Waiting {delay}s before next account (anti-detection)...")
             state["current_task"] = f"Cooldown ({delay}s)"
             await asyncio.sleep(delay)
 
@@ -809,7 +636,7 @@ async def _run_bot_async(task: str, password: str):
         session_proxy = get_proxy_for_session(account)
         storage_state_path = _storage_state_path(email)
         state["current_account"] = email[:5] + "***"
-        add_log("info", f"━━━ Account {idx + 1}/{len(accounts)}: {email[:5]}*** ━━━")
+        add_log("info", f"ΓöüΓöüΓöü Account {idx + 1}/{len(accounts)}: {email[:5]}*** ΓöüΓöüΓöü")
         account_complete = True
 
         try:
@@ -853,12 +680,12 @@ async def _run_bot_async(task: str, password: str):
                     attach_existing_edge=attach_runtime,
                     attached_cdp_url=cdp_url if attach_runtime else "",
                 )
-                add_log("info", "✅ Logged in")
+                add_log("info", "Γ£à Logged in")
 
                 if task == "bootstrap":
                     add_log(
                         "info",
-                        "✅ Session bootstrap complete. Future runs will reuse this saved login when possible.",
+                        "Γ£à Session bootstrap complete. Future runs will reuse this saved login when possible.",
                     )
                     await _persist_storage_state(ctx, storage_state_path)
                     await bm.close()
@@ -868,38 +695,28 @@ async def _run_bot_async(task: str, password: str):
                 await close_other_tabs(page)
 
                 # Warm-up: visit random sites before tasks (anti-detection)
-                add_log("info", "🌐 Warming up browser...")
+                add_log("info", "≡ƒîÉ Warming up browser...")
                 await humanizer.warm_up_browsing(page)
 
                 if task in ("all", "searches"):
-                    # ── Check current progress first ──
-                    add_log("info", "🔍 Checking search credits...")
+                    # ΓöÇΓöÇ Check current progress first ΓöÇΓöÇ
+                    add_log("info", "≡ƒöì Checking search credits...")
                     status_before = await searcher.get_search_points_status(page)
 
                     # Desktop searches (API returns points, 3 points per search)
                     pc_done = status_before.get("pc_current", 0)
                     pc_max = status_before.get("pc_max", 0)
-
-                    # If API returned zeros, retry once after a short wait
-                    if pc_max == 0:
-                        add_log("info", "🔄 API returned 0, retrying credit check...")
-                        await asyncio.sleep(3)
-                        status_before = await searcher.get_search_points_status(page)
-                        pc_done = status_before.get("pc_current", 0)
-                        pc_max = status_before.get("pc_max", 0)
-
                     remaining_points = max(0, pc_max - pc_done)
                     # Convert points to search count (3 points per search)
                     remaining_desktop = (remaining_points + 2) // 3  # ceil division
                     if pc_max == 0:
-                        add_log("warning", "⚠️ Could not read search credits from API, using defaults")
                         remaining_desktop = settings.get("desktop_searches", 30)
 
                     if remaining_desktop > 0:
                         state["current_task"] = "Desktop Searches"
                         state["progress"] = 0
                         state["progress_total"] = remaining_desktop
-                        add_log("info", f"🖥️ Desktop — {pc_done}/{pc_max} pts ({remaining_desktop} searches left)")
+                        add_log("info", f"≡ƒûÑ∩╕Å Desktop ΓÇö {pc_done}/{pc_max} pts ({remaining_desktop} searches left)")
 
                         def on_desktop(c, t, q):
                             state["progress"] = c
@@ -910,37 +727,17 @@ async def _run_bot_async(task: str, password: str):
                         desktop_stats = await searcher.run_searches(page, remaining_desktop, "desktop")
                         if desktop_stats.get("fatal_error"):
                             raise RuntimeError(desktop_stats["fatal_error"])
-                        add_log("info", "✅ Desktop searches done")
+                        add_log("info", "Γ£à Desktop searches done")
                     else:
-                        add_log("info", f"⏭️ Desktop searches already complete ({pc_done}/{pc_max})")
+                        add_log("info", f"ΓÅ¡∩╕Å Desktop searches already complete ({pc_done}/{pc_max})")
 
-                    # ── Page recovery after desktop searches ──
-                    page = await _ensure_page_alive(page, ctx, bm, add_log)
-
-                # ══ Universal Task Scanner (Daily Set + Punch Cards + Quests + Promos) ══
+                # ΓòÉΓòÉ Universal Task Scanner (Daily Set + Punch Cards + Quests + Promos) ΓòÉΓòÉ
                 if task in ("all", "daily", "punch", "promos"):
                     state["current_task"] = "All Tasks (Smart Scanner)"
-                    def _on_ai_event(level: str, message: str, meta: dict | None = None):
-                        meta = meta or {}
-                        _update_ai_state(
-                            settings=settings,
-                            active=meta.get("active"),
-                            model=meta.get("model"),
-                            task=meta.get("task"),
-                            event=message,
-                        )
-                        add_log(level, f"[AI] {message}")
-
-                    ai = AIAgent(settings, on_event=_on_ai_event)
-                    add_log("info", "🧠 Smart Task Scanner starting...")
+                    ai = AIAgent(settings)
+                    add_log("info", "≡ƒºá Smart Task Scanner starting...")
                     if ai.enabled:
-                        add_log("info", "🤖 AI Agent enabled for complex tasks")
-                    else:
-                        _update_ai_state(
-                            settings=settings,
-                            active=False,
-                            event="AI chưa được dùng trong run này.",
-                        )
+                        add_log("info", "≡ƒñû AI Agent enabled for complex tasks")
 
                     scanner = UniversalTaskScanner(
                         humanizer=humanizer,
@@ -952,33 +749,24 @@ async def _run_bot_async(task: str, password: str):
                     scan_result = await scanner.scan_and_complete(
                         page, account_email=email,
                     )
-                    _update_ai_state(
-                        settings=settings,
-                        active=False,
-                        event="Smart Scanner đã hoàn tất.",
-                    )
                     add_log("info",
-                            f"🧠 Smart Scanner: {scan_result['completed']}/{scan_result['total']} completed, "
+                            f"≡ƒºá Smart Scanner: {scan_result['completed']}/{scan_result['total']} completed, "
                             f"{scan_result['skipped_locked']} locked, {scan_result['failed']} failed")
                     await close_other_tabs(page)
-
-                    # ── Page recovery after Smart Scanner ──
-                    page = await _ensure_page_alive(page, ctx, bm, add_log)
 
                 # Read points
                 try:
                     points_info = await points_tracker.read_points(page)
                     state["total_points"] = points_info.get("total_points", 0)
-                    state["account_points"][email] = state["total_points"]
-                    add_log("info", f"💰 Points: {state['total_points']:,}")
+                    add_log("info", f"≡ƒÆ░ Points: {state['total_points']:,}")
                 except Exception:
                     pass
 
                 await _persist_storage_state(ctx, storage_state_path)
 
-            # ══ Mobile searches — direct CDP device emulation ══
+            # ΓòÉΓòÉ Mobile searches ΓÇö direct CDP device emulation ΓòÉΓòÉ
             # Replicates exactly what the RSA extension does internally:
-            # Apply device emulation via CDP → search normally → remove emulation
+            # Apply device emulation via CDP ΓåÆ search normally ΓåÆ remove emulation
             if task in ("all", "searches"):
                 # Auto-calculate from API (like desktop does on line 706-712)
                 mob_done = status_before.get("mobile_current", 0)
@@ -986,16 +774,12 @@ async def _run_bot_async(task: str, password: str):
                 mob_remaining_pts = max(0, mob_max - mob_done)
                 mob_searches = (mob_remaining_pts + 2) // 3  # ceil division (3 pts per search)
                 if mob_max == 0:
-                    add_log("warning", "⚠️ Could not read mobile credits from API, using defaults")
                     mob_searches = settings.get("mobile_searches", 20)
 
                 if mob_searches <= 0:
-                    add_log("info", f"⏭️ Mobile searches already complete ({mob_done}/{mob_max})")
+                    add_log("info", f"ΓÅ¡∩╕Å Mobile searches already complete ({mob_done}/{mob_max})")
                 else:
-                    add_log("info", f"📱 Mobile — {mob_done}/{mob_max} pts ({mob_searches} searches needed)")
-
-                    # ── Page recovery before mobile searches ──
-                    page = await _ensure_page_alive(page, ctx, bm, add_log)
+                    add_log("info", f"≡ƒô▒ Mobile ΓÇö {mob_done}/{mob_max} pts ({mob_searches} searches needed)")
 
                     cdp_client = None
                     try:
@@ -1060,34 +844,34 @@ async def _run_bot_async(task: str, password: str):
 
                         await cdp_client.send("Network.setBypassServiceWorker", {"bypass": True})
 
-                        add_log("info", f"📱 Emulation applied: {ua_metadata.get('model', 'iPhone')}, "
+                        add_log("info", f"≡ƒô▒ Emulation applied: {ua_metadata.get('model', 'iPhone')}, "
                                 f"UA: {mobile_ua[:60]}...")
 
                         # 4. Clear Bing cookies/cache for fresh mobile session
                         try:
                             await cdp_client.send("Network.clearBrowserCookies")
                             await cdp_client.send("Network.clearBrowserCache")
-                            add_log("info", "📱 Cleared browser cookies & cache")
+                            add_log("info", "≡ƒô▒ Cleared browser cookies & cache")
                         except Exception as clear_err:
-                            add_log("warning", f"📱 Cookie clear: {clear_err}")
+                            add_log("warning", f"≡ƒô▒ Cookie clear: {clear_err}")
                         try:
                             await page.context.clear_cookies()
                         except Exception:
                             pass
 
                         # 5. Re-login with mobile UA
-                        add_log("info", "📱 Re-establishing session with mobile UA...")
+                        add_log("info", "≡ƒô▒ Re-establishing session with mobile UA...")
                         await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=20000)
                         await asyncio.sleep(3)
 
                         current_url = page.url.lower()
                         if "login" in current_url or "live.com" in current_url:
-                            add_log("info", "📱 Login page detected, re-authenticating...")
+                            add_log("info", "≡ƒô▒ Login page detected, re-authenticating...")
                             try:
                                 await page.wait_for_url("**/rewards.bing.com/**", timeout=30000)
-                                add_log("info", "📱 Auto-login succeeded")
+                                add_log("info", "≡ƒô▒ Auto-login succeeded")
                             except Exception:
-                                add_log("warning", "📱 Auto-login timeout, proceeding anyway")
+                                add_log("warning", "≡ƒô▒ Auto-login timeout, proceeding anyway")
 
                         # 6. Navigate to Bing and search
                         await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=15000)
@@ -1117,13 +901,13 @@ async def _run_bot_async(task: str, password: str):
                             page, mob_searches, mode="mobile",
                             credit_probe_fn=mobile_credit_probe,
                         )
-                        add_log("info", f"📱 Mobile searches: {mobile_result.get('completed', 0)}/{mob_searches} OK, "
+                        add_log("info", f"≡ƒô▒ Mobile searches: {mobile_result.get('completed', 0)}/{mob_searches} OK, "
                                 f"{mobile_result.get('failed', 0)} failed")
 
                     except Exception as mob_err:
                         import traceback
-                        add_log("error", f"📱 Mobile search error: {mob_err}")
-                        add_log("error", f"📱 {traceback.format_exc()[:500]}")
+                        add_log("error", f"≡ƒô▒ Mobile search error: {mob_err}")
+                        add_log("error", f"≡ƒô▒ {traceback.format_exc()[:500]}")
                     finally:
                         # Remove emulation (reset all CDP overrides)
                         if cdp_client:
@@ -1131,7 +915,7 @@ async def _run_bot_async(task: str, password: str):
                                 await cdp_client.send("Emulation.clearDeviceMetricsOverride")
                                 await cdp_client.send("Network.setUserAgentOverride", {"userAgent": ""})
                                 await cdp_client.send("Network.setBypassServiceWorker", {"bypass": False})
-                                add_log("info", "📱 Emulation cleared")
+                                add_log("info", "≡ƒô▒ Emulation cleared")
                             except Exception:
                                 pass
                             try:
@@ -1139,7 +923,7 @@ async def _run_bot_async(task: str, password: str):
                             except Exception:
                                 pass
 
-                # ═══ Mobile Supplementary Search (deficit retry) ═══
+                # ΓòÉΓòÉΓòÉ Mobile Supplementary Search (deficit retry) ΓòÉΓòÉΓòÉ
                 # After emulation is cleared, check API for mobile deficit and retry
                 try:
                     await asyncio.sleep(3)
@@ -1176,13 +960,13 @@ async def _run_bot_async(task: str, password: str):
                     mob_current = 0
                     mob_max_api = 0
                     if raw_data:
-                        add_log("info", f"📊 RAW API counters: {json.dumps(raw_data, indent=None)}")
+                        add_log("info", f"≡ƒôè RAW API counters: {json.dumps(raw_data, indent=None)}")
                         mob_data = raw_data.get("mobileSearch", {})
                         mob_current = mob_data.get("progress", 0)
                         mob_max_api = mob_data.get("max", 0)
-                        add_log("info", f"📱 POST-search mobile credits: {mob_current}/{mob_max_api}")
+                        add_log("info", f"≡ƒô▒ POST-search mobile credits: {mob_current}/{mob_max_api}")
                     else:
-                        add_log("warning", "📊 RAW API returned null")
+                        add_log("warning", "≡ƒôè RAW API returned null")
                         try:
                             post_status = await asyncio.wait_for(
                                 searcher.get_search_points_status(page),
@@ -1190,7 +974,7 @@ async def _run_bot_async(task: str, password: str):
                             )
                             mob_current = post_status.get("mobile_current", 0)
                             mob_max_api = post_status.get("mobile_max", 60)
-                            add_log("info", f"📱 POST-search mobile credits: {mob_current}/{mob_max_api}")
+                            add_log("info", f"≡ƒô▒ POST-search mobile credits: {mob_current}/{mob_max_api}")
                         except Exception:
                             pass
 
@@ -1202,7 +986,7 @@ async def _run_bot_async(task: str, password: str):
 
                     while mob_deficit_searches > 0 and retry_round < max_mobile_retries:
                         retry_round += 1
-                        add_log("info", f"📱 Mobile deficit: {mob_current}/{mob_max_api} pts "
+                        add_log("info", f"≡ƒô▒ Mobile deficit: {mob_current}/{mob_max_api} pts "
                                 f"({mob_deficit_searches} more needed, round {retry_round}/{max_mobile_retries})")
                         
                         state["current_task"] = "Mobile Supplementary"
@@ -1267,7 +1051,7 @@ async def _run_bot_async(task: str, password: str):
                                     "fullVersion": ua_metadata2.get("fullVersion", ""),
                                 },
                             })
-                            add_log("info", f"📱 Supplementary emulation applied: {ua_metadata2.get('model', 'mobile')}")
+                            add_log("info", f"≡ƒô▒ Supplementary emulation applied: {ua_metadata2.get('model', 'mobile')}")
 
                             # Clear cookies and re-login for mobile
                             await page.context.clear_cookies()
@@ -1288,10 +1072,10 @@ async def _run_bot_async(task: str, password: str):
                             supp_result = await searcher.run_searches(
                                 page, mob_deficit_searches, mode="mobile",
                             )
-                            add_log("info", f"📱 Supplementary mobile: {supp_result.get('completed', 0)}/{mob_deficit_searches} OK")
+                            add_log("info", f"≡ƒô▒ Supplementary mobile: {supp_result.get('completed', 0)}/{mob_deficit_searches} OK")
 
                         except Exception as supp_err:
-                            add_log("warning", f"📱 Supplementary mobile error: {supp_err}")
+                            add_log("warning", f"≡ƒô▒ Supplementary mobile error: {supp_err}")
                         finally:
                             if cdp_client2:
                                 try:
@@ -1324,7 +1108,7 @@ async def _run_bot_async(task: str, password: str):
                             if recheck:
                                 mob_current = recheck.get("progress", 0)
                                 mob_max_api = recheck.get("max", mob_max_api)
-                                add_log("info", f"📱 After supplementary: {mob_current}/{mob_max_api}")
+                                add_log("info", f"≡ƒô▒ After supplementary: {mob_current}/{mob_max_api}")
                                 mob_deficit_pts = max(0, mob_max_api - mob_current)
                                 mob_deficit_searches = (mob_deficit_pts + 2) // 3
                             else:
@@ -1333,9 +1117,9 @@ async def _run_bot_async(task: str, password: str):
                             mob_deficit_searches = 0
 
                 except asyncio.TimeoutError:
-                    add_log("warning", "📱 Post-search check timed out")
+                    add_log("warning", "≡ƒô▒ Post-search check timed out")
                 except Exception as pe:
-                    add_log("warning", f"📱 Post-search check failed: {pe}")
+                    add_log("warning", f"≡ƒô▒ Post-search check failed: {pe}")
 
                 # Close desktop Edge browser
                 await _persist_storage_state(ctx, storage_state_path)
@@ -1345,7 +1129,7 @@ async def _run_bot_async(task: str, password: str):
             # Edge session (searches + browsing streak)
             if task in ("all", "searches"):
                 state["current_task"] = "Edge Session"
-                add_log("info", "🔷 Edge Session")
+                add_log("info", "≡ƒö╖ Edge Session")
                 try:
                     edge_runtime_settings = dict(settings)
                     edge_runtime_settings["use_stealth"] = False
@@ -1407,7 +1191,7 @@ async def _run_bot_async(task: str, password: str):
                         state["current_task"] = "Edge Searches"
                         state["progress"] = 0
                         state["progress_total"] = remaining_edge
-                        add_log("info", f"🔷 Edge — {edge_done}/{edge_max} pts ({remaining_edge} searches left)")
+                        add_log("info", f"≡ƒö╖ Edge ΓÇö {edge_done}/{edge_max} pts ({remaining_edge} searches left)")
 
                         def on_edge(c, t, q):
                             state["progress"] = c
@@ -1415,20 +1199,20 @@ async def _run_bot_async(task: str, password: str):
                         edge_stats = await searcher.run_searches(page3, remaining_edge, "edge")
                         if edge_stats.get("fatal_error"):
                             raise RuntimeError(edge_stats["fatal_error"])
-                        add_log("info", "✅ Edge searches done")
+                        add_log("info", "Γ£à Edge searches done")
                     else:
                         if edge_max == 0:
-                            add_log("info", "⏭️ Edge searches not available")
+                            add_log("info", "ΓÅ¡∩╕Å Edge searches not available")
                         else:
-                            add_log("info", f"⏭️ Edge searches already complete ({edge_done}/{edge_max})")
+                            add_log("info", f"ΓÅ¡∩╕Å Edge searches already complete ({edge_done}/{edge_max})")
 
                     # Close search browser before streak
                     await _persist_storage_state(ctx3, storage_state_path)
                     await bm3.close()
 
-                    # ── Edge Browsing Streak ──
+                    # ΓöÇΓöÇ Edge Browsing Streak ΓöÇΓöÇ
                     state["current_task"] = "Edge Browsing Streak"
-                    add_log("info", "🌐 Edge Browsing Streak — checking availability...")
+                    add_log("info", "≡ƒîÉ Edge Browsing Streak ΓÇö checking availability...")
 
                     # The dashboard's TaskDetector already queried the API
                     # during Edge searches. Re-use that data or re-query.
@@ -1448,12 +1232,7 @@ async def _run_bot_async(task: str, password: str):
                             )
 
                         task_detector = TaskDetector()
-                        tasks = await task_detector.get_all_tasks(
-                            page_s,
-                            edge_debug_label="pre-native",
-                            debug_log=add_log,
-                            include_edge_diagnostics=True,
-                        )
+                        tasks = await task_detector.get_all_tasks(page_s)
                         edge_info = tasks.get("streaks", {}).get("edge", {})
 
                         # Check if Edge Streak promo exists in API at all
@@ -1464,20 +1243,20 @@ async def _run_bot_async(task: str, password: str):
                         streak_complete = edge_info.get("done", False)
 
                         if min_target == 0 and not offer_id and not edge_hash:
-                            # Edge Streak promo doesn't exist — not available
+                            # Edge Streak promo doesn't exist ΓÇö not available
                             add_log(
                                 "info",
-                                "⏭️ Edge Browsing Streak not available for this "
-                                "account/region — skipping",
+                                "ΓÅ¡∩╕Å Edge Browsing Streak not available for this "
+                                "account/region ΓÇö skipping",
                             )
                         elif streak_complete or min_done >= min_target:
                             add_log(
                                 "info",
-                                f"⏭️ Edge Streak already complete "
+                                f"ΓÅ¡∩╕Å Edge Streak already complete "
                                 f"({min_done}/{min_target} min)",
                             )
                         else:
-                            # Promo exists but not complete — try to complete
+                            # Promo exists but not complete ΓÇö try to complete
                             add_log(
                                 "info",
                                 f"Edge Streak: {min_done}/{min_target} min, "
@@ -1488,7 +1267,7 @@ async def _run_bot_async(task: str, password: str):
 
                             # Try API credit if offerId exists
                             if offer_id and not streak_credited:
-                                add_log("info", f"📡 Trying API credit...")
+                                add_log("info", f"≡ƒôí Trying API credit...")
                                 api_result = await page_s.evaluate("""
                                     async (offerId) => {
                                         try {
@@ -1518,20 +1297,15 @@ async def _run_bot_async(task: str, password: str):
                                 """, offer_id)
                                 add_log("info", f"   API: {json.dumps(api_result)}")
                                 await asyncio.sleep(5)
-                                t2 = await task_detector.get_all_tasks(
-                                    page_s,
-                                    edge_debug_label="post-api-credit",
-                                    debug_log=add_log,
-                                    include_edge_diagnostics=True,
-                                )
+                                t2 = await task_detector.get_all_tasks(page_s)
                                 e2 = t2.get("streaks", {}).get("edge", {})
                                 if e2.get("done") or e2.get("minutes", 0) >= e2.get("target", 30):
-                                    add_log("info", "✅ Edge Streak credited via API!")
+                                    add_log("info", "Γ£à Edge Streak credited via API!")
                                     streak_credited = True
 
                             # Try card click
                             if dest_url and not streak_credited:
-                                add_log("info", f"🖱️ Trying card activation...")
+                                add_log("info", f"≡ƒû▒∩╕Å Trying card activation...")
                                 try:
                                     full_url = (
                                         dest_url if dest_url.startswith("http")
@@ -1541,15 +1315,10 @@ async def _run_bot_async(task: str, password: str):
                                     await asyncio.sleep(5)
                                     await page_s.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
                                     await asyncio.sleep(3)
-                                    t3 = await task_detector.get_all_tasks(
-                                        page_s,
-                                        edge_debug_label="post-card-click",
-                                        debug_log=add_log,
-                                        include_edge_diagnostics=True,
-                                    )
+                                    t3 = await task_detector.get_all_tasks(page_s)
                                     e3 = t3.get("streaks", {}).get("edge", {})
                                     if e3.get("done") or e3.get("minutes", 0) >= e3.get("target", 30):
-                                        add_log("info", "✅ Edge Streak credited via card!")
+                                        add_log("info", "Γ£à Edge Streak credited via card!")
                                         streak_credited = True
                                 except Exception as ce:
                                     add_log("debug", f"Card error: {ce}")
@@ -1558,7 +1327,7 @@ async def _run_bot_async(task: str, password: str):
                             if not streak_credited:
                                 # CRITICAL: Activate the Edge Streak card on Rewards page FIRST
                                 # Without this, browsing doesn't count toward streak minutes
-                                add_log("info", "🔗 Activating Edge Streak card before native browsing...")
+                                add_log("info", "≡ƒöù Activating Edge Streak card before native browsing...")
                                 activation_url = None
                                 for act_url in [
                                     "https://rewards.bing.com/pointsbreakdown",
@@ -1597,15 +1366,9 @@ async def _run_bot_async(task: str, password: str):
                                             }
                                         """)
                                         if clicked:
-                                            add_log("info", f"   ✅ Card activated on {act_url}")
+                                            add_log("info", f"   Γ£à Card activated on {act_url}")
                                             if isinstance(clicked, str) and clicked.startswith("http"):
                                                 activation_url = clicked
-                                            await task_detector.get_all_tasks(
-                                                page_s,
-                                                edge_debug_label=f"post-activation:{act_url}",
-                                                debug_log=add_log,
-                                                include_edge_diagnostics=True,
-                                            )
                                             await asyncio.sleep(3)
                                             break
                                     except Exception:
@@ -1613,19 +1376,16 @@ async def _run_bot_async(task: str, password: str):
 
                                 add_log(
                                     "info",
-                                    "📖 Starting Native Edge browsing (30 min + 5 min buffer)..."
-                                    " CDP will be closed — Edge telemetry requires no automation.",
+                                    "≡ƒôû Starting Native Edge browsing (30 min + 5 min buffer)..."
+                                    " CDP will be closed ΓÇö Edge telemetry requires no automation.",
                                 )
-                                # Close CDP session — NativeEdgeStreak needs to kill all Edge
+                                # Close CDP session ΓÇö NativeEdgeStreak needs to kill all Edge
                                 await bm_streak.close()
                                 bm_streak = None
 
                                 state["progress"] = 0
                                 state["progress_total"] = 30
-                                native_streak = NativeEdgeStreak(
-                                    account_email=email,
-                                    storage_state_path=storage_state_path,
-                                )
+                                native_streak = NativeEdgeStreak()
 
                                 def _on_native_streak(done, total):
                                     state["progress"] = min(done, total)
@@ -1636,49 +1396,14 @@ async def _run_bot_async(task: str, password: str):
                                     target_minutes=30,
                                     on_progress=_on_native_streak,
                                     start_url=start_url,
-                                    diagnostic_log=add_log,
                                 )
-                                add_log("info", "Native Edge browsing session completed (30+ min)")
-                                post_native_tasks = await _collect_edge_streak_diagnostics(
-                                    browser_settings=edge_runtime_settings,
-                                    email=email,
-                                    account=account,
-                                    login_mgr=login_mgr,
-                                    session_proxy=session_proxy,
-                                    storage_state_path=storage_state_path,
-                                    label="post-native-immediate",
-                                )
-
-                                if not _edge_streak_is_complete(post_native_tasks):
-                                    try:
-                                        delay_seconds = max(
-                                            0,
-                                            int(settings.get("edge_streak_verify_delay_seconds", 600)),
-                                        )
-                                    except (TypeError, ValueError):
-                                        delay_seconds = 600
-                                    if delay_seconds > 0:
-                                        add_log(
-                                            "info",
-                                            f"Waiting {delay_seconds // 60} min for delayed Edge verification...",
-                                        )
-                                        await asyncio.sleep(delay_seconds)
-                                        post_native_tasks = await _collect_edge_streak_diagnostics(
-                                            browser_settings=edge_runtime_settings,
-                                            email=email,
-                                            account=account,
-                                            login_mgr=login_mgr,
-                                            session_proxy=session_proxy,
-                                            storage_state_path=storage_state_path,
-                                            label="post-native-delayed",
-                                        )
-                                add_log("info", "✅ Native Edge browsing session completed (30+ min)")
+                                add_log("info", "Γ£à Native Edge browsing session completed (30+ min)")
 
                         if bm_streak is not None:
                             await bm_streak.close()
 
                     except Exception as streak_err:
-                        add_log("warning", f"⚠️ Edge Streak error: {streak_err}")
+                        add_log("warning", f"ΓÜá∩╕Å Edge Streak error: {streak_err}")
                         import traceback
                         add_log("debug", traceback.format_exc())
                         try:
@@ -1687,17 +1412,15 @@ async def _run_bot_async(task: str, password: str):
                         except Exception:
                             pass
                 except Exception as e:
-                    add_log("error", f"⚠️ Edge session error: {e}")
-                    import traceback
-                    add_log("error", f"Edge session traceback: {traceback.format_exc()[:800]}")
+                    add_log("warning", f"ΓÜá∩╕Å Edge session error: {e}")
                     try:
                         await bm3.close()
                     except Exception:
                         pass
 
-            # ── Post-run Verification (with error handling) ──
+            # ΓöÇΓöÇ Post-run Verification (with error handling) ΓöÇΓöÇ
             if task in ("all", "searches"):
-                add_log("info", "🔎 Verifying search credits...")
+                add_log("info", "≡ƒöÄ Verifying search credits...")
                 try:
                     bm_verify = BrowserManager(settings)
                     bm_verify.set_account(email)
@@ -1735,20 +1458,54 @@ async def _run_bot_async(task: str, password: str):
                         deficit.append(f"Mobile: {mob_final}/{mob_final_max} ({mob_final_max - mob_final} short)")
 
                     if deficit:
-                        add_log("warning", f"⚠️ Search deficit: {', '.join(deficit)}")
+                        add_log("warning", f"ΓÜá∩╕Å Search deficit: {', '.join(deficit)}")
                     else:
-                        add_log("info", "✅ All search credits verified")
+                        add_log("info", "Γ£à All search credits verified")
 
                     await _persist_storage_state(ctx_v, storage_state_path)
                     await bm_verify.close()
                 except Exception as e:
-                    add_log("warning", f"⚠️ Verification error: {e}")
+                    add_log("warning", f"ΓÜá∩╕Å Verification error: {e}")
+
+            # ΓöÇΓöÇ Bing App Streak ΓöÇΓöÇ
+            if task == "all":
+                add_log("info", "≡ƒöÑ Bing App Streak check-in...")
+                state["current_task"] = "Bing App Streak"
+                try:
+                    import random as _rng
+                    bing_app_settings = dict(settings)
+                    bing_app_settings["use_stealth"] = False
+                    bm_app = BrowserManager(bing_app_settings)
+                    bm_app.set_account(email)
+                    await bm_app.start()
+                    bing_app_ua = _rng.choice(BingAppStreak.BING_APP_UA)
+                    ctx_app, page_app = await _open_account_context(
+                        bm_app,
+                        login_mgr,
+                        account,
+                        session_proxy,
+                        "mobile",
+                        storage_state_path,
+                        user_agent=bing_app_ua,
+                        use_persistent_profile=False,
+                    )
+
+                    bing_streak = BingAppStreak(humanizer)
+                    success = await bing_streak.check_in(page_app)
+                    if success:
+                        add_log("info", "Γ£à Bing App Streak check-in done")
+                    else:
+                        add_log("warning", "ΓÜá∩╕Å Bing App Streak check-in may have failed")
+                    await _persist_storage_state(ctx_app, storage_state_path)
+                    await bm_app.close()
+                except Exception as e:
+                    add_log("warning", f"ΓÜá∩╕Å Bing App Streak error: {e}")
 
             # Edge Browsing Streak is already handled above in the Edge Session block
-            # (lines 573-600) — no duplicate needed
+            # (lines 573-600) ΓÇö no duplicate needed
 
             if task == "all":
-                add_log("info", "🔎 Final Rewards verification...")
+                add_log("info", "≡ƒöÄ Final Rewards verification...")
                 bm_final = None
                 try:
                     bm_final = BrowserManager(settings)
@@ -1787,16 +1544,16 @@ async def _run_bot_async(task: str, password: str):
                         overall_complete = False
                         add_log(
                             "warning",
-                            "⚠️ Run finished with remaining items: "
+                            "ΓÜá∩╕Å Run finished with remaining items: "
                             + ", ".join(remaining_items[:8]),
                         )
                     else:
-                        add_log("info", f"✅ Account {email[:5]}*** fully verified")
+                        add_log("info", f"Γ£à Account {email[:5]}*** fully verified")
                     await _persist_storage_state(ctx_final, storage_state_path)
                 except Exception as e:
                     account_complete = False
                     overall_complete = False
-                    add_log("warning", f"⚠️ Final verification error: {e}")
+                    add_log("warning", f"ΓÜá∩╕Å Final verification error: {e}")
                 finally:
                     if bm_final is not None:
                         try:
@@ -1804,11 +1561,11 @@ async def _run_bot_async(task: str, password: str):
                         except Exception:
                             pass
             else:
-                add_log("info", f"✅ Task '{task}' finished for {email[:5]}***")
+                add_log("info", f"Γ£à Task '{task}' finished for {email[:5]}***")
 
         except Exception as e:
             overall_complete = False
-            add_log("error", f"❌ {email[:5]}***: {str(e)}")
+            add_log("error", f"Γ¥î {email[:5]}***: {str(e)}")
             logger.error(f"Account {email} error: {e}")
             notifier.send_error(email, str(e))
 
@@ -1817,11 +1574,11 @@ async def _run_bot_async(task: str, password: str):
     state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if task == "all":
         if overall_complete:
-            add_log("info", "🏁 All tasks completed and verified!")
+            add_log("info", "≡ƒÅü All tasks completed and verified!")
         else:
-            add_log("warning", "🏁 Run finished with remaining tasks. Check the warnings above.")
+            add_log("warning", "≡ƒÅü Run finished with remaining tasks. Check the warnings above.")
     else:
-        add_log("info", f"🏁 Task '{task}' finished")
+        add_log("info", f"≡ƒÅü Task '{task}' finished")
 
 
 def start_dashboard(port: int = 8080, host: str = "127.0.0.1"):

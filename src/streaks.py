@@ -1,13 +1,11 @@
-"""
+﻿"""
 Streak automation for Microsoft Rewards.
 - Bing App Streak: Check in to Bing App daily (mobile visit)
 - Edge Browsing Streak: Browse with Edge for 30 minutes daily
 - Task Detection: Read Rewards API to find incomplete tasks
 """
 
-from __future__ import annotations
 import asyncio
-import json
 import random
 import re
 from typing import Optional
@@ -23,11 +21,11 @@ from src.utils import (
 )
 from src.humanizer import Humanizer
 
-# ─── Rewards API ──────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Rewards API ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 REWARDS_API_URL = "https://rewards.bing.com/api/getuserinfo?type=1"
 
-# Websites for Edge Streak — MUST be bing.com domains (Microsoft tracks these)
+# Websites for Edge Streak ΓÇö MUST be bing.com domains (Microsoft tracks these)
 BROWSE_SITES = [
     "https://www.bing.com",
     "https://www.bing.com/news",
@@ -54,107 +52,21 @@ class TaskDetector:
     """Reads Rewards dashboard API to detect incomplete tasks."""
 
     @staticmethod
-    def _emit_debug(debug_log, level: str, message: str) -> None:
-        """Send optional diagnostics to the dashboard log without breaking callers."""
-        if debug_log:
-            try:
-                debug_log(level, message)
-                return
-            except Exception as e:
-                logger.debug(f"Debug callback failed: {e}")
-
-        if level == "warning":
-            logger.warning(message)
-        elif level == "debug":
-            logger.debug(message)
-        else:
-            logger.info(message)
-
-    @staticmethod
-    def _summarize_edge_promo(promo: dict) -> dict:
-        """Keep raw Edge-related promo diagnostics compact and predictable."""
-        attributes = promo.get("attributes", {}) or {}
-        return {
-            "title": promo.get("title", ""),
-            "name": promo.get("name", ""),
-            "offerId": promo.get("offerId", ""),
-            "hash": promo.get("hash", ""),
-            "destinationUrl": promo.get("destinationUrl", ""),
-            "complete": promo.get("complete", False),
-            "pointProgress": promo.get("pointProgress", 0),
-            "pointProgressMax": promo.get("pointProgressMax", 0),
-            "attributesType": attributes.get("type", ""),
-        }
-
-    @staticmethod
-    def _looks_like_edge_promo(promo: dict) -> bool:
-        """Capture promos that mention Edge even if the streak heuristic misses them."""
-        haystack = " ".join([
-            promo.get("title", "") or "",
-            promo.get("name", "") or "",
-            promo.get("destinationUrl", "") or "",
-        ]).lower()
-        return "edge" in haystack
-
-    @staticmethod
-    def _extract_edge_card_excerpt(page_text: str) -> str:
-        """Pull a small excerpt around the first Edge-related line from rendered DOM text."""
-        if not page_text:
-            return ""
-
-        lines = [line.strip() for line in page_text.splitlines() if line.strip()]
-        for idx, line in enumerate(lines):
-            lowered = line.lower()
-            if "edge" in lowered and (
-                "brows" in lowered or "streak" in lowered or "minute" in lowered
-            ):
-                start = max(0, idx - 2)
-                end = min(len(lines), idx + 3)
-                excerpt = " | ".join(lines[start:end])
-                return excerpt[:500]
-        return ""
-
-    @staticmethod
     def _parse_card_progress(page_text: str) -> dict[str, tuple[int, int] | None]:
         """Extract streak and daily-set progress from rendered card text."""
         if not page_text:
             return {"daily_set": None, "edge": None, "bing_app": None}
 
-        # Edge Browsing Streak — try multiple patterns
-        # Pattern 1: "Edge ... Minutes: X / Y"
         edge_match = re.search(
             r"Edge(?:\s+Browsing(?:\s+Streak)?)?.*?Minutes:\s*(\d+)\s*/\s*(\d+)",
             page_text,
             re.IGNORECASE | re.DOTALL,
         )
-        # Pattern 2: "Edge ... Activity: X/Y" or "Edge ... Activity: X / Y"
-        if not edge_match:
-            edge_match = re.search(
-                r"Edge(?:\s+Browsing(?:\s+Streak)?)?.*?Activit(?:y|ies):\s*(\d+)\s*/\s*(\d+)",
-                page_text,
-                re.IGNORECASE | re.DOTALL,
-            )
-        # Pattern 3: "Edge Browsing Streak" followed by generic X/Y digits
-        if not edge_match:
-            edge_match = re.search(
-                r"Edge\s+Browsing\s+Streak.*?(\d+)\s*/\s*(\d+)",
-                page_text,
-                re.IGNORECASE | re.DOTALL,
-            )
-
         bing_app_match = re.search(
             r"(?:Mobile\s+App|Bing\s+App(?:\s+Streak)?).*?Check-?in:\s*(\d+)\s*/\s*(\d+)",
             page_text,
             re.IGNORECASE | re.DOTALL,
         )
-        # Bing App fallback: "Bing App ... Activity: X/Y"
-        if not bing_app_match:
-            bing_app_match = re.search(
-                r"(?:Mobile\s+App|Bing\s+App(?:\s+Streak)?).*?Activit(?:y|ies):\s*(\d+)\s*/\s*(\d+)",
-                page_text,
-                re.IGNORECASE | re.DOTALL,
-            )
-
         daily_set_match = re.search(
             r"Daily\s+Set(?:\s+Streak)?.*?Activit(?:y|ies):\s*(\d+)\s*/\s*(\d+)",
             page_text,
@@ -173,13 +85,7 @@ class TaskDetector:
         }
 
     @staticmethod
-    async def get_all_tasks(
-        page: Page,
-        *,
-        edge_debug_label: str = "",
-        debug_log=None,
-        include_edge_diagnostics: bool = False,
-    ) -> dict:
+    async def get_all_tasks(page: Page) -> dict:
         """
         Fetch complete task status from Rewards API.
 
@@ -191,9 +97,6 @@ class TaskDetector:
             - total_points: int
             - level: str
         """
-        if edge_debug_label:
-            include_edge_diagnostics = True
-
         result = {
             "searches": {
                 "pc_current": 0, "pc_max": 0,
@@ -203,17 +106,7 @@ class TaskDetector:
             "daily_set": {"completed": 0, "total": 0},
             "streaks": {
                 "bing_app": {"current": 0, "done": False},
-                "edge": {
-                    "minutes": 0,
-                    "target": 30,
-                    "done": False,
-                    "offerId": "",
-                    "hash": "",
-                    "name": "",
-                    "destinationUrl": "",
-                    "debugPromos": [],
-                    "domSnapshots": [],
-                },
+                "edge": {"minutes": 0, "target": 30, "done": False},
             },
             "more_activities": {"completed": 0, "total": 0},
             "total_points": 0,
@@ -250,11 +143,11 @@ class TaskDetector:
             dashboard = data.get("dashboard", {})
             user_status = dashboard.get("userStatus", {})
 
-            # ── Total Points & Level ──
+            # ΓöÇΓöÇ Total Points & Level ΓöÇΓöÇ
             result["total_points"] = user_status.get("availablePoints", 0)
             result["level"] = user_status.get("levelInfo", {}).get("activeLevel", "")
 
-            # ── Search Counters ──
+            # ΓöÇΓöÇ Search Counters ΓöÇΓöÇ
             counters = user_status.get("counters", {})
 
             if "pcSearch" in counters and counters["pcSearch"]:
@@ -267,14 +160,14 @@ class TaskDetector:
                 result["searches"]["mobile_current"] = mob.get("pointProgress", 0)
                 result["searches"]["mobile_max"] = mob.get("pointProgressMax", 0)
 
-            # ── Daily Set ──
+            # ΓöÇΓöÇ Daily Set ΓöÇΓöÇ
             daily_sets = dashboard.get("dailySetPromotions", {})
             for item in select_active_daily_set_items(daily_sets):
                 result["daily_set"]["total"] += 1
                 if item.get("complete", False) or item.get("pointProgress", 0) >= item.get("pointProgressMax", 1):
                     result["daily_set"]["completed"] += 1
 
-            # ── More Activities / Promotions ──
+            # ΓöÇΓöÇ More Activities / Promotions ΓöÇΓöÇ
             more_promos = dashboard.get("morePromotions", [])
             for promo in more_promos:
                 result["more_activities"]["total"] += 1
@@ -284,11 +177,7 @@ class TaskDetector:
                 # Detect streak tasks
                 title = (promo.get("title", "") or promo.get("name", "")).lower()
                 attributes = promo.get("attributes", {})
-
-                if TaskDetector._looks_like_edge_promo(promo):
-                    result["streaks"]["edge"]["debugPromos"].append(
-                        TaskDetector._summarize_edge_promo(promo)
-                    )
+                promo_type = attributes.get("type", "")
 
                 # Bing App Streak
                 if "bing" in title and ("app" in title or "streak" in title or "check" in title):
@@ -318,37 +207,6 @@ class TaskDetector:
                         f"destUrl='{promo.get('destinationUrl', '')}'"
                     )
 
-            # New Rewards UI sometimes puts streak promos inside dailySetPromotions,
-            # punchCards, or other sections. Scan them if we haven't found Edge yet.
-            if not result["streaks"]["edge"]["done"] and result["streaks"]["edge"]["minutes"] == 0:
-                # Scan daily set items for streak promos
-                all_daily_items = []
-                for _ds_key, _ds_items in dashboard.get("dailySetPromotions", {}).items():
-                    if isinstance(_ds_items, list):
-                        all_daily_items.extend(_ds_items)
-                # Scan punch card children too
-                for pc in dashboard.get("punchCards", []):
-                    for child in pc.get("childPromotions", []):
-                        all_daily_items.append(child)
-
-                for promo in all_daily_items:
-                    title = (promo.get("title", "") or promo.get("name", "")).lower()
-                    if "edge" in title and ("brows" in title or "streak" in title):
-                        progress = promo.get("pointProgress", 0)
-                        max_progress = promo.get("pointProgressMax", 1)
-                        result["streaks"]["edge"]["minutes"] = progress
-                        result["streaks"]["edge"]["target"] = max_progress if max_progress > 0 else 30
-                        result["streaks"]["edge"]["done"] = progress >= max_progress or promo.get("complete", False)
-                        result["streaks"]["edge"]["offerId"] = promo.get("offerId", "")
-                        result["streaks"]["edge"]["hash"] = promo.get("hash", "")
-                        result["streaks"]["edge"]["name"] = promo.get("name", "")
-                        result["streaks"]["edge"]["destinationUrl"] = promo.get("destinationUrl", "")
-                        logger.info(
-                            f"Edge Streak found in dailySetPromotions/punchCards: "
-                            f"progress={progress}/{max_progress}"
-                        )
-                        break
-
             # New Rewards UI exposes some progress only in rendered cards.
             need_dom_progress = (
                 result["daily_set"]["total"] == 0
@@ -361,15 +219,10 @@ class TaskDetector:
                     and result["streaks"]["bing_app"]["current"] == 0
                 )
             )
-            if need_dom_progress or include_edge_diagnostics:
-                pages_to_probe = []
-                for rewards_url in [
-                    page.url,
-                    "https://rewards.bing.com/pointsbreakdown",
-                    "https://rewards.bing.com/earn",
-                ]:
-                    if rewards_url not in pages_to_probe:
-                        pages_to_probe.append(rewards_url)
+            if need_dom_progress:
+                pages_to_probe = [page.url]
+                if "https://rewards.bing.com/earn" not in pages_to_probe:
+                    pages_to_probe.append("https://rewards.bing.com/earn")
 
                 for rewards_url in pages_to_probe:
                     try:
@@ -385,22 +238,6 @@ class TaskDetector:
                         continue
 
                     card_progress = TaskDetector._parse_card_progress(page_text)
-                    edge_excerpt = TaskDetector._extract_edge_card_excerpt(page_text)
-
-                    if include_edge_diagnostics:
-                        edge_progress = card_progress.get("edge")
-                        edge_progress_payload = (
-                            {
-                                "minutes": edge_progress[0],
-                                "target": edge_progress[1],
-                            }
-                            if edge_progress else None
-                        )
-                        result["streaks"]["edge"]["domSnapshots"].append({
-                            "url": rewards_url,
-                            "progress": edge_progress_payload,
-                            "excerpt": edge_excerpt,
-                        })
 
                     daily_set_progress = card_progress.get("daily_set")
                     if daily_set_progress:
@@ -449,51 +286,190 @@ class TaskDetector:
                     ):
                         break
 
-            if include_edge_diagnostics:
-                label = edge_debug_label or "snapshot"
-                edge_state = result["streaks"]["edge"]
-                promos_json = json.dumps(
-                    edge_state.get("debugPromos", []),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                TaskDetector._emit_debug(
-                    debug_log,
-                    "info",
-                    f"[EdgeDiag:{label}] API edge promos: {promos_json}",
-                )
-                TaskDetector._emit_debug(
-                    debug_log,
-                    "info",
-                    f"[EdgeDiag:{label}] Edge state: "
-                    f"minutes={edge_state.get('minutes', 0)}/"
-                    f"{edge_state.get('target', 30)}, "
-                    f"done={edge_state.get('done', False)}, "
-                    f"offerId='{edge_state.get('offerId', '')}', "
-                    f"hash='{edge_state.get('hash', '')}', "
-                    f"destinationUrl='{edge_state.get('destinationUrl', '')}'",
-                )
-                for snapshot in edge_state.get("domSnapshots", []):
-                    excerpt = snapshot.get("excerpt", "") or "<no edge card excerpt>"
-                    TaskDetector._emit_debug(
-                        debug_log,
-                        "info",
-                        f"[EdgeDiag:{label}] DOM {snapshot.get('url')}: "
-                        f"progress={snapshot.get('progress')}, excerpt={excerpt}",
-                    )
-
             logger.info(
-                f"Tasks detected — PC: {result['searches']['pc_current']}/{result['searches']['pc_max']}, "
+                f"Tasks detected ΓÇö PC: {result['searches']['pc_current']}/{result['searches']['pc_max']}, "
                 f"Mobile: {result['searches']['mobile_current']}/{result['searches']['mobile_max']}, "
                 f"Daily: {result['daily_set']['completed']}/{result['daily_set']['total']}, "
-                f"BingApp: {'✅' if result['streaks']['bing_app']['done'] else '❌'}, "
-                f"Edge: {'✅' if result['streaks']['edge']['done'] else '❌'}"
+                f"BingApp: {'Γ£à' if result['streaks']['bing_app']['done'] else 'Γ¥î'}, "
+                f"Edge: {'Γ£à' if result['streaks']['edge']['done'] else 'Γ¥î'}"
             )
 
         except Exception as e:
             logger.warning(f"Task detection failed: {e}")
 
         return result
+
+class BingAppStreak:
+    """
+    Bing App Streak completion.
+
+    How it works: Microsoft checks visits from the Bing mobile app.
+    The real Bing App uses the "BingSapphire" identifier in User-Agent.
+    We simulate this by visiting bing.com with a real Bing App UA,
+    then visiting the rewards activity page to register the check-in.
+    """
+
+    # Real Bing App user-agents (Android & iOS) ΓÇö must use "BingSapphire"
+    BING_APP_UA = [
+        # Android Bing App (real package: com.microsoft.bing)
+        "Mozilla/5.0 (Linux; Android 14; SM-S928B Build/UP1A.231005.007) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.0.0 "
+        "Mobile Safari/537.36 BingSapphire/25.3.410526303",
+        # Android Bing App ΓÇö Pixel
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UD1A.231105.004) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.0.0 "
+        "Mobile Safari/537.36 BingSapphire/25.3.410526303",
+        # iOS Bing App
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6_1 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+        "Mobile/15E148 Safari/604.1 BingSapphire/25.3.410526303",
+    ]
+
+    def __init__(self, humanizer: Humanizer):
+        self.humanizer = humanizer
+
+    async def check_in(self, page: Page) -> bool:
+        """
+        Perform Bing App check-in.
+
+        Steps:
+        1. Visit bing.com with Bing App UA (triggers app detection)
+        2. Do a search (reinforces app activity)
+        3. Visit rewards page and click "Bing App Streak" card directly
+        4. Confirm via API
+        """
+        logger.info("≡ƒöÑ Starting Bing App Streak check-in...")
+
+        try:
+            # 1. Visit Bing homepage (triggers check-in cookie)
+            await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(random.uniform(3, 5))
+
+            # 2. Do a quick search (reinforces activity)
+            query = random.choice([
+                "weather today", "news headlines", "sports scores",
+                "recipe ideas", "movie showtimes", "stock market today",
+            ])
+            sb = page.locator('#sb_form_q, input[name="q"]')
+            if await sb.count() > 0:
+                await sb.click()
+                await sb.fill(query)
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(random.uniform(3, 6))
+
+            # 3. Visit rewards page and click the Bing App Streak card
+            await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(random.uniform(3, 5))
+
+            # Try to click the Bing App Streak card directly
+            streak_clicked = False
+            streak_selectors = [
+                # Correct selectors from Rewards page DOM (#more-activities section)
+                '#more-activities mee-card:has-text("Bing") a',
+                '#more-activities mee-card:has-text("Mobile App") a',
+                '#more-activities mee-card:has-text("Check-in") a',
+                'mee-rewards-more-activities-card-item:has-text("Bing") a',
+                # Text-based fallback
+                'a:has-text("Bing App Streak")',
+                'a:has-text("Bing App")',
+                'a:has-text("Mobile App")',
+                'a:has-text("Check-in")',
+                # Data attribute based
+                '[data-bi-id*="BingApp"]',
+                '[data-bi-id*="AppStreak"]',
+                '[data-bi-name="promotion_item"]:has-text("Bing")',
+                # Card structure
+                'mee-card:has-text("Bing App") a',
+                'mee-card:has-text("Bing Streak") a',
+                'mee-card:has-text("Mobile App") a',
+            ]
+            for sel in streak_selectors:
+                try:
+                    el = page.locator(sel).first
+                    if await el.count() > 0:
+                        pages_before = len(page.context.pages)
+                        await el.click(timeout=5000)
+                        streak_clicked = True
+                        logger.debug(f"Clicked Bing App card via: {sel}")
+                        await asyncio.sleep(random.uniform(3, 5))
+
+                        current_pages = page.context.pages
+                        if len(current_pages) > pages_before:
+                            popup = current_pages[-1]
+                            try:
+                                await popup.wait_for_load_state(
+                                    "domcontentloaded",
+                                    timeout=15000,
+                                )
+                                await asyncio.sleep(random.uniform(4, 7))
+                                await popup.bring_to_front()
+                            except Exception:
+                                pass
+                        break
+                except Exception:
+                    continue
+
+            if not streak_clicked:
+                logger.debug("Could not find Bing App Streak card, using API fallback")
+
+            # 4. Hit the rewards activity API to confirm check-in
+            try:
+                await page.evaluate("""
+                    async () => {
+                        try {
+                            await fetch('https://rewards.bing.com/api/getuserinfo?type=1', {
+                                credentials: 'include'
+                            });
+                        } catch(e) {}
+                    }
+                """)
+            except Exception:
+                pass
+
+            await asyncio.sleep(2)
+            for other_page in list(page.context.pages):
+                if other_page is page:
+                    continue
+                try:
+                    await other_page.close()
+                except Exception:
+                    pass
+
+            # 5. Visit bing.com once more (double-tap for safety)
+            await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(random.uniform(2, 4))
+
+            detector = TaskDetector()
+            bing_state = {"current": 0, "done": False}
+            for attempt in range(3):
+                status = await detector.get_all_tasks(page)
+                bing_state = status.get("streaks", {}).get("bing_app", {})
+                if bing_state.get("done", False):
+                    logger.info("Γ£à Bing App Streak check-in verified")
+                    return True
+
+                if attempt < 2:
+                    try:
+                        await page.goto(
+                            "https://rewards.bing.com/earn",
+                            wait_until="domcontentloaded",
+                            timeout=15000,
+                        )
+                        await asyncio.sleep(random.uniform(3, 5))
+                    except Exception:
+                        pass
+
+            logger.warning(
+                f"ΓÜá∩╕Å Bing App Streak not verified "
+                f"({bing_state.get('current', 0)}/1)"
+            )
+            return False
+
+        except Exception as e:
+            logger.error(f"Γ¥î Bing App check-in failed: {e}")
+            return False
+
 
 class EdgeBrowsingStreak:
     """
@@ -532,7 +508,7 @@ class EdgeBrowsingStreak:
         Clicks Edge Streak card first, then visits bing.com pages with
         periodic heartbeats via rewards API to register browsing time.
         """
-        logger.info(f"🌐 Starting Edge Browsing Streak ({target_minutes} min)...")
+        logger.info(f"≡ƒîÉ Starting Edge Browsing Streak ({target_minutes} min)...")
 
         elapsed = 0
         verified_minutes = max(0, initial_minutes)
@@ -550,7 +526,7 @@ class EdgeBrowsingStreak:
         site_idx = 0
         last_heartbeat = 0
 
-        # ═══ STEP 1: Activate Edge Browsing Streak tracking ═══
+        # ΓòÉΓòÉΓòÉ STEP 1: Activate Edge Browsing Streak tracking ΓòÉΓòÉΓòÉ
         try:
             # Method 1: Direct activation URL (most reliable)
             activation_urls = [
@@ -634,14 +610,14 @@ class EdgeBrowsingStreak:
                     continue
 
             if not streak_activated:
-                logger.warning("Could not activate Edge Streak card — browsing may not be tracked")
+                logger.warning("Could not activate Edge Streak card ΓÇö browsing may not be tracked")
 
         except Exception:
             pass
 
-        # ═══ STEP 2: Browse bing.com pages with periodic heartbeats ═══
+        # ΓòÉΓòÉΓòÉ STEP 2: Browse bing.com pages with periodic heartbeats ΓòÉΓòÉΓòÉ
         zero_progress_retries = 0  # How many times mid-session retry found 0 min
-        max_zero_retries = 8  # Bail out after this many (~20 min) — prevents 70 min loop
+        max_zero_retries = 8  # Bail out after this many (~20 min) ΓÇö prevents 70 min loop
 
         try:
             current_minutes, current_target, streak_done = await self._read_verified_progress(page)
@@ -649,7 +625,7 @@ class EdgeBrowsingStreak:
             verified_target = max(verified_target, current_target)
             if streak_done:
                 logger.info(
-                    f"✅ Edge streak already verified ({verified_minutes}/{verified_target} min)"
+                    f"Γ£à Edge streak already verified ({verified_minutes}/{verified_target} min)"
                 )
                 return True
         except Exception:
@@ -701,11 +677,11 @@ class EdgeBrowsingStreak:
 
                 elapsed += visit_time
 
-                # ═══ HEARTBEAT: Visit rewards page every 2 minutes ═══
+                # ΓòÉΓòÉΓòÉ HEARTBEAT: Visit rewards page every 2 minutes ΓòÉΓòÉΓòÉ
                 time_since_heartbeat = elapsed - last_heartbeat
                 if time_since_heartbeat >= 120:  # Every 2 minutes
                     try:
-                        logger.debug("Edge streak heartbeat → rewards.bing.com")
+                        logger.debug("Edge streak heartbeat ΓåÆ rewards.bing.com")
                         await page.goto(
                             REWARDS_URL,
                             wait_until="domcontentloaded",
@@ -770,7 +746,7 @@ class EdgeBrowsingStreak:
                                 # in the user's region (only US/CA/GB/DE/FR/AU/JP).
                                 if zero_progress_retries >= max_zero_retries:
                                     logger.warning(
-                                        f"⚠️ Edge Streak: 0 min after {elapsed // 60}+ min "
+                                        f"ΓÜá∩╕Å Edge Streak: 0 min after {elapsed // 60}+ min "
                                         f"and {zero_progress_retries} retries. "
                                         f"This feature may not be available in your region. "
                                         f"Skipping to save time."
@@ -778,7 +754,7 @@ class EdgeBrowsingStreak:
                                     break
 
                                 logger.warning(
-                                    f"⚠️ 6+ min elapsed but 0 min credited, "
+                                    f"ΓÜá∩╕Å 6+ min elapsed but 0 min credited, "
                                     f"retrying via pointsbreakdown... "
                                     f"(attempt {zero_progress_retries}/{max_zero_retries})"
                                 )
@@ -834,7 +810,7 @@ class EdgeBrowsingStreak:
                 await asyncio.sleep(10)
                 elapsed += 10
 
-        # ═══ Final heartbeat ═══
+        # ΓòÉΓòÉΓòÉ Final heartbeat ΓòÉΓòÉΓòÉ
         try:
             await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=15000)
             await asyncio.sleep(3)
@@ -854,7 +830,7 @@ class EdgeBrowsingStreak:
             streak_done = verified_minutes >= verified_target
 
         logger.info(
-            f"✅ Edge browsing session finished "
+            f"Γ£à Edge browsing session finished "
             f"({verified_minutes}/{verified_target} verified min)"
         )
         return streak_done or verified_minutes >= verified_target

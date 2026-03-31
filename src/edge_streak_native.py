@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import random
-import socket
 import subprocess
 import time
 from pathlib import Path
@@ -73,26 +72,13 @@ class NativeEdgeStreak:
     and Microsoft doesn't know who is browsing → 0/30 minutes.
     """
 
-    @staticmethod
-    def _find_available_port(start: int = 9323, end: int = 9399) -> int:
-        """Find an available TCP port for CDP to avoid conflicts."""
-        for port in range(start, end):
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                try:
-                    s.bind(("127.0.0.1", port))
-                    return port
-                except OSError:
-                    continue
-        return start  # fallback
-
     def __init__(self, account_email: str = "", storage_state_path: Optional[Path] = None):
         self._edge_exe = get_edge_executable_path()
         self.edge_process: Optional[subprocess.Popen] = None
         self._edge_hwnd = None
-        self._cdp_port = self._find_available_port()  # Dynamic port allocation
+        self._cdp_port = 9323
         self._account_email = account_email
         self._storage_state_path = storage_state_path
-        self._diagnostic_log = None  # Set by browse() for Web Dashboard logging
         # Build the profile directory path matching browser.py's convention
         if account_email:
             safe_email = account_email.replace("@", "_at_").replace(".", "_")
@@ -100,67 +86,41 @@ class NativeEdgeStreak:
         else:
             self._profile_dir = None
 
-    def _cdp_version_sync(self) -> Optional[str]:
-        """Blocking CDP version check (called from thread)."""
-        req = urllib.request.Request(f"http://127.0.0.1:{self._cdp_port}/json/version")
-        with urllib.request.urlopen(req, timeout=3) as response:
-            data = json.loads(response.read())
-            return data.get("webSocketDebuggerUrl")
-
-    async def _wait_for_cdp(self, timeout=15) -> Optional[str]:
-        """Poll CDP endpoint without blocking the event loop."""
+    def _wait_for_cdp(self, timeout=15) -> Optional[str]:
+        """Poll the CDP endpoint until it responds or timeout."""
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
-                ws_url = await asyncio.to_thread(self._cdp_version_sync)
-                if ws_url:
-                    return ws_url
+                req = urllib.request.Request(f"http://127.0.0.1:{self._cdp_port}/json/version")
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    data = json.loads(response.read())
+                    return data["webSocketDebuggerUrl"]
             except Exception:
-                pass
-            await asyncio.sleep(1)
+                time.sleep(1)
         return None
 
-    def _get_edge_tree_pids(self) -> set:
-        """Get all PIDs in our Edge process tree (parent + children).
-        Edge spawns child processes (GPU, renderer) that own the visible windows."""
-        if not self.edge_process:
-            return set()
-        root_pid = self.edge_process.pid
-        pids = {root_pid}
-        try:
-            result = subprocess.run(
-                ["wmic", "process", "where", f"ParentProcessId={root_pid}",
-                 "get", "ProcessId"],
-                capture_output=True, text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            for line in result.stdout.strip().split('\n')[1:]:
-                pid_str = line.strip()
-                if pid_str.isdigit():
-                    pids.add(int(pid_str))
-        except Exception:
-            pass
-        return pids
-
     def _position_edge_corner(self):
-        """Position Edge at bottom-right corner with normal Z-order for telemetry."""
+        """Position Edge as a small window at the bottom-right corner of the screen.
+        
+        CRITICAL: Do NOT use HWND_BOTTOM. Microsoft Edge telemetry uses native Win32
+        focus signals to track browsing time. Pushing Edge to HWND_BOTTOM causes the
+        timer to stop counting. Instead, we keep Edge in normal Z-order but make it
+        small and position it at the screen corner so it's non-intrusive.
+        """
         if not self.edge_process:
             return
 
-        # Get all PIDs in our process tree (child processes own the windows)
-        tree_pids = self._get_edge_tree_pids()
-        if not tree_pids:
-            return
-
+        # Wait a moment for Edge windows to appear
+        import time as _time
         max_wait = 8
-        start = time.time()
+        start = _time.time()
         hwnds = []
-        while time.time() - start < max_wait:
+        while _time.time() - start < max_wait:
             hwnds = []
             def callback(hwnd, extra):
                 pid = ctypes.c_ulong(0)
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value in tree_pids and user32.IsWindowVisible(hwnd):
+                if pid.value == self.edge_process.pid and user32.IsWindowVisible(hwnd):
                     hwnds.append(hwnd)
                 return True
             user32.EnumWindows(
@@ -168,7 +128,7 @@ class NativeEdgeStreak:
             )
             if hwnds:
                 break
-            time.sleep(0.5)
+            _time.sleep(0.5)
 
         if not hwnds:
             logger.warning("Could not find Edge window to reposition")
@@ -176,21 +136,27 @@ class NativeEdgeStreak:
 
         self._edge_hwnd = hwnds[0]
 
-        screen_w = user32.GetSystemMetrics(0)
-        screen_h = user32.GetSystemMetrics(1)
-        win_w, win_h = 500, 400
-        pos_x = screen_w - win_w - 10
-        pos_y = screen_h - win_h - 50
+        # Get screen dimensions
+        screen_w = user32.GetSystemMetrics(0)  # SM_CXSCREEN
+        screen_h = user32.GetSystemMetrics(1)  # SM_CYSCREEN
 
+        # Small window at bottom-right corner (non-intrusive but still "visible" to OS)
+        win_w = 500
+        win_h = 400
+        pos_x = screen_w - win_w - 10
+        pos_y = screen_h - win_h - 50  # 50px above taskbar
+
+        # Restore window if minimized and reposition
         user32.ShowWindow(self._edge_hwnd, SW_RESTORE)
+        # Place at corner WITHOUT SWP_NOACTIVATE — let it be "active" 
         user32.SetWindowPos(
             self._edge_hwnd, HWND_NOTOPMOST,
             pos_x, pos_y, win_w, win_h,
             SWP_SHOWWINDOW,
         )
         logger.info(
-            f"Edge window positioned at ({pos_x},{pos_y} {win_w}x{win_h}) — "
-            f"normal Z-order for telemetry."
+            f"Edge window positioned at bottom-right corner ({pos_x},{pos_y} {win_w}x{win_h}) — "
+            f"staying in normal Z-order for telemetry tracking."
         )
 
     def _pulse_edge_focus(self):
@@ -208,25 +174,19 @@ class NativeEdgeStreak:
         except Exception:
             pass
 
-    async def _cleanup_edge(self):
-        """Kill only our Edge process tree — never kills user's personal Edge windows."""
-        if self.edge_process and self.edge_process.poll() is None:
-            try:
-                logger.debug(f"Killing Edge process tree (PID {self.edge_process.pid})...")
-                await asyncio.to_thread(
-                    subprocess.run,
-                    ["taskkill", "/f", "/pid", str(self.edge_process.pid), "/t"],
-                    capture_output=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            except Exception as e:
-                logger.debug(f"taskkill edge tree: {e}")
-        self.edge_process = None
-        await asyncio.sleep(2)
+    async def _kill_all_edge(self):
+        """Ensure no lingering instances prevent our clean launch."""
+        try:
+            logger.debug("Killing all existing msedge.exe processes...")
+            subprocess.run(["taskkill", "/f", "/im", "msedge.exe", "/t"], 
+                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.debug(f"taskkill msedge: {e}")
 
     async def _launch_edge(self, start_url: str = "https://www.bing.com") -> bool:
         """Launch Edge natively with the BOT's profile (logged-in cookies)."""
-        await self._cleanup_edge()
+        await self._kill_all_edge()
 
         args = [
             self._edge_exe,
@@ -238,8 +198,6 @@ class NativeEdgeStreak:
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
-            # CRITICAL: Suppress navigator.webdriver = true
-            "--disable-blink-features=AutomationControlled",
             f"--remote-debugging-port={self._cdp_port}",
         ]
 
@@ -360,349 +318,185 @@ class NativeEdgeStreak:
             logger.warning(f"Login check failed: {e}")
             return False
 
-    def _log(self, level: str, message: str):
-        """Log to both logger and diagnostic_log callback (for Web Dashboard).
-        Avoids duplicates: if diagnostic_log is set, only use that (it internally logs too).
-        """
-        if self._diagnostic_log:
-            try:
-                self._diagnostic_log(level, message)
-                return  # diagnostic_log already logs to console
-            except Exception:
-                pass
-        # Fallback: direct logger
-        if level == "warning":
-            logger.warning(message)
-        elif level == "debug":
-            logger.debug(message)
-        elif level == "error":
-            logger.error(message)
-        else:
-            logger.info(message)
-
-    async def _check_current_streak_progress(self, page) -> int:
-        """Check streak progress via DOM scraping on the CURRENT page.
-        
-        The Rewards API (getuserinfo?type=1) does NOT contain Edge streak
-        minutes in pointProgress — it's always 0. The actual minutes are
-        only available in the rendered DOM of rewards.bing.com/earn.
-        
-        We navigate the main page to rewards.bing.com/earn, scrape the
-        progress text, then navigate back to continue browsing.
-        Returns -1 if unable to read progress (DOM not found).
-        """
-        import re
-        try:
-            # Save where we were
-            original_url = page.url
-            
-            # Navigate to the /earn page which contains Edge streak card
-            await page.goto(
-                "https://rewards.bing.com/earn",
-                wait_until="domcontentloaded",
-                timeout=12000,
-            )
-            await asyncio.sleep(2)
-            
-            # Get the entire page text for regex parsing
-            page_text = await page.locator("body").inner_text(timeout=5000)
-            
-            # Use exact same regex patterns as TaskDetector._parse_card_progress
-            edge_match = re.search(
-                r"Edge(?:\s+Browsing(?:\s+Streak)?)?.*?Minutes:\s*(\d+)\s*/\s*(\d+)",
-                page_text, re.IGNORECASE | re.DOTALL,
-            )
-            if not edge_match:
-                edge_match = re.search(
-                    r"Edge(?:\s+Browsing(?:\s+Streak)?)?.*?Activit(?:y|ies):\s*(\d+)\s*/\s*(\d+)",
-                    page_text, re.IGNORECASE | re.DOTALL,
-                )
-            if not edge_match:
-                edge_match = re.search(
-                    r"Edge\s+Browsing\s+Streak.*?(\d+)\s*/\s*(\d+)",
-                    page_text, re.IGNORECASE | re.DOTALL,
-                )
-            
-            # Navigate back to a browsing page
-            browse_url = original_url if "bing.com" in original_url else "https://www.bing.com"
-            await page.goto(browse_url, wait_until="domcontentloaded", timeout=10000)
-            
-            if edge_match:
-                minutes = int(edge_match.group(1))
-                return minutes
-            else:
-                self._log("debug", "DOM scraping: Edge streak card not found on /earn")
-                return -1  # Signal: couldn't read
-
-        except Exception as e:
-            self._log("debug", f"DOM scraping failed: {e}")
-            # Try to navigate back
-            try:
-                await page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=8000)
-            except Exception:
-                pass
-            return -1
-
-    async def _activate_edge_streak_card(self, page) -> bool:
-        """Click the Edge Browsing Streak card on rewards.bing.com to activate tracking.
-        
-        FIX #3: Microsoft may require clicking the card to start the timer.
-        This mirrors the logic in streaks.py EdgeBrowsingStreak.
-        """
-        activation_urls = [
-            "https://rewards.bing.com/pointsbreakdown",
-            "https://rewards.bing.com/earn",
-            "https://rewards.bing.com/",
-        ]
-        for act_url in activation_urls:
-            try:
-                await page.goto(act_url, wait_until="domcontentloaded", timeout=15000)
-                await asyncio.sleep(3)
-                
-                # JS-based card finder (works regardless of DOM structure)
-                activated = await page.evaluate("""
-                    () => {
-                        // Search all links and clickable elements for Edge-related text
-                        const allElements = document.querySelectorAll('a, button, [role="link"], [role="button"], mee-card a');
-                        for (const el of allElements) {
-                            const text = (el.textContent || '').toLowerCase();
-                            const href = (el.href || '').toLowerCase();
-                            if ((text.includes('edge') && (text.includes('brows') || text.includes('streak') || text.includes('minute')))
-                                || (href.includes('edge') && href.includes('streak'))) {
-                                el.click();
-                                return true;
-                            }
-                        }
-                        // Try shadow DOM elements (mee-card components)
-                        const cards = document.querySelectorAll('mee-card, mee-rewards-more-activities-card-item');
-                        for (const card of cards) {
-                            const text = (card.textContent || '').toLowerCase();
-                            if (text.includes('edge') && (text.includes('brows') || text.includes('streak'))) {
-                                const link = card.querySelector('a');
-                                if (link) { link.click(); return true; }
-                                card.click();
-                                return true;
-                            }
-                        }
-                        return false;
-                    }
-                """)
-                if activated:
-                    self._log("info", f"✅ Edge Streak card activated on {act_url}")
-                    await asyncio.sleep(random.uniform(3, 5))
-                    return True
-            except Exception:
-                continue
-        
-        self._log("warning", "⚠️ Could not click Edge Streak card — tracking may not activate")
-        return False
-
     async def browse(self, target_minutes: int, on_progress: Callable[[int, int], None], start_url: str = "https://www.bing.com", diagnostic_log=None):
-        """Run the automated browsing loop over CDP with stealth mocks and dynamic API validation.
-        
-        FIX #2: diagnostic_log is now used for all important messages.
-        FIX #4: Max 5 restart attempts to prevent infinite loops.
-        """
+        """Run the automated browsing loop over CDP with stealth mocks."""
         if target_minutes <= 0:
             return
 
-        # FIX #2: Store diagnostic_log for use by self._log()
-        self._diagnostic_log = diagnostic_log
-
-        baseline_minutes = 0
-        overall_start_time = time.time()
-        restart_count = 0
-        MAX_RESTARTS = 5  # FIX #4: Prevent infinite restart loops
+        logger.info(f"Starting Edge Browsing Streak natively via CDP for {target_minutes} min")
         
-        while baseline_minutes < target_minutes and (time.time() - overall_start_time) < 10800:
-            # FIX #4: Check restart limit
-            if restart_count >= MAX_RESTARTS:
-                self._log("error", f"❌ Edge Streak: Gave up after {MAX_RESTARTS} restart attempts. "
-                          f"Progress: {baseline_minutes}/{target_minutes} min. "
-                          f"Profile may need re-authentication.")
-                break
-
-            attempt_label = f" (attempt {restart_count + 1})" if restart_count > 0 else ""
-            self._log("info", f"🚀 Starting Edge Browsing Streak via CDP{attempt_label} "
-                      f"(Target: {target_minutes} min, current: {baseline_minutes} min)")
+        if not await self._launch_edge(start_url):
+            logger.error("Failed to launch Edge Native")
+            return
             
-            if not await self._launch_edge(start_url):
-                self._log("error", "Failed to launch Edge Native")
-                return
+        ws_url = self._wait_for_cdp(timeout=15)
+        if not ws_url:
+            logger.error("Could not get CDP endpoint from native Edge. Aborting streak.")
+            if self.edge_process:
+                self.edge_process.terminate()
+            return
+            
+        logger.info("Connecting Playwright over CDP...")
+        
+        start_time = time.time()
+        urls_pool = list(BROWSE_URLS)
+        
+        # We handle exceptions tightly so we always cleanup the Edge process
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.connect_over_cdp(ws_url)
+                context = browser.contexts[0]
                 
-            ws_url = await self._wait_for_cdp(timeout=15)
-            if not ws_url:
-                self._log("error", "Could not get CDP endpoint from native Edge. Aborting streak.")
-                if self.edge_process:
-                    self.edge_process.terminate()
-                return
+                # INJECT STEALTH SCRIPT TO TRICK TELEMETRY
+                await context.add_init_script("""
+                    // 1. Force visibilityState to 'visible'
+                    Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});
+                    // 2. Force document.hidden to false
+                    Object.defineProperty(document, 'hidden', {get: () => false});
+                    // 3. Force document.hasFocus to true 
+                    document.hasFocus = () => true;
+                    // 4. Suppress blur/mouseleave events
+                    window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
+                    window.addEventListener('blur', e => e.stopImmediatePropagation(), true);
+                    window.addEventListener('mouseleave', e => e.stopImmediatePropagation(), true);
+                    // 5. Override navigator.webdriver (belt and suspenders)
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                """)
+                logger.info("Stealth scripts injected for telemetry spoofing.")
                 
-            self._log("info", "Connecting Playwright over CDP...")
-            
-            # FIX #5: Reset HWND on each restart (handled by _launch_edge → _position_edge_corner)
-            last_focus_pulse = time.time()
-            last_progress_check = time.time()
-            last_increase_time = time.time()
-            
-            FOCUS_PULSE_INTERVAL = 300  # Pulse focus every 5 minutes
-            PROGRESS_CHECK_INTERVAL = 900  # Check DOM every ~15 minutes
-            STUCK_TIMEOUT = 1200  # Consider stuck only after 20 min with no progress
-            
-            urls_pool = list(BROWSE_URLS)
-            tracking_stuck = False
-            
-            try:
-                async with async_playwright() as p:
-                    browser = await p.chromium.connect_over_cdp(ws_url)
-                    context = browser.contexts[0]
-                    
-                    # INJECT STEALTH SCRIPT TO TRICK TELEMETRY
-                    await context.add_init_script("""
-                        Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});
-                        Object.defineProperty(document, 'hidden', {get: () => false});
-                        document.hasFocus = () => true;
-                        window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
-                        window.addEventListener('blur', e => e.stopImmediatePropagation(), true);
-                        window.addEventListener('mouseleave', e => e.stopImmediatePropagation(), true);
-                        // Page Lifecycle API: block freeze/resume events
-                        window.addEventListener('freeze', e => e.stopImmediatePropagation(), true);
-                        window.addEventListener('resume', e => e.stopImmediatePropagation(), true);
-                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    """)
-                    self._log("info", "Stealth scripts injected for telemetry spoofing.")
-                    
-                    page = context.pages[0] if context.pages else await context.new_page()
+                page = context.pages[0] if context.pages else await context.new_page()
 
-                    # CRITICAL: Verify Edge is logged into Microsoft account
-                    login_ok = await self._ensure_login(page)
-                    if not login_ok:
-                        self._log("warning", "⚠️ Edge may not be logged in — streak minutes may not count!")
+                # CRITICAL: Verify Edge is logged into Microsoft account
+                login_ok = await self._ensure_login(page)
+                if not login_ok:
+                    logger.warning("⚠️ Edge may not be logged in — streak minutes may not count!")
 
-                    # FIX #3: Click Edge Streak card to activate tracking
-                    await self._activate_edge_streak_card(page)
+                # Navigate to Rewards page first to activate telemetry tracking
+                try:
+                    await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                    await asyncio.sleep(3)
+                    logger.info("Visited rewards.bing.com to activate tracking")
+                except Exception:
+                    pass
+                # Reset start time (login/setup may have taken time)
+                start_time = time.time()
+                last_focus_pulse = time.time()
+                last_dom_check = time.time() - 170  # Check almost immediately on loop start
+                FOCUS_PULSE_INTERVAL = 300  # Pulse focus every 5 minutes
 
-                    # Fetch initial baseline minutes for this session
-                    current_prog = await self._check_current_streak_progress(page)
-                    if current_prog > 0 and current_prog > baseline_minutes:
-                        baseline_minutes = current_prog
-                    self._log("info", f"📊 Initial DOM progress: {current_prog if current_prog >= 0 else 'unreadable'}/{target_minutes} min")
-
-                    if baseline_minutes >= target_minutes:
-                        self._log("info", f"✅ Edge Streak already complete ({baseline_minutes}/{target_minutes} min)")
-                        try:
-                            await browser.close()
-                        except Exception:
-                            pass
+                while True:
+                    elapsed_min = int((time.time() - start_time) / 60)
+                    # Extend timeout significantly: only fail-safe break if it's hopelessly stuck
+                    if elapsed_min >= target_minutes + 25:
+                        logger.warning(f"[Edge Native Streak] Reached hard timeout of {elapsed_min} minutes without verifying 30/30. Finishing.")
                         break
-                    
-                    while not tracking_stuck:
-                        if baseline_minutes >= target_minutes:
-                            break
 
-                        # Update UI
-                        if on_progress:
-                            on_progress(baseline_minutes, target_minutes)
+                    if on_progress:
+                        on_progress(elapsed_min, target_minutes)
 
-                        # Periodic focus pulse
-                        if time.time() - last_focus_pulse >= FOCUS_PULSE_INTERVAL:
-                            self._pulse_edge_focus()
-                            last_focus_pulse = time.time()
-                            logger.debug(f"[Edge Streak] Focus pulse executed")
+                    # Periodic focus pulse to keep telemetry tracking
+                    if time.time() - last_focus_pulse >= FOCUS_PULSE_INTERVAL:
+                        self._pulse_edge_focus()
+                        last_focus_pulse = time.time()
+                        logger.debug(f"[Edge Streak] Focus pulse at {elapsed_min} min")
 
-                        # Periodic progress validation via DOM scraping
-                        if time.time() - last_progress_check >= PROGRESS_CHECK_INTERVAL:
-                            self._log("info", "🔍 Checking progress via DOM scraping...")
-                            dom_val = await self._check_current_streak_progress(page)
+                    # Periodically check REAL progress via the isolated background tab
+                    if time.time() - last_dom_check >= 180:
+                        last_dom_check = time.time()
+                        try:
+                            cookies = await context.cookies("https://rewards.bing.com")
+                            cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+                            user_agent = await page.evaluate("navigator.userAgent")
+                            headers = {
+                                "User-Agent": user_agent,
+                                "Cookie": cookie_str,
+                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                            }
+                            import httpx
+                            async with httpx.AsyncClient() as client:
+                                response = await client.get("https://rewards.bing.com/earn", headers=headers, timeout=15.0)
+                                page_text = response.text
                             
-                            if dom_val >= 0:  # DOM readable
-                                self._log("info", f"📊 DOM progress: {dom_val}/{target_minutes} min")
-                                if dom_val > baseline_minutes:
-                                    baseline_minutes = dom_val
-                                    last_increase_time = time.time()
-                                    self._log("info", f"✅ Tracking alive — {baseline_minutes}/{target_minutes} min")
-                                elif dom_val >= target_minutes:
-                                    baseline_minutes = dom_val
-                                    self._log("info", f"✅ Edge Streak COMPLETE: {baseline_minutes}/{target_minutes} min")
-                                    break
-                                elif time.time() - last_increase_time > STUCK_TIMEOUT:
-                                    self._log("warning", f"⚠️ Tracking stuck at {baseline_minutes}/{target_minutes} min "
-                                              f"for over {STUCK_TIMEOUT // 60} min! Restarting Edge...")
-                                    tracking_stuck = True
+                            import re
+                            edge_match = re.search(
+                                r"Edge(?:\s+Browsing(?:\s+Streak)?)?(?:[\s\S]{0,150})Minutes:\s*(\d+)\s*/\s*(\d+)",
+                                page_text, re.IGNORECASE
+                            )
+                            if edge_match:
+                                current_min = int(edge_match.group(1))
+                                target_min = int(edge_match.group(2))
+                                logger.info(f"📊 LIVE PROGRESS (Background HTTP): {current_min}/{target_min} min")
+                                if current_min >= target_min:
+                                    logger.info("🎉 Microsoft reported target reached! Finishing early.")
                                     break
                             else:
-                                # DOM unreadable — use elapsed time as a rough estimate
-                                elapsed_min = int((time.time() - overall_start_time) / 60)
-                                self._log("info", f"📊 DOM unreadable, elapsed ~{elapsed_min} min (blind mode)")
-                                # Don't restart — just keep browsing
-                                if elapsed_min > target_minutes + 10:
-                                    self._log("info", f"⏱️ Elapsed {elapsed_min} min > target+10, assuming complete")
-                                    baseline_minutes = target_minutes
-                                    break
-                            last_progress_check = time.time()
+                                logger.info("DOM parsing: Streak card not found right now")
+                        except Exception as e:
+                            logger.info(f"Background HTTP check failed: {e}")
 
-                        if not urls_pool:
-                            urls_pool = list(BROWSE_URLS)
+                    if not urls_pool:
+                        urls_pool = list(BROWSE_URLS)
+                    
+                    next_url = random.choice(urls_pool)
+                    urls_pool.remove(next_url)
+
+                    try:
+                        logger.info(f"[Edge Native Streak] {elapsed_min}/{target_minutes} min - {next_url}")
+                        await page.goto(next_url, wait_until="domcontentloaded", timeout=15000)
                         
-                        next_url = random.choice(urls_pool)
-                        urls_pool.remove(next_url)
-
+                        # Re-inject stealth on each navigation (belt and suspenders)
                         try:
-                            logger.info(f"[Edge Native Streak] {baseline_minutes}/{target_minutes} min - {next_url}")
-                            await page.goto(next_url, wait_until="domcontentloaded", timeout=15000)
-                            
-                            # Read and scroll actively
-                            read_time = random.uniform(60, 150)
-                            scroll_interval = random.uniform(10, 20)
-                            read_elapsed = 0
-                            
-                            while read_elapsed < read_time:
+                            await asyncio.wait_for(page.evaluate("""
+                                Object.defineProperty(document, 'visibilityState', {get: () => 'visible', configurable: true});
+                                Object.defineProperty(document, 'hidden', {get: () => false, configurable: true});
+                                document.hasFocus = () => true;
+                            """), timeout=5.0)
+                        except Exception:
+                            pass
+                        
+                        # Read and scroll actively with mouse movements
+                        read_time = random.uniform(60, 180)
+                        scroll_interval = random.uniform(10, 20)
+                        read_elapsed = 0
+                        
+                        while read_elapsed < read_time:
+                            # Scroll down
+                            try:
+                                await asyncio.wait_for(page.evaluate("window.scrollBy(0, 400)"), timeout=5.0)
+                            except Exception:
+                                pass
+
+                            # Random mouse movement (makes browsing look natural)
+                            if random.random() < 0.4:
                                 try:
-                                    await page.evaluate("window.scrollBy(0, 400)")
+                                    x = random.randint(50, 450)
+                                    y = random.randint(50, 350)
+                                    await asyncio.wait_for(page.mouse.move(x, y), timeout=5.0)
                                 except Exception:
                                     pass
+                            
+                            wait_chunk = min(scroll_interval, read_time - read_elapsed)
+                            await asyncio.sleep(wait_chunk)
+                            read_elapsed += wait_chunk
+                            
+                            # Break inner loop early if we hit global target
+                            if int((time.time() - start_time) / 60) >= target_minutes:
+                                break
 
-                                if random.random() < 0.4:
-                                    try:
-                                        x = random.randint(50, 450)
-                                        y = random.randint(50, 350)
-                                        await page.mouse.move(x, y)
-                                    except Exception:
-                                        pass
-                                
-                                wait_chunk = min(scroll_interval, read_time - read_elapsed)
-                                await asyncio.sleep(wait_chunk)
-                                read_elapsed += wait_chunk
-                                
-                                if time.time() - last_progress_check >= PROGRESS_CHECK_INTERVAL:
-                                    break # jump out to do progress check
+                    except Exception as e:
+                        logger.warning(f"Error during CDP browsing to {next_url}: {e}")
+                        await asyncio.sleep(5)
 
-                        except Exception as e:
-                            logger.warning(f"Error during CDP browsing to {next_url}: {e}")
-                            await asyncio.sleep(5)
-
-                    try:
-                        await browser.close()
-                    except Exception:
-                        pass
-                    
-            except Exception as e:
-                self._log("error", f"CDP Browser Streak error: {e}")
-            finally:
-                self._log("info", "Terminating native Edge session...")
-                if self.edge_process:
-                    self.edge_process.terminate()
-                    try:
-                        self.edge_process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        self.edge_process.kill()
-                self._edge_hwnd = None  # FIX #5: Clear stale HWND
-                await self._cleanup_edge()
+                await browser.close()
                 
-            if baseline_minutes >= target_minutes:
-                break
-
-            # FIX #4: Increment restart counter
-            restart_count += 1
-            self._log("info", f"🔄 Restarting Edge session (attempt {restart_count + 1}/{MAX_RESTARTS + 1})...")
-            await asyncio.sleep(5)
-
+        except Exception as e:
+            logger.error(f"CDP Browser Streak encountered an error: {e}")
+        finally:
+            logger.info("Terminating native Edge session...")
+            if self.edge_process:
+                self.edge_process.terminate()
+                try:
+                    self.edge_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.edge_process.kill()
+            await self._kill_all_edge()
