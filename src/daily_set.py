@@ -162,7 +162,7 @@ class DailySetCompleter:
                     await page.goto(
                         rewards_url,
                         wait_until="domcontentloaded",
-                        timeout=15000,
+                        timeout=35000,
                     )
                     await page.wait_for_load_state("networkidle", timeout=10000)
                 except Exception:
@@ -256,7 +256,7 @@ class DailySetCompleter:
                     if len(current_pages) > pages_before:
                         # Switch to new tab
                         new_tab = current_pages[-1]
-                        await new_tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                        await new_tab.wait_for_load_state("domcontentloaded", timeout=35000)
                         await asyncio.sleep(2)
 
                         # Handle the task in the new tab
@@ -273,7 +273,7 @@ class DailySetCompleter:
                         await self._handle_task(page)
 
                         # Go back to rewards page and reopen modal
-                        await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=15000)
+                        await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=35000)
                         await asyncio.sleep(3)
 
                         # Re-click streak card to reopen modal
@@ -298,7 +298,7 @@ class DailySetCompleter:
                                 await extra.close()
                             else:
                                 break
-                        await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=15000)
+                        await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=35000)
                         await asyncio.sleep(3)
                         if await self._click_daily_set_card(page):
                             await asyncio.sleep(3)

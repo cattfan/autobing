@@ -1,4 +1,4 @@
-﻿"""
+"""
 Flask Web Dashboard ΓÇö Full GUI for Rewards Search Automator.
 Provides API endpoints for accounts, settings, running tasks, logs, and status.
 """
@@ -476,13 +476,13 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
         remaining.append(f"Daily Set {daily_done}/{daily_total}")
 
     bing_app = task_overview.get("streaks", {}).get("bing_app", {})
-    if not bing_app.get("done", False):
+    if not bing_app.get("done", False) and bing_app.get("exists", False):
         remaining.append(f"Mobile App Check-in {bing_app.get('current', 0)}/1")
 
     edge_streak = task_overview.get("streaks", {}).get("edge", {})
     edge_minutes = edge_streak.get("minutes", 0)
     edge_target = edge_streak.get("target", 30)
-    if edge_target > 0 and not edge_streak.get("done", False):
+    if edge_target > 0 and not edge_streak.get("done", False) and edge_streak.get("exists", False):
         remaining.append(f"Edge Minutes {edge_minutes}/{edge_target}")
 
     pending_tasks = snapshot.get("pending_tasks", [])
@@ -627,7 +627,7 @@ async def _run_bot_async(task: str, password: str):
         if idx > 0:
             import random as _rng
             delay = _rng.randint(30, 120)
-            add_log("info", f"ΓÅ│ Waiting {delay}s before next account (anti-detection)...")
+            add_log("info", f"ΓÅ Waiting {delay}s before next account (anti-detection)...")
             state["current_task"] = f"Cooldown ({delay}s)"
             await asyncio.sleep(delay)
 
@@ -716,7 +716,7 @@ async def _run_bot_async(task: str, password: str):
                         state["current_task"] = "Desktop Searches"
                         state["progress"] = 0
                         state["progress_total"] = remaining_desktop
-                        add_log("info", f"≡ƒûÑ∩╕Å Desktop ΓÇö {pc_done}/{pc_max} pts ({remaining_desktop} searches left)")
+                        add_log("info", f"≡ƒûÑ∩Å Desktop ΓÇö {pc_done}/{pc_max} pts ({remaining_desktop} searches left)")
 
                         def on_desktop(c, t, q):
                             state["progress"] = c
@@ -729,7 +729,7 @@ async def _run_bot_async(task: str, password: str):
                             raise RuntimeError(desktop_stats["fatal_error"])
                         add_log("info", "Γ£à Desktop searches done")
                     else:
-                        add_log("info", f"ΓÅ¡∩╕Å Desktop searches already complete ({pc_done}/{pc_max})")
+                        add_log("info", f"ΓÅ¡∩Å Desktop searches already complete ({pc_done}/{pc_max})")
 
                 # ΓòÉΓòÉ Universal Task Scanner (Daily Set + Punch Cards + Quests + Promos) ΓòÉΓòÉ
                 if task in ("all", "daily", "punch", "promos"):
@@ -777,7 +777,7 @@ async def _run_bot_async(task: str, password: str):
                     mob_searches = settings.get("mobile_searches", 20)
 
                 if mob_searches <= 0:
-                    add_log("info", f"ΓÅ¡∩╕Å Mobile searches already complete ({mob_done}/{mob_max})")
+                    add_log("info", f"ΓÅ¡∩Å Mobile searches already complete ({mob_done}/{mob_max})")
                 else:
                     add_log("info", f"≡ƒô▒ Mobile ΓÇö {mob_done}/{mob_max} pts ({mob_searches} searches needed)")
 
@@ -874,7 +874,7 @@ async def _run_bot_async(task: str, password: str):
                                 add_log("warning", "≡ƒô▒ Auto-login timeout, proceeding anyway")
 
                         # 6. Navigate to Bing and search
-                        await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                        await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                         await asyncio.sleep(1.5)
 
                         # Credit probe: check mobile credits after 3 searches
@@ -929,7 +929,7 @@ async def _run_bot_async(task: str, password: str):
                     await asyncio.sleep(3)
                     # Navigate desktop page to rewards to check mobile credits
                     try:
-                        await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                        await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=35000)
                         await asyncio.sleep(3)
                     except Exception:
                         pass
@@ -1055,9 +1055,9 @@ async def _run_bot_async(task: str, password: str):
 
                             # Clear cookies and re-login for mobile
                             await page.context.clear_cookies()
-                            await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                            await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
                             await asyncio.sleep(2)
-                            await page.goto("https://www.bing.com/rewards/signin", wait_until="domcontentloaded", timeout=15000)
+                            await page.goto("https://www.bing.com/rewards/signin", wait_until="domcontentloaded", timeout=35000)
                             await asyncio.sleep(3)
                             try:
                                 await login_mgr.login(page, email, account.get("password", ""), account.get("totp_secret", ""))
@@ -1092,7 +1092,7 @@ async def _run_bot_async(task: str, password: str):
                         # Re-check mobile credits after supplementary round
                         await asyncio.sleep(5)
                         try:
-                            await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                            await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=35000)
                             await asyncio.sleep(3)
                             recheck = await page.evaluate("""
                                 async () => {
@@ -1129,7 +1129,7 @@ async def _run_bot_async(task: str, password: str):
             # Edge session (searches + browsing streak)
             if task in ("all", "searches"):
                 state["current_task"] = "Edge Session"
-                add_log("info", "≡ƒö╖ Edge Session")
+                add_log("info", "≡ƒö Edge Session")
                 try:
                     edge_runtime_settings = dict(settings)
                     edge_runtime_settings["use_stealth"] = False
@@ -1191,7 +1191,7 @@ async def _run_bot_async(task: str, password: str):
                         state["current_task"] = "Edge Searches"
                         state["progress"] = 0
                         state["progress_total"] = remaining_edge
-                        add_log("info", f"≡ƒö╖ Edge ΓÇö {edge_done}/{edge_max} pts ({remaining_edge} searches left)")
+                        add_log("info", f"≡ƒö Edge ΓÇö {edge_done}/{edge_max} pts ({remaining_edge} searches left)")
 
                         def on_edge(c, t, q):
                             state["progress"] = c
@@ -1202,9 +1202,9 @@ async def _run_bot_async(task: str, password: str):
                         add_log("info", "Γ£à Edge searches done")
                     else:
                         if edge_max == 0:
-                            add_log("info", "ΓÅ¡∩╕Å Edge searches not available")
+                            add_log("info", "ΓÅ¡∩Å Edge searches not available")
                         else:
-                            add_log("info", f"ΓÅ¡∩╕Å Edge searches already complete ({edge_done}/{edge_max})")
+                            add_log("info", f"ΓÅ¡∩Å Edge searches already complete ({edge_done}/{edge_max})")
 
                     # Close search browser before streak
                     await _persist_storage_state(ctx3, storage_state_path)
@@ -1242,17 +1242,17 @@ async def _run_bot_async(task: str, password: str):
                         min_target = edge_info.get("target", 0)
                         streak_complete = edge_info.get("done", False)
 
-                        if min_target == 0 and not offer_id and not edge_hash:
+                        if not edge_info.get("exists", False):
                             # Edge Streak promo doesn't exist ΓÇö not available
                             add_log(
                                 "info",
-                                "ΓÅ¡∩╕Å Edge Browsing Streak not available for this "
+                                "ΓÅ¡∩Å Edge Browsing Streak not available for this "
                                 "account/region ΓÇö skipping",
                             )
                         elif streak_complete or min_done >= min_target:
                             add_log(
                                 "info",
-                                f"ΓÅ¡∩╕Å Edge Streak already complete "
+                                f"ΓÅ¡∩Å Edge Streak already complete "
                                 f"({min_done}/{min_target} min)",
                             )
                         else:
@@ -1305,15 +1305,15 @@ async def _run_bot_async(task: str, password: str):
 
                             # Try card click
                             if dest_url and not streak_credited:
-                                add_log("info", f"≡ƒû▒∩╕Å Trying card activation...")
+                                add_log("info", f"≡ƒû▒∩Å Trying card activation...")
                                 try:
                                     full_url = (
                                         dest_url if dest_url.startswith("http")
                                         else f"https://rewards.bing.com{dest_url}"
                                     )
-                                    await page_s.goto(full_url, wait_until="domcontentloaded", timeout=15000)
+                                    await page_s.goto(full_url, wait_until="domcontentloaded", timeout=35000)
                                     await asyncio.sleep(5)
-                                    await page_s.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                                    await page_s.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=35000)
                                     await asyncio.sleep(3)
                                     t3 = await task_detector.get_all_tasks(page_s)
                                     e3 = t3.get("streaks", {}).get("edge", {})
@@ -1335,7 +1335,7 @@ async def _run_bot_async(task: str, password: str):
                                     "https://rewards.bing.com/",
                                 ]:
                                     try:
-                                        await page_s.goto(act_url, wait_until="domcontentloaded", timeout=15000)
+                                        await page_s.goto(act_url, wait_until="domcontentloaded", timeout=35000)
                                         await asyncio.sleep(3)
                                         # Click the Edge Streak card via JS
                                         clicked = await page_s.evaluate("""
@@ -1376,34 +1376,128 @@ async def _run_bot_async(task: str, password: str):
 
                                 add_log(
                                     "info",
-                                    "≡ƒôû Starting Native Edge browsing (30 min + 5 min buffer)..."
-                                    " CDP will be closed ΓÇö Edge telemetry requires no automation.",
+                                    "Starting Native Edge browsing with verify-and-retry...",
                                 )
-                                # Close CDP session ΓÇö NativeEdgeStreak needs to kill all Edge
+                                # Close CDP session -- NativeEdgeStreak needs to kill all Edge
                                 await bm_streak.close()
                                 bm_streak = None
 
                                 state["progress"] = 0
                                 state["progress_total"] = 30
-                                native_streak = NativeEdgeStreak()
 
-                                def _on_native_streak(done, total):
-                                    state["progress"] = min(done, total)
+                                # --- Verify-and-Retry Loop ---
+                                # Run native Edge, then reopen CDP to check API.
+                                # If minutes < target, run more. Max 3 attempts.
+                                max_attempts = 3
+                                streak_verified = False
+                                credited_minutes = min_done  # from initial API check
 
-                                # If we got an activation URL, start browsing from there
-                                start_url = activation_url or "https://www.bing.com"
-                                await native_streak.browse(
-                                    target_minutes=30,
-                                    on_progress=_on_native_streak,
-                                    start_url=start_url,
-                                )
-                                add_log("info", "Γ£à Native Edge browsing session completed (30+ min)")
+                                for attempt in range(1, max_attempts + 1):
+                                    remaining = max(0, min_target - credited_minutes)
+                                    if remaining <= 0:
+                                        streak_verified = True
+                                        break
+
+                                    # Add 5 min buffer per attempt to account for telemetry lag
+                                    run_minutes = remaining + 5
+                                    add_log(
+                                        "info",
+                                        f"[Attempt {attempt}/{max_attempts}] "
+                                        f"Credited: {credited_minutes}/{min_target} min. "
+                                        f"Running native Edge for {run_minutes} min "
+                                        f"({remaining} remaining + 5 buffer)...",
+                                    )
+
+                                    native_streak = NativeEdgeStreak(
+                                        account_email=account.get("email", "")
+                                    )
+
+                                    def _on_native_streak(done, total):
+                                        state["progress"] = min(
+                                            credited_minutes + done, min_target
+                                        )
+
+                                    start_url = activation_url or "https://www.bing.com"
+                                    await native_streak.browse(
+                                        target_minutes=run_minutes,
+                                        on_progress=_on_native_streak,
+                                        start_url=start_url,
+                                    )
+                                    add_log(
+                                        "info",
+                                        f"Native Edge session {attempt} done. "
+                                        f"Verifying via API...",
+                                    )
+
+                                    # Reopen CDP to check API
+                                    try:
+                                        bm_verify_streak = BrowserManager(settings)
+                                        bm_verify_streak.set_account(email)
+                                        verify_cdp = ""
+                                        try:
+                                            verify_cdp = await bm_verify_streak.start_native_edge_runtime(email)
+                                        except Exception:
+                                            await bm_verify_streak.start()
+
+                                        ctx_vs, page_vs = await _open_account_context(
+                                            bm_verify_streak,
+                                            login_mgr,
+                                            account,
+                                            session_proxy,
+                                            "desktop",
+                                            storage_state_path,
+                                            attach_existing_edge=bool(verify_cdp),
+                                            attached_cdp_url=verify_cdp,
+                                        )
+
+                                        vt = await task_detector.get_all_tasks(page_vs)
+                                        ve = vt.get("streaks", {}).get("edge", {})
+                                        credited_minutes = ve.get("minutes", 0)
+                                        v_target = ve.get("target", min_target)
+                                        v_done = ve.get("done", False)
+
+                                        add_log(
+                                            "info",
+                                            f"API check: {credited_minutes}/{v_target} min "
+                                            f"(done={v_done})",
+                                        )
+
+                                        await bm_verify_streak.close()
+
+                                        if v_done or credited_minutes >= v_target:
+                                            streak_verified = True
+                                            break
+
+                                    except Exception as verify_err:
+                                        add_log(
+                                            "warning",
+                                            f"Verify error: {verify_err}",
+                                        )
+                                        try:
+                                            await bm_verify_streak.close()
+                                        except Exception:
+                                            pass
+
+                                if streak_verified:
+                                    add_log(
+                                        "info",
+                                        f"[OK] Edge Streak verified complete "
+                                        f"({credited_minutes}/{min_target} min)",
+                                    )
+                                else:
+                                    add_log(
+                                        "warning",
+                                        f"[WARN] Edge Streak not fully verified "
+                                        f"after {max_attempts} attempts "
+                                        f"({credited_minutes}/{min_target} min)",
+                                    )
+
 
                         if bm_streak is not None:
                             await bm_streak.close()
 
                     except Exception as streak_err:
-                        add_log("warning", f"ΓÜá∩╕Å Edge Streak error: {streak_err}")
+                        add_log("warning", f"ΓÜá∩Å Edge Streak error: {streak_err}")
                         import traceback
                         add_log("debug", traceback.format_exc())
                         try:
@@ -1412,7 +1506,7 @@ async def _run_bot_async(task: str, password: str):
                         except Exception:
                             pass
                 except Exception as e:
-                    add_log("warning", f"ΓÜá∩╕Å Edge session error: {e}")
+                    add_log("warning", f"ΓÜá∩Å Edge session error: {e}")
                     try:
                         await bm3.close()
                     except Exception:
@@ -1458,27 +1552,29 @@ async def _run_bot_async(task: str, password: str):
                         deficit.append(f"Mobile: {mob_final}/{mob_final_max} ({mob_final_max - mob_final} short)")
 
                     if deficit:
-                        add_log("warning", f"ΓÜá∩╕Å Search deficit: {', '.join(deficit)}")
+                        add_log("warning", f"ΓÜá∩Å Search deficit: {', '.join(deficit)}")
                     else:
                         add_log("info", "Γ£à All search credits verified")
 
                     await _persist_storage_state(ctx_v, storage_state_path)
                     await bm_verify.close()
                 except Exception as e:
-                    add_log("warning", f"ΓÜá∩╕Å Verification error: {e}")
+                    add_log("warning", f"ΓÜá∩Å Verification error: {e}")
 
-            # ΓöÇΓöÇ Bing App Streak ΓöÇΓöÇ
+            # ΓöÇΓöÇ Bing App Rewards (Read to Earn & Check-in) ΓöÇΓöÇ
             if task == "all":
-                add_log("info", "≡ƒöÑ Bing App Streak check-in...")
-                state["current_task"] = "Bing App Streak"
+                state["current_task"] = "Bing App Rewards"
                 try:
                     import random as _rng
+                    from src.mobile_app import BingAppRewards
+                    
                     bing_app_settings = dict(settings)
                     bing_app_settings["use_stealth"] = False
                     bm_app = BrowserManager(bing_app_settings)
                     bm_app.set_account(email)
                     await bm_app.start()
-                    bing_app_ua = _rng.choice(BingAppStreak.BING_APP_UA)
+                    
+                    bing_app_ua = _rng.choice(BingAppRewards.BING_APP_UA)
                     ctx_app, page_app = await _open_account_context(
                         bm_app,
                         login_mgr,
@@ -1490,16 +1586,20 @@ async def _run_bot_async(task: str, password: str):
                         use_persistent_profile=False,
                     )
 
-                    bing_streak = BingAppStreak(humanizer)
-                    success = await bing_streak.check_in(page_app)
-                    if success:
-                        add_log("info", "Γ£à Bing App Streak check-in done")
-                    else:
-                        add_log("warning", "ΓÜá∩╕Å Bing App Streak check-in may have failed")
+                    app_rewards = BingAppRewards(humanizer)
+                    
+                    # 1. Read to Earn
+                    if settings.get("bing_app_read_to_earn", True):
+                        await app_rewards.read_to_earn(page_app)
+                        
+                    # 2. Daily Check-in
+                    if settings.get("bing_app_checkin", True):
+                        await app_rewards.daily_checkin(page_app)
+                        
                     await _persist_storage_state(ctx_app, storage_state_path)
                     await bm_app.close()
                 except Exception as e:
-                    add_log("warning", f"ΓÜá∩╕Å Bing App Streak error: {e}")
+                    add_log("warning", f"ΓÜá∩Å Bing App Rewards error: {e}")
 
             # Edge Browsing Streak is already handled above in the Edge Session block
             # (lines 573-600) ΓÇö no duplicate needed
@@ -1544,7 +1644,7 @@ async def _run_bot_async(task: str, password: str):
                         overall_complete = False
                         add_log(
                             "warning",
-                            "ΓÜá∩╕Å Run finished with remaining items: "
+                            "ΓÜá∩Å Run finished with remaining items: "
                             + ", ".join(remaining_items[:8]),
                         )
                     else:
@@ -1553,7 +1653,7 @@ async def _run_bot_async(task: str, password: str):
                 except Exception as e:
                     account_complete = False
                     overall_complete = False
-                    add_log("warning", f"ΓÜá∩╕Å Final verification error: {e}")
+                    add_log("warning", f"ΓÜá∩Å Final verification error: {e}")
                 finally:
                     if bm_final is not None:
                         try:

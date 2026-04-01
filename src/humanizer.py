@@ -350,7 +350,7 @@ class Humanizer:
         logger.debug(f"Warm-up: visiting {count} sites...")
         for url in selected:
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(random.uniform(2, 5))
                 # Scroll a bit
                 await self.natural_scroll(page, "down", random.randint(100, 400))

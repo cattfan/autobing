@@ -28,17 +28,32 @@ for d in [CONFIG_DIR, DATA_DIR, PROFILES_DIR]:
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
-LOG_FORMAT = "%(asctime)s │ %(levelname)-8s │ %(name)-20s │ %(message)s"
+LOG_FORMAT = "%(asctime)s  %(levelname)-8s  %(name)-18s  %(message)s"
 LOG_DATE_FORMAT = "%H:%M:%S"
 
 
 def setup_logging(level: int = logging.INFO) -> logging.Logger:
     """Setup and return the root logger with console + file output."""
-    logging.basicConfig(
-        level=level,
-        format=LOG_FORMAT,
-        datefmt=LOG_DATE_FORMAT,
-    )
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # Console handler — ghi thẳng ra stdout với UTF-8
+    if not any(isinstance(h, logging.StreamHandler) and
+               getattr(h, 'stream', None) is not None and
+               not isinstance(h, logging.FileHandler)
+               for h in root_logger.handlers):
+        import sys, io
+        # Tạo stream UTF-8 tường minh (fix emoji trong Windows CMD)
+        try:
+            utf8_stream = open(sys.stdout.fileno(), mode='w', encoding='utf-8',
+                               buffering=1, closefd=False, errors='replace')
+        except Exception:
+            utf8_stream = sys.stdout
+        ch = logging.StreamHandler(utf8_stream)
+        ch.setLevel(level)
+        ch.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+        root_logger.addHandler(ch)
+
     bot_logger = logging.getLogger("RewardsBot")
     bot_logger.setLevel(level)
 
@@ -60,11 +75,22 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
 
 
 import sys
-if sys.stdout.encoding.lower() != 'utf-8':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
+import io
+
+# Buộc stdout/stderr dùng UTF-8 trên Windows (fix emoji, tiếng Việt trong CMD)
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    elif _stream is not None and not isinstance(_stream, io.TextIOWrapper):
+        try:
+            setattr(sys, _stream_name,
+                    io.TextIOWrapper(_stream.buffer, encoding="utf-8", errors="replace"))
+        except Exception:
+            pass
 
 logger = setup_logging()
 
@@ -139,6 +165,8 @@ def get_default_settings() -> dict:
         "schedule_time": "08:00",
         "auto_redeem": False,
         "auto_redeem_goal": 5000,
+        "bing_app_read_to_earn": True,
+        "bing_app_checkin": True,
         "streak_protection": True,
         "retry_max": 3,
         "retry_delay": 5,

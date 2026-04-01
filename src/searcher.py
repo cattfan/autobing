@@ -263,14 +263,14 @@ class Searcher:
                         current_credits = await credit_probe_fn()
                         if current_credits == 0:
                             logger.warning(
-                                f"📱 {mode} credits still 0 after 3 searches — "
+                                f" {mode} credits still 0 after 3 searches — "
                                 f"platform not crediting, aborting early"
                             )
                             stats["early_abort"] = True
                             break
                         else:
                             logger.info(
-                                f"📱 {mode} credit probe OK: {current_credits} pts after 3 searches"
+                                f" {mode} credit probe OK: {current_credits} pts after 3 searches"
                             )
                     except Exception as e:
                         logger.debug(f"Credit probe failed: {e}")
@@ -475,7 +475,7 @@ class Searcher:
                 except Exception:
                     await page.keyboard.press("Enter")
 
-            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            await page.wait_for_load_state("domcontentloaded", timeout=35000)
             await asyncio.sleep(1)
             await self._check_safety_signals(page)
 
@@ -679,22 +679,22 @@ class Searcher:
 
         try:
             if break_type == "bing_news":
-                await page.goto("https://www.bing.com/news", wait_until="domcontentloaded", timeout=15000)
+                await page.goto("https://www.bing.com/news", wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(random.uniform(3, 8))
                 await self._check_safety_signals(page)
                 await self.humanizer.natural_scroll(page, "down", random.randint(200, 500))
                 await asyncio.sleep(random.uniform(2, 5))
             elif break_type == "bing_weather":
-                await page.goto("https://www.bing.com/search?q=weather", wait_until="domcontentloaded", timeout=15000)
+                await page.goto("https://www.bing.com/search?q=weather", wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(random.uniform(3, 10))
                 await self._check_safety_signals(page)
             elif break_type == "bing_images":
-                await page.goto("https://www.bing.com/images/trending", wait_until="domcontentloaded", timeout=15000)
+                await page.goto("https://www.bing.com/images/trending", wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(random.uniform(3, 8))
                 await self._check_safety_signals(page)
                 await self.humanizer.natural_scroll(page, "down", random.randint(300, 600))
             elif break_type == "homepage":
-                await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=15000)
+                await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(random.uniform(2, 5))
                 await self._check_safety_signals(page)
             else:  # just_wait

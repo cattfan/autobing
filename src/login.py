@@ -250,7 +250,7 @@ class LoginManager:
                         "https://login.live.com/login.srf?wa=wsignin1.0"
                         "&wp=MBI_SSL&wreply=https://rewards.bing.com/",
                         wait_until="domcontentloaded",
-                        timeout=15000,
+                        timeout=35000,
                     )
                     await asyncio.sleep(3)
                     previous_state = LoginState.UNKNOWN
@@ -421,7 +421,7 @@ class LoginManager:
             await page.goto(
                 BING_HOME_URL,
                 wait_until="domcontentloaded",
-                timeout=15000,
+                timeout=35000,
             )
             await asyncio.sleep(1)
             await self._dismiss_messages(page)
@@ -441,7 +441,7 @@ class LoginManager:
             await page.goto(
                 LOGIN_URL,
                 wait_until="domcontentloaded",
-                timeout=15000,
+                timeout=35000,
             )
             await asyncio.sleep(1.5)
 
@@ -462,7 +462,7 @@ class LoginManager:
             await active_page.goto(
                 LOGIN_URL,
                 wait_until="domcontentloaded",
-                timeout=15000,
+                timeout=35000,
             )
         except Exception:
             pass
@@ -1049,7 +1049,7 @@ window.location.replace(
 
             current_url = page.url.lower()
             if allow_navigation and "bing.com" not in current_url:
-                await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=15000)
+                await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(1.5)
             else:
                 await asyncio.sleep(0.5 if allow_navigation else 0.2)
@@ -1179,7 +1179,7 @@ window.location.replace(
         await page.goto(
             LOGIN_URL,
             wait_until="domcontentloaded",
-            timeout=15000,
+            timeout=35000,
         )
         await asyncio.sleep(1.5)
         await self._dismiss_messages(page)

@@ -34,3 +34,40 @@ Desktop.ini
 
 # Logs
 *.log
+
+# Debug / test junk (prevent re-adding)
+test_*.py
+capture_*.py
+fetch_*.py
+extract_*.py
+inspect_*.py
+dump_*.py
+fix_*.py
+mock_*.py
+patch_*.py
+apply_fixes*.py
+scrape_*.py
+save_*.py
+check_*.py
+update_*.py
+wait_and_check.py
+tail_logs.py
+search_json.py
+parse_*.py
+start_pure_streak.py
+old_native*.py
+
+# Debug output files
+*.html
+!dashboard/index.html
+*.json
+!config/*.json
+!dashboard/*.json
+!package.json
+*.txt
+!requirements.txt
+!config/search_topics.txt
+*.png
+*.jpg
+*.webp
+log.md

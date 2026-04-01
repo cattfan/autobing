@@ -53,7 +53,7 @@ class PointsTracker:
         }
 
         try:
-            await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=35000)
             await asyncio.sleep(3)
 
             # Read total points

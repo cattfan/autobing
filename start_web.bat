@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul
-title Rewards Bot — Web Dashboard
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
+title Rewards Bot - Web Dashboard
 echo.
 echo  ======================================
 echo       Rewards Bot -- Web Dashboard

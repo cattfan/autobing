@@ -1,4 +1,4 @@
-﻿"""
+"""
 Streak automation for Microsoft Rewards.
 - Bing App Streak: Check in to Bing App daily (mobile visit)
 - Edge Browsing Streak: Browse with Edge for 30 minutes daily
@@ -106,7 +106,7 @@ class TaskDetector:
             "daily_set": {"completed": 0, "total": 0},
             "streaks": {
                 "bing_app": {"current": 0, "done": False},
-                "edge": {"minutes": 0, "target": 30, "done": False},
+                "edge": {"minutes": 0, "target": 30, "done": False, "exists": False},
             },
             "more_activities": {"completed": 0, "total": 0},
             "total_points": 0,
@@ -119,7 +119,7 @@ class TaskDetector:
             if "rewards.bing.com" not in current_url:
                 await page.goto(
                     "https://rewards.bing.com/",
-                    wait_until="domcontentloaded", timeout=15000,
+                    wait_until="domcontentloaded", timeout=35000,
                 )
                 await asyncio.sleep(2)
 
@@ -185,6 +185,7 @@ class TaskDetector:
                     max_progress = promo.get("pointProgressMax", 1)
                     result["streaks"]["bing_app"]["current"] = progress
                     result["streaks"]["bing_app"]["done"] = progress >= max_progress or promo.get("complete", False)
+                    result["streaks"]["bing_app"]["exists"] = True
 
                 # Edge Browsing Streak
                 if "edge" in title and ("brows" in title or "minute" in title or "streak" in title):
@@ -193,6 +194,7 @@ class TaskDetector:
                     result["streaks"]["edge"]["minutes"] = progress
                     result["streaks"]["edge"]["target"] = max_progress if max_progress > 0 else 30
                     result["streaks"]["edge"]["done"] = progress >= max_progress or promo.get("complete", False)
+                    result["streaks"]["edge"]["exists"] = True
                     # Store promo identifiers for API-based approach
                     result["streaks"]["edge"]["offerId"] = promo.get("offerId", "")
                     result["streaks"]["edge"]["hash"] = promo.get("hash", "")
@@ -230,7 +232,7 @@ class TaskDetector:
                             await page.goto(
                                 rewards_url,
                                 wait_until="domcontentloaded",
-                                timeout=15000,
+                                timeout=35000,
                             )
                             await asyncio.sleep(2)
                         page_text = await page.locator("body").inner_text(timeout=5000)
@@ -252,6 +254,7 @@ class TaskDetector:
                     edge_progress = card_progress.get("edge")
                     if edge_progress:
                         minutes, target = edge_progress
+                        result["streaks"]["edge"]["exists"] = True
                         result["streaks"]["edge"]["minutes"] = max(
                             result["streaks"]["edge"]["minutes"], minutes
                         )
@@ -266,6 +269,7 @@ class TaskDetector:
                     bing_app_progress = card_progress.get("bing_app")
                     if bing_app_progress:
                         current, target = bing_app_progress
+                        result["streaks"]["bing_app"]["exists"] = True
                         result["streaks"]["bing_app"]["current"] = max(
                             result["streaks"]["bing_app"]["current"], current
                         )
@@ -290,8 +294,8 @@ class TaskDetector:
                 f"Tasks detected ΓÇö PC: {result['searches']['pc_current']}/{result['searches']['pc_max']}, "
                 f"Mobile: {result['searches']['mobile_current']}/{result['searches']['mobile_max']}, "
                 f"Daily: {result['daily_set']['completed']}/{result['daily_set']['total']}, "
-                f"BingApp: {'Γ£à' if result['streaks']['bing_app']['done'] else 'Γ¥î'}, "
-                f"Edge: {'Γ£à' if result['streaks']['edge']['done'] else 'Γ¥î'}"
+                f"BingApp: {'' if result['streaks']['bing_app']['done'] else ('' if result['streaks']['bing_app'].get('exists', False) else '-')}, "
+                f"Edge: {'' if result['streaks']['edge']['done'] else ('' if result['streaks']['edge'].get('exists', False) else '-')}"
             )
 
         except Exception as e:
@@ -341,8 +345,20 @@ class BingAppStreak:
         logger.info("≡ƒöÑ Starting Bing App Streak check-in...")
 
         try:
+            # First check if the task even exists
+            detector = TaskDetector()
+            status = await detector.get_all_tasks(page)
+            bing_state = status.get("streaks", {}).get("bing_app", {})
+            if bing_state.get("done", False):
+                logger.info(" Bing App Streak check-in verified done.")
+                return True
+                
+            if not bing_state.get("exists", False):
+                logger.info(" Bing App Streak check-in not available today.")
+                return True # Implicitly complete if it doesn't exist
+                
             # 1. Visit Bing homepage (triggers check-in cookie)
-            await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=35000)
             await asyncio.sleep(random.uniform(3, 5))
 
             # 2. Do a quick search (reinforces activity)
@@ -359,7 +375,7 @@ class BingAppStreak:
                 await asyncio.sleep(random.uniform(3, 6))
 
             # 3. Visit rewards page and click the Bing App Streak card
-            await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=35000)
             await asyncio.sleep(random.uniform(3, 5))
 
             # Try to click the Bing App Streak card directly
@@ -400,7 +416,7 @@ class BingAppStreak:
                             try:
                                 await popup.wait_for_load_state(
                                     "domcontentloaded",
-                                    timeout=15000,
+                                    timeout=35000,
                                 )
                                 await asyncio.sleep(random.uniform(4, 7))
                                 await popup.bring_to_front()
@@ -437,7 +453,7 @@ class BingAppStreak:
                     pass
 
             # 5. Visit bing.com once more (double-tap for safety)
-            await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=35000)
             await asyncio.sleep(random.uniform(2, 4))
 
             detector = TaskDetector()
@@ -454,14 +470,14 @@ class BingAppStreak:
                         await page.goto(
                             "https://rewards.bing.com/earn",
                             wait_until="domcontentloaded",
-                            timeout=15000,
+                            timeout=35000,
                         )
                         await asyncio.sleep(random.uniform(3, 5))
                     except Exception:
                         pass
 
             logger.warning(
-                f"ΓÜá∩╕Å Bing App Streak not verified "
+                f"ΓÜá∩Å Bing App Streak not verified "
                 f"({bing_state.get('current', 0)}/1)"
             )
             return False
@@ -538,7 +554,7 @@ class EdgeBrowsingStreak:
 
             for act_url in activation_urls:
                 try:
-                    await page.goto(act_url, wait_until="domcontentloaded", timeout=15000)
+                    await page.goto(act_url, wait_until="domcontentloaded", timeout=35000)
                     await asyncio.sleep(3)
 
                     # Method 2: JS-based card finder (works regardless of DOM structure)
@@ -685,7 +701,7 @@ class EdgeBrowsingStreak:
                         await page.goto(
                             REWARDS_URL,
                             wait_until="domcontentloaded",
-                            timeout=15000,
+                            timeout=35000,
                         )
                         await asyncio.sleep(random.uniform(3, 6))
 
@@ -746,7 +762,7 @@ class EdgeBrowsingStreak:
                                 # in the user's region (only US/CA/GB/DE/FR/AU/JP).
                                 if zero_progress_retries >= max_zero_retries:
                                     logger.warning(
-                                        f"ΓÜá∩╕Å Edge Streak: 0 min after {elapsed // 60}+ min "
+                                        f"ΓÜá∩Å Edge Streak: 0 min after {elapsed // 60}+ min "
                                         f"and {zero_progress_retries} retries. "
                                         f"This feature may not be available in your region. "
                                         f"Skipping to save time."
@@ -754,7 +770,7 @@ class EdgeBrowsingStreak:
                                     break
 
                                 logger.warning(
-                                    f"ΓÜá∩╕Å 6+ min elapsed but 0 min credited, "
+                                    f"ΓÜá∩Å 6+ min elapsed but 0 min credited, "
                                     f"retrying via pointsbreakdown... "
                                     f"(attempt {zero_progress_retries}/{max_zero_retries})"
                                 )
@@ -768,7 +784,7 @@ class EdgeBrowsingStreak:
                                         await page.goto(
                                             retry_url,
                                             wait_until="domcontentloaded",
-                                            timeout=15000,
+                                            timeout=35000,
                                         )
                                         await asyncio.sleep(3)
                                         clicked = await page.evaluate("""
@@ -812,7 +828,7 @@ class EdgeBrowsingStreak:
 
         # ΓòÉΓòÉΓòÉ Final heartbeat ΓòÉΓòÉΓòÉ
         try:
-            await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=35000)
             await asyncio.sleep(3)
             await page.evaluate("""
                 async () => {

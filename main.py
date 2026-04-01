@@ -56,11 +56,19 @@ from src.trends import TrendsManager
 from src.humanizer import Humanizer
 from src.ai_agent import AIAgent
 from src.streaks import EdgeBrowsingStreak, TaskDetector
+from src.edge_streak_native import NativeEdgeStreak
 from src.manual_captcha import ManualCaptchaHandler
 
 
 def _configure_stdio() -> None:
-    """Prefer UTF-8 streams on Windows so Rich output does not crash on emoji."""
+    """Buộc stdout/stderr dùng UTF-8 trên Windows — fix emoji & tiếng Việt trong CMD."""
+    import ctypes
+    # Đặt code page CMD lên 65001 (UTF-8) theo cách Win32 API
+    try:
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
         if hasattr(stream, "reconfigure"):
@@ -72,14 +80,16 @@ def _configure_stdio() -> None:
 
 _configure_stdio()
 
-console = Console()
+# legacy_windows=False: buộc Rich dùng ANSI/UTF-8 thay vì Windows Console API cũ
+# force_terminal=True: không bị detect sai là non-interactive pipe
+console = Console(force_terminal=True, legacy_windows=False)
 
 BANNER = """
-[bold cyan]╔══════════════════════════════════════════════╗
-║      🏆 Rewards Search Automator v1.0        ║
-║    ─────────────────────────────────────      ║
-║   Automated Microsoft Rewards Farming Bot     ║
-╚══════════════════════════════════════════════╝[/bold cyan]
+[bold cyan]+-------------------------------------------------+
+|        Rewards Search Automator  v1.0           |
+|        Automated Microsoft Rewards Bot          |
++-------------------------------------------------+[/bold cyan]
+[dim]Register: https://rewards.bing.com/welcome?rh=CE9698B&ref=rafsrchae[/dim]
 """
 
 
@@ -116,18 +126,18 @@ def show_menu() -> str:
     menu.add_column("Option", style="bold cyan", width=4)
     menu.add_column("Description", style="white")
 
-    menu.add_row("1", "🚀 Run All Tasks")
-    menu.add_row("2", "🔎 Run Searches Only")
-    menu.add_row("3", "🎯 Run Daily Set Only")
-    menu.add_row("4", "🃏 Run Punch Cards Only")
-    menu.add_row("5", "🎁 Run Promotions Only")
-    menu.add_row("6", "📊 View Points & Statistics")
-    menu.add_row("7", "⚙️  Settings")
-    menu.add_row("8", "👥 Manage Accounts")
-    menu.add_row("9", "⏰ Setup Auto Schedule")
-    menu.add_row("10", "🔔 Test Notifications")
-    menu.add_row("11", "🌐 Start Web Dashboard")
-    menu.add_row("0", "❌ Exit")
+    menu.add_row("1", "Run All Tasks")
+    menu.add_row("2", "Run Searches Only")
+    menu.add_row("3", "Run Daily Set Only")
+    menu.add_row("4", "Run Punch Cards Only")
+    menu.add_row("5", "Run Promotions Only")
+    menu.add_row("6", "View Points & Statistics")
+    menu.add_row("7", "Settings")
+    menu.add_row("8", "Manage Accounts")
+    menu.add_row("9", "Setup Auto Schedule")
+    menu.add_row("10", "Test Notifications")
+    menu.add_row("11", "Start Web Dashboard")
+    menu.add_row("0", "Exit")
 
     console.print(menu)
     console.print()
@@ -514,7 +524,7 @@ async def run_all_tasks(
         session_proxy = get_proxy_for_session(account)
         storage_state_path = _storage_state_path(email)
         console.print(
-            f"\n[bold cyan]━━━ Account {idx + 1}/{len(accounts)}: {email[:5]}*** ━━━[/bold cyan]"
+            f"\n[bold cyan]--- Account {idx + 1}/{len(accounts)}: {email[:5]}*** ---[/bold cyan]"
         )
 
         browser_mgr = BrowserManager(settings)
@@ -544,7 +554,7 @@ async def run_all_tasks(
             ) as progress:
 
                 # Desktop context
-                console.print("\n[bold]🖥️  Desktop Session[/bold]")
+                console.print("\n[bold][ Desktop Session ][/bold]")
                 ctx = await browser_mgr.create_context(
                     mode="desktop",
                     account_email=email,
@@ -569,14 +579,14 @@ async def run_all_tasks(
                 # Check for account issues
                 issue = await login_mgr.detect_account_issues(page)
                 if issue:
-                    console.print(f"[bold red]⚠️  {issue}[/bold red]")
+                    console.print(f"[bold red][WARN] {issue}[/bold red]")
                     notifier.send_error(email, issue)
                     await browser_mgr.close()
                     continue
 
                 # ── Check search credits via API ──
                 await close_other_tabs(page)
-                console.print("[dim]🔍 Checking search credits...[/dim]")
+                console.print("[dim]Checking search credits...[/dim]")
                 search_status = await searcher.get_search_points_status(page)
                 pc_done = search_status.get("pc_current", 0)
                 pc_max = search_status.get("pc_max", 0)
@@ -612,11 +622,11 @@ async def run_all_tasks(
                     _raise_if_search_stopped("Desktop", desktop_stats)
                     all_searches["desktop"] = {"completed": desktop_stats["completed"], "total": remaining_desktop}
                 else:
-                    console.print(f"[green]⏭️  Desktop searches already complete ({pc_done}/{pc_max})[/green]")
+                    console.print(f"[green][SKIP] Desktop searches already complete ({pc_done}/{pc_max})[/green]")
                     all_searches["desktop"] = {"completed": 0, "total": 0}
 
                 # ── Universal Tasks (Daily Set + Punch Cards + Promotions) ──
-                console.print("\n[bold]🎯 All Tasks (Daily Set + Punch Cards + Promotions)[/bold]")
+                console.print("\n[bold][ All Tasks: Daily Set + Punch Cards + Promotions ][/bold]")
                 task_stats = await universal_tasks.scan_and_complete(page, account_email=email)
                 daily_stats = _category_progress(task_stats, "daily_set")
                 punch_stats = _category_progress(task_stats, "punch_card")
@@ -638,7 +648,7 @@ async def run_all_tasks(
                     console=console,
                 ) as progress:
 
-                    console.print("\n[bold]📱 Mobile Searches[/bold]")
+                    console.print("\n[bold][ Mobile Searches ][/bold]")
                     mobile_runtime_settings = dict(settings)
                     mobile_runtime_settings["use_stealth"] = False
                     browser_mgr2 = BrowserManager(mobile_runtime_settings)
@@ -682,11 +692,11 @@ async def run_all_tasks(
                     await _persist_storage_state(ctx_mobile, storage_state_path)
                     await browser_mgr2.close()
             else:
-                console.print(f"\n[green]⏭️  Mobile searches already complete ({mob_done}/{mob_max})[/green]")
+                console.print(f"\n[green][SKIP] Mobile searches already complete ({mob_done}/{mob_max})[/green]")
                 all_searches["mobile"] = {"completed": 0, "total": 0}
 
             # ─── Edge Session (searches + browsing streak) ─────────────
-            console.print("\n[bold]🔷 Edge Session[/bold]")
+            console.print("\n[bold][ Edge Session ][/bold]")
             try:
                 edge_runtime_settings = dict(settings)
                 edge_runtime_settings["use_stealth"] = False
@@ -737,13 +747,13 @@ async def run_all_tasks(
                         }
                 else:
                     if edge_max == 0:
-                        console.print("[green]⏭️  Edge searches not available[/green]")
+                        console.print("[green][SKIP] Edge searches not available[/green]")
                     else:
-                        console.print(f"[green]⏭️  Edge searches already complete ({edge_done}/{edge_max})[/green]")
+                        console.print(f"[green][SKIP] Edge searches already complete ({edge_done}/{edge_max})[/green]")
                     all_searches["edge"] = {"completed": 0, "total": 0}
 
                 # Edge Browsing Streak (reuse same browser!)
-                console.print("\n[bold]🌐 Edge Browsing Streak[/bold]")
+                console.print("\n[bold][ Edge Browsing Streak ][/bold]")
                 task_detector = TaskDetector()
                 tasks = await task_detector.get_all_tasks(page_edge)
                 edge_streak_info = tasks.get("streaks", {}).get("edge", {})
@@ -752,46 +762,63 @@ async def run_all_tasks(
                 streak_done = edge_streak_info.get("done", False)
 
                 if streak_done or minutes_done >= minutes_target:
-                    console.print(f"[green]⏭️  Edge Streak already complete ({minutes_done}/{minutes_target} min)[/green]")
+                    console.print(f"[green][SKIP] Edge Streak already complete ({minutes_done}/{minutes_target} min)[/green]")
                 else:
-                    remaining_min = minutes_target - minutes_done
-                    browse_cap = max(
-                        minutes_target + 15,
-                        minutes_done + max(12, remaining_min * 2 + 10),
-                    )
-                    console.print(
-                        f"[dim]  Progress: {minutes_done}/{minutes_target} min "
-                        f"— browsing until verified (cap {browse_cap} min)...[/dim]"
-                    )
+                    # --- Verify-and-Retry Loop ---
+                    max_attempts = 3
+                    credited = minutes_done
 
-                    edge_streak = EdgeBrowsingStreak(humanizer)
+                    for attempt in range(1, max_attempts + 1):
+                        remaining = max(0, minutes_target - credited)
+                        if remaining <= 0:
+                            break
 
-                    def on_streak_progress(done, total):
-                        console.print(f"[dim]  Edge streak: {done}/{total} min[/dim]")
+                        run_min = remaining + 5  # +5 buffer
+                        console.print(
+                            f"[dim]  [Attempt {attempt}/{max_attempts}] "
+                            f"Credited: {credited}/{minutes_target} min. "
+                            f"Running native Edge for {run_min} min...[/dim]"
+                        )
 
-                    await edge_streak.browse(
-                        page_edge,
-                        target_minutes=minutes_target,
-                        on_progress=on_streak_progress,
-                        initial_minutes=minutes_done,
-                        hard_cap_minutes=browse_cap,
-                    )
-                    refreshed_tasks = await task_detector.get_all_tasks(page_edge)
-                    refreshed_edge = refreshed_tasks.get("streaks", {}).get("edge", {})
-                    refreshed_done = refreshed_edge.get("minutes", 0)
-                    refreshed_target = refreshed_edge.get("target", minutes_target)
-                    if refreshed_edge.get("done", False) or refreshed_done >= refreshed_target:
-                        console.print("[green]✅ Edge Browsing Streak completed[/green]")
+                        native_streak = NativeEdgeStreak(account_email=email)
+
+                        def on_streak_progress(done, total):
+                            console.print(f"[dim]  Streak: {min(credited + done, minutes_target)}/{total} min[/dim]")
+
+                        await native_streak.browse(
+                            target_minutes=run_min,
+                            on_progress=on_streak_progress,
+                        )
+
+                        # Verify via API
+                        console.print("[dim]  Verifying via API...[/dim]")
+                        try:
+                            refreshed_tasks = await task_detector.get_all_tasks(page_edge)
+                            refreshed_edge = refreshed_tasks.get("streaks", {}).get("edge", {})
+                            credited = refreshed_edge.get("minutes", 0)
+                            r_target = refreshed_edge.get("target", minutes_target)
+                            r_done = refreshed_edge.get("done", False)
+                            console.print(
+                                f"[dim]  API: {credited}/{r_target} min (done={r_done})[/dim]"
+                            )
+                            if r_done or credited >= r_target:
+                                break
+                        except Exception:
+                            console.print("[dim]  API check failed, continuing...[/dim]")
+
+                    if credited >= minutes_target:
+                        console.print("[green][OK] Edge Browsing Streak completed[/green]")
                     else:
                         console.print(
-                            f"[yellow]⚠️  Edge Browsing Streak not verified "
-                            f"({refreshed_done}/{refreshed_target} min)[/yellow]"
+                            f"[yellow][WARN] Edge Streak: {credited}/{minutes_target} min "
+                            f"after {max_attempts} attempts[/yellow]"
                         )
+
 
                 await _persist_storage_state(ctx_edge, storage_state_path)
                 await browser_mgr3.close()
             except Exception as e:
-                console.print(f"[yellow]⚠️  Edge session error: {e}[/yellow]")
+                console.print(f"[yellow][WARN] Edge session error: {e}[/yellow]")
                 try:
                     await browser_mgr3.close()
                 except Exception:
@@ -816,7 +843,7 @@ async def run_all_tasks(
             streak = final_points_info.get("streak", streak)
             earned_today = max(0, total_points - starting_points)
 
-            console.print("\n[bold]🔎 Final Rewards Verification[/bold]")
+            console.print("\n[bold][ Final Rewards Verification ][/bold]")
             try:
                 verification = await _collect_final_verification(
                     settings,
@@ -852,18 +879,18 @@ async def run_all_tasks(
                 remaining_items = _describe_remaining_items(verification)
                 account_complete = len(remaining_items) == 0
                 if account_complete:
-                    console.print("[green]✅ Rewards state fully verified[/green]")
+                    console.print("[green][OK] Rewards state fully verified[/green]")
                 else:
                     overall_complete = False
                     console.print(
-                        "[yellow]⚠️  Remaining items:[/yellow] "
+                        "[yellow]  Remaining items:[/yellow] "
                         + ", ".join(remaining_items[:8])
                     )
             except Exception as e:
                 account_complete = False
                 overall_complete = False
                 remaining_items = [f"Verification error: {e}"]
-                console.print(f"[yellow]⚠️  Final verification error: {e}[/yellow]")
+                console.print(f"[yellow][WARN] Final verification error: {e}[/yellow]")
 
             points_tracker.log_daily(
                 total_points=total_points,
@@ -934,14 +961,14 @@ async def run_all_tasks(
         # Inter-account cooldown (reduce detection risk)
         if idx < len(accounts) - 1:
             cooldown = random.randint(30, 90)
-            console.print(f"\n[dim]⏳ Waiting {cooldown}s before next account...[/dim]")
+            console.print(f"\n[dim]Waiting {cooldown}s before next account...[/dim]")
             await asyncio.sleep(cooldown)
 
     if overall_complete:
-        console.print("\n[bold green]🏁 All tasks completed and verified![/bold green]")
+        console.print("\n[bold green][DONE] All tasks completed and verified![/bold green]")
     else:
         console.print(
-            "\n[bold yellow]🏁 Run finished with remaining tasks. Review the warnings above.[/bold yellow]"
+            "\n[bold yellow] Run finished with remaining tasks. Review the warnings above.[/bold yellow]"
         )
 
 
@@ -968,7 +995,7 @@ def _print_summary(
 ):
     """Print a summary table."""
     remaining_items = remaining_items or []
-    title_icon = "✅" if verified_complete else "⚠️"
+    title_icon = "OK" if verified_complete else "WARN"
     border = "cyan" if verified_complete else "yellow"
     table = Table(
         title=f"{title_icon} Summary for {email[:5]}***",
@@ -978,15 +1005,15 @@ def _print_summary(
     table.add_column("Task", style="bold")
     table.add_column("Result", style="green")
 
-    table.add_row("💰 Points", f"{points:,}")
-    table.add_row("🔥 Streak", f"{streak} days")
+    table.add_row("Points", f"{points:,}")
+    table.add_row("Streak", f"{streak} days")
     table.add_row("Status", "Verified" if verified_complete else "Incomplete")
-    table.add_row("🖥️  Desktop", f"{searches['desktop'].get('completed', 0)}/{searches['desktop'].get('total', 0)}")
-    table.add_row("📱 Mobile", f"{searches['mobile'].get('completed', 0)}/{searches['mobile'].get('total', 0)}")
-    table.add_row("🔷 Edge", f"{searches['edge'].get('completed', 0)}/{searches['edge'].get('total', 0)}")
-    table.add_row("🎯 Daily Set", f"{daily.get('completed', 0)}/{daily.get('total', 0)}")
-    table.add_row("🃏 Punch Cards", f"{punch.get('completed', 0)}/{punch.get('total', 0)}")
-    table.add_row("🎁 Promotions", f"{promo.get('completed', 0)}/{promo.get('total', 0)}")
+    table.add_row("Desktop", f"{searches['desktop'].get('completed', 0)}/{searches['desktop'].get('total', 0)}")
+    table.add_row("Mobile", f"{searches['mobile'].get('completed', 0)}/{searches['mobile'].get('total', 0)}")
+    table.add_row("Edge", f"{searches['edge'].get('completed', 0)}/{searches['edge'].get('total', 0)}")
+    table.add_row("Daily Set", f"{daily.get('completed', 0)}/{daily.get('total', 0)}")
+    table.add_row("Punch Cards", f"{punch.get('completed', 0)}/{punch.get('total', 0)}")
+    table.add_row("Promotions", f"{promo.get('completed', 0)}/{promo.get('total', 0)}")
     if remaining_items:
         table.add_row("Remaining", f"{len(remaining_items)} item(s)")
 
@@ -1016,7 +1043,7 @@ async def run_searches_only(settings, accounts, password):
         email = account["email"]
         searcher.set_account_context(email)
         session_proxy = get_proxy_for_session(account)
-        console.print(f"\n[bold cyan]🔎 Searches for {email[:5]}***[/bold cyan]")
+        console.print(f"\n[bold cyan][ Searches for {email[:5]}*** ][/bold cyan]")
 
         storage_state_path = _storage_state_path(email)
         for mode in ["desktop", "mobile", "edge"]:
@@ -1042,7 +1069,7 @@ async def run_searches_only(settings, accounts, password):
                 cur, mx = _mode_credit(status, mode)
 
                 if mx > 0 and cur >= mx:
-                    console.print(f"  [green]⏭️  {mode} already full ({cur}/{mx})[/green]")
+                    console.print(f"  [green][SKIP] {mode} already full ({cur}/{mx})[/green]")
                     await browser_mgr.close()
                     continue
 
@@ -1073,7 +1100,7 @@ async def run_searches_only(settings, accounts, password):
 
 def manage_accounts(settings):
     """Manage accounts (add, list, remove)."""
-    console.print("\n[bold cyan]👥 Account Management[/bold cyan]")
+    console.print("\n[bold cyan][ Account Management ][/bold cyan]")
     console.print("1. Add Account")
     console.print("2. List Accounts")
     console.print("3. Import from accounts.json")
@@ -1111,7 +1138,7 @@ def manage_accounts(settings):
         settings["master_password_hash"] = hash_password(master_pw)
         save_settings(settings)
 
-        console.print("[green]✅ Account added[/green]")
+        console.print("[green][OK] Account added[/green]")
 
     elif choice == "2":
         master_pw = Prompt.ask("Master password", password=True)
@@ -1127,14 +1154,14 @@ def manage_accounts(settings):
         if migrate_to_encrypted(master_pw):
             settings["master_password_hash"] = hash_password(master_pw)
             save_settings(settings)
-            console.print("[green]✅ Accounts migrated to encrypted storage[/green]")
+            console.print("[green][OK] Accounts migrated to encrypted storage[/green]")
         else:
             console.print("[yellow]No accounts.json found[/yellow]")
 
 
 def manage_settings(settings):
     """Settings management."""
-    console.print("\n[bold cyan]⚙️  Settings[/bold cyan]")
+    console.print("\n[bold cyan][ Settings ][/bold cyan]")
 
     table = Table(show_header=True, box=box.SIMPLE)
     table.add_column("Setting", style="cyan")
@@ -1165,7 +1192,7 @@ def manage_settings(settings):
             else:
                 settings[key] = Prompt.ask(f"{key}", default=str(current))
             save_settings(settings)
-            console.print("[green]✅ Setting updated[/green]")
+            console.print("[green][OK] Setting updated[/green]")
         else:
             console.print(f"[red]Unknown setting: {key}[/red]")
 
@@ -1173,7 +1200,7 @@ def manage_settings(settings):
         from src.utils import get_default_settings
         settings = get_default_settings()
         save_settings(settings)
-        console.print("[green]✅ Settings reset to defaults[/green]")
+        console.print("[green][OK] Settings reset to defaults[/green]")
 
 
 def view_points(settings):
@@ -1181,30 +1208,30 @@ def view_points(settings):
     tracker = PointsTracker(settings)
     stats = tracker.get_statistics()
 
-    table = Table(title="📊 Points Statistics", box=box.DOUBLE_EDGE, border_style="cyan")
+    table = Table(title="Points Statistics", box=box.DOUBLE_EDGE, border_style="cyan")
     table.add_column("Metric", style="bold")
     table.add_column("Value", style="cyan")
 
-    table.add_row("📅 Days Tracked", str(stats["days_tracked"]))
-    table.add_row("💰 Total Earned", f"{stats['total_earned']:,}")
-    table.add_row("📊 Daily Average", str(stats["avg_daily"]))
-    table.add_row("🔥 Current Streak", f"{stats['streak']} days")
-    table.add_row("🏆 Max Streak", f"{stats.get('max_streak', 0)} days")
-    table.add_row("💵 Est. Monthly", f"{stats.get('estimated_monthly', 0):,.0f}")
+    table.add_row("Days Tracked", str(stats["days_tracked"]))
+    table.add_row("Total Earned", f"{stats['total_earned']:,}")
+    table.add_row("Daily Average", str(stats["avg_daily"]))
+    table.add_row("Current Streak", f"{stats['streak']} days")
+    table.add_row("Max Streak", f"{stats.get('max_streak', 0)} days")
+    table.add_row("Est. Monthly", f"{stats.get('estimated_monthly', 0):,.0f}")
 
     console.print(table)
 
     if Confirm.ask("Generate graph?", default=True):
         path = tracker.generate_graph()
         if path:
-            console.print(f"[green]📊 Graph saved: {path}[/green]")
+            console.print(f"[green]Graph saved: {path}[/green]")
 
 
 def setup_schedule(settings):
     """Setup auto-scheduling."""
     scheduler = Scheduler(settings)
 
-    console.print("\n[bold cyan]⏰ Auto Schedule Setup[/bold cyan]")
+    console.print("\n[bold cyan][ Auto Schedule Setup ][/bold cyan]")
     console.print(f"Current schedule: {settings.get('schedule_time', 'Not set')}")
     console.print(f"Next run: {scheduler.get_countdown()}")
 
@@ -1227,15 +1254,15 @@ def setup_schedule(settings):
         save_settings(settings)
 
         if scheduler.setup_windows_task(time_str):
-            console.print(f"[green]✅ Scheduled daily at {time_str}[/green]")
+            console.print(f"[green][OK] Scheduled daily at {time_str}[/green]")
         else:
-            console.print("[red]Failed to create Windows Task[/red]")
+            console.print("[red][ERR] Failed to create Windows Task[/red]")
 
     elif choice == "2":
         if scheduler.remove_windows_task():
             settings["schedule_enabled"] = False
             save_settings(settings)
-            console.print("[green]✅ Schedule removed[/green]")
+            console.print("[green][OK] Schedule removed[/green]")
 
 
 async def main():
@@ -1272,7 +1299,7 @@ async def main():
             choice = show_menu()
 
             if choice == "0":
-                console.print("[bold cyan]Goodbye! 👋[/bold cyan]")
+                console.print("[bold cyan]Goodbye![/bold cyan]")
                 break
 
             await _handle_cli_choice(choice, settings)
@@ -1290,7 +1317,7 @@ async def main():
     port = settings.get("dashboard_port", 8080)
     host = settings.get("dashboard_host", "127.0.0.1")
     display_host = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
-    console.print(f"[bold cyan]🌐 Starting Web Dashboard on port {port}...[/bold cyan]")
+    console.print(f"[bold cyan]Starting Web Dashboard on port {port}...[/bold cyan]")
 
     start_dashboard(port, host)
     url = f"http://{display_host}:{port}"
@@ -1302,7 +1329,7 @@ async def main():
     stop_event = _th.Event()
     signal.signal(signal.SIGINT, lambda *_: stop_event.set())
     stop_event.wait()
-    console.print("\n[bold cyan]Dashboard stopped. Goodbye! 👋[/bold cyan]")
+    console.print("\n[bold cyan]Dashboard stopped. Goodbye![/bold cyan]")
 
 
 async def _handle_cli_choice(choice: str, settings: dict) -> None:
@@ -1448,7 +1475,7 @@ _browser_managers: list = []  # Track active browser managers for cleanup
 
 def _shutdown_handler(sig, frame):
     """Handle Ctrl+C / SIGTERM gracefully."""
-    console.print("\n[bold yellow]⚠️  Shutting down gracefully...[/bold yellow]")
+    console.print("\n[bold yellow][WARN] Shutting down gracefully...[/bold yellow]")
     logger.info("Shutdown signal received, cleaning up...")
     # Close any tracked browser managers
     for bm in _browser_managers:

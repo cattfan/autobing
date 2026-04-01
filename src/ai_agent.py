@@ -471,7 +471,7 @@ class AIAgent:
             elif act == "navigate":
                 url = action.get("url", "")
                 logger.debug(f"AI navigate: {url} ({reason})")
-                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(2)
                 return True
 

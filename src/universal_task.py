@@ -265,7 +265,7 @@ class UniversalTaskScanner:
                 try:
                     await close_other_tabs(page)
                     await page.goto(REWARDS_URL,
-                                    wait_until="domcontentloaded", timeout=15000)
+                                    wait_until="domcontentloaded", timeout=35000)
                     await asyncio.sleep(2)
                 except Exception:
                     pass
@@ -362,7 +362,7 @@ class UniversalTaskScanner:
     async def _verify_task_completion(self, page: Page, task: RewardsTask) -> bool:
         """Re-check the Rewards API so we only count tasks that actually completed."""
         # Unreliable API bypass: Microsoft API often fails to reflect 'complete: true' for simple URL-based punch cards
-        if task.category == "punch_card" and task.task_type == "urlreward":
+        if task.category == "punch_card" and task.task_type in ("urlreward", "visit"):
             self._log("info", f"  ✅ Optimistically completed URL punch card (skipping strict API verify)")
             return True
 
@@ -418,7 +418,7 @@ class UniversalTaskScanner:
             # Navigate to rewards page first
             if "rewards.bing.com" not in page.url:
                 await page.goto(REWARDS_URL,
-                                wait_until="domcontentloaded", timeout=15000)
+                                wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(3)
 
             # Fetch API data
@@ -582,7 +582,7 @@ class UniversalTaskScanner:
                         await page.goto(
                             rewards_url,
                             wait_until="domcontentloaded",
-                            timeout=15000,
+                            timeout=35000,
                         )
                         await asyncio.sleep(3)
                     except Exception:
@@ -610,7 +610,7 @@ class UniversalTaskScanner:
                                 await page.goto(
                                     REWARDS_URL,
                                     wait_until="domcontentloaded",
-                                    timeout=15000,
+                                    timeout=35000,
                                 )
                                 await asyncio.sleep(2)
                             except Exception:
@@ -639,7 +639,7 @@ class UniversalTaskScanner:
                                 await page.goto(
                                     REWARDS_URL,
                                     wait_until="domcontentloaded",
-                                    timeout=15000,
+                                    timeout=35000,
                                 )
                                 await asyncio.sleep(2)
                             except Exception:
@@ -652,7 +652,7 @@ class UniversalTaskScanner:
                 if task.destination_url:
                     self._log("info", f"  ⚠️ Could not find on page, trying direct URL")
                     await page.goto(task.destination_url,
-                                    wait_until="domcontentloaded", timeout=15000)
+                                    wait_until="domcontentloaded", timeout=35000)
                     await asyncio.sleep(3)
                     clicked = True
                 else:
@@ -667,7 +667,7 @@ class UniversalTaskScanner:
             if len(page.context.pages) > pages_before:
                 new_tab = page.context.pages[-1]
                 try:
-                    await new_tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                    await new_tab.wait_for_load_state("domcontentloaded", timeout=35000)
                     working_page = new_tab
                     self._log("info", "  📑 Switched to new tab")
                 except Exception:
@@ -713,7 +713,7 @@ class UniversalTaskScanner:
             # Go back to rewards page
             try:
                 await page.goto(REWARDS_URL,
-                                wait_until="domcontentloaded", timeout=15000)
+                                wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(2)
             except Exception:
                 pass
