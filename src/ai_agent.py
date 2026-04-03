@@ -23,6 +23,7 @@ from playwright.async_api import Page
 from src.utils import logger
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_LOCAL_API_URL = "http://localhost:20128/v1/chat/completions"
 
 # System prompt — tells the LLM how to act
 SYSTEM_PROMPT = """You are a Microsoft Rewards automation assistant. Your job is to analyze web pages and complete rewards tasks.
@@ -74,15 +75,31 @@ class AIAgent:
 
     def __init__(self, settings: dict, on_event: Optional[Callable[[str, str, dict], None]] = None):
         self.api_key = settings.get("ai_api_key", "")
-        self.model = settings.get("ai_model", "meta-llama/llama-3.3-70b-instruct:free")
+        self.model = settings.get("ai_model", "cx/gpt-5.4")
+
+        # Support custom API base URL (local LLM)
+        custom_url = settings.get("ai_api_url", "").rstrip("/")
+        if custom_url:
+            self._api_url = (
+                custom_url + "/chat/completions"
+                if not custom_url.endswith("/chat/completions")
+                else custom_url
+            )
+            self._is_local = True
+        else:
+            self._api_url = OPENROUTER_API_URL
+            self._is_local = False
+
+        # Local endpoints don't require API key
         self.enabled = bool(
-            settings.get("ai_enabled", False) and self.api_key
+            settings.get("ai_enabled", False)
+            and (self.api_key or self._is_local)
         )
         self._settings_enabled = bool(settings.get("ai_enabled", False))
         self._conversation: list[dict] = []
         self._max_steps = 25  # Safety limit
         self._on_event = on_event
-        # Fallback free models (tried in order if primary model is rate-limited)
+        # Fallback free models (only used for OpenRouter)
         self._fallback_models = [
             "openrouter/auto",
             "openrouter/free",
@@ -108,6 +125,10 @@ class AIAgent:
         # Smart rotation: remember last model that worked
         self._last_working_model: Optional[str] = None
         self._current_model = self.model
+
+        if self.enabled:
+            endpoint_label = "Local" if self._is_local else "OpenRouter"
+            logger.info(f"[AI] {endpoint_label} endpoint: {self._api_url} | model: {self.model}")
 
     def _emit(self, level: str, message: str, **meta: Any) -> None:
         """Write AI logs to the app logger and optional dashboard callback."""
@@ -216,7 +237,7 @@ class AIAgent:
 
     async def _call_llm(self, messages: list[dict]) -> Optional[dict]:
         """Call OpenRouter API and parse JSON response."""
-        if not self.api_key:
+        if not self.api_key and not self._is_local:
             self._emit(
                 "warning",
                 "Bỏ qua AI vì chưa có API key.",
@@ -228,13 +249,14 @@ class AIAgent:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 self._current_model = self.model
+                headers = {"Content-Type": "application/json"}
+                if self.api_key:
+                    headers["Authorization"] = f"Bearer {self.api_key}"
+                if not self._is_local:
+                    headers["HTTP-Referer"] = "https://rewards.bing.com"
                 response = await client.post(
-                    OPENROUTER_API_URL,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://rewards.bing.com",
-                    },
+                    self._api_url,
+                    headers=headers,
                     json=self._request_payload(messages, self.model),
                 )
 
@@ -249,16 +271,12 @@ class AIAgent:
                     )
                     await asyncio.sleep(5)
                     response = await client.post(
-                        OPENROUTER_API_URL,
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json",
-                            "HTTP-Referer": "https://rewards.bing.com",
-                        },
+                        self._api_url,
+                        headers=headers,
                         json=self._request_payload(messages, self.model),
                     )
 
-                    if response.status_code == 429:
+                    if response.status_code == 429 and not self._is_local:
                         fallback_response = await self._try_fallback_models(
                             client,
                             messages,
@@ -268,7 +286,7 @@ class AIAgent:
                             response = fallback_response
 
                 if response.status_code != 200:
-                    if response.status_code not in (401, 402, 403):
+                    if response.status_code not in (401, 402, 403) and not self._is_local:
                         fallback_response = await self._try_fallback_models(
                             client,
                             messages,
@@ -314,23 +332,37 @@ class AIAgent:
 
                 # Parse JSON from response (handle markdown code blocks)
                 if "```" in content:
-                    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+                    match = re.search(r'```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```', content, re.DOTALL)
                     if match:
                         content = match.group(1)
 
                 # Clean up any non-JSON prefix/suffix
-                start = content.find('{')
-                end = content.rfind('}')
-                if start >= 0 and end >= 0:
-                    content = content[start:end + 1]
+                # Support both JSON objects {...} and arrays [...]
+                obj_start = content.find('{')
+                obj_end = content.rfind('}')
+                arr_start = content.find('[')
+                arr_end = content.rfind(']')
+
+                if arr_start >= 0 and arr_end >= 0 and (obj_start < 0 or arr_start < obj_start):
+                    # Array comes first — parse as array
+                    content = content[arr_start:arr_end + 1]
+                elif obj_start >= 0 and obj_end >= 0:
+                    content = content[obj_start:obj_end + 1]
 
                 action = json.loads(content)
                 usage = data.get("usage", {})
-                logger.debug(
-                    f"AI: {action.get('action')} "
-                    f"(tokens: {usage.get('prompt_tokens', '?')}/"
-                    f"{usage.get('completion_tokens', '?')})"
-                )
+                if isinstance(action, dict):
+                    logger.debug(
+                        f"AI: {action.get('action')} "
+                        f"(tokens: {usage.get('prompt_tokens', '?')}/"
+                        f"{usage.get('completion_tokens', '?')})"
+                    )
+                else:
+                    logger.debug(
+                        f"AI: returned {type(action).__name__}[{len(action)}] "
+                        f"(tokens: {usage.get('prompt_tokens', '?')}/"
+                        f"{usage.get('completion_tokens', '?')})"
+                    )
                 return action
 
         except json.JSONDecodeError as e:
@@ -371,6 +403,8 @@ class AIAgent:
                 "[role='button']:visible, input[type='submit']:visible, "
                 ".rqOption:visible, [id*='rqAnswerOption']:visible, "
                 "mee-card:visible, .ds-card-sec:visible, "
+                "mee-rewards-daily-set-item:visible, "
+                "mee-rewards-more-activities-card-item:visible, "
                 "[class*='card']:visible"
             )
 
@@ -545,6 +579,9 @@ class AIAgent:
 
         result = {"success": False, "steps": 0, "actions": []}
 
+        consecutive_failures = 0
+        max_failures = 3
+
         for step in range(self._max_steps):
             try:
                 # Get page snapshot
@@ -625,9 +662,10 @@ class AIAgent:
                 # Execute action
                 success = await self._execute_action(page, action)
                 if not success:
+                    consecutive_failures += 1
                     self._emit(
                         "warning",
-                        f"Action '{action_name}' thất bại, sẽ thử cách khác.",
+                        f"Action '{action_name}' thất bại, sẽ thử cách khác ({consecutive_failures}/{max_failures}).",
                         active=True,
                         model=self._current_model,
                         task=task_label,
@@ -635,11 +673,24 @@ class AIAgent:
                         action=action_name,
                         reason="action_failed",
                     )
+                    if consecutive_failures >= max_failures:
+                        self._emit(
+                            "warning",
+                            f"Dừng tác vụ AI do thất bại liên tiếp {max_failures} lần.",
+                            active=False,
+                            model=self._current_model,
+                            task=task_label,
+                            reason="max_failures_reached"
+                        )
+                        break
+                        
                     # Tell AI the action failed
                     messages.append({
                         "role": "user",
-                        "content": "⚠️ Action failed. Element might not exist. Try a different approach.",
+                        "content": "⚠️ Action failed. Element might not exist or is unclickable. Try a completely different approach or skip.",
                     })
+                else:
+                    consecutive_failures = 0
 
                 # Small delay between steps
                 await asyncio.sleep(random.uniform(0.5, 1.5))
@@ -707,6 +758,37 @@ class AIAgent:
         # Fallback: random
         return random.randint(0, len(options) - 1)
 
+    async def generate_search_query(self, task_description: str) -> str | None:
+        """
+        Use AI to generate a contextual search query based on the task description.
+        If AI is disabled or fails, returns None.
+        """
+        if not self.enabled:
+            return None
+
+        prompt = (
+            f"Microsoft Rewards task requires a search:\n\n"
+            f"Task: \"{task_description}\"\n\n"
+            f"What is a highly relevant, single search query I should type into Bing "
+            f"to accurately complete this task? Make it realistic.\n"
+            f"Respond with JSON ONLY: {{\"action\": \"search\", \"query\": \"your search term\"}}"
+        )
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+
+        action = await self._call_llm(messages)
+        if action and action.get("action") in ("search", "fill"):
+            query = action.get("query") or action.get("text", "")
+            query = query.strip()
+            if query:
+                logger.info(f"🧠 AI generated contextual search query: \"{query}\"")
+                return query
+
+        return None
+
     async def complete_task_on_page(self, page: Page, task_description: str) -> dict:
         """Compatibility wrapper for task-level Rewards fallbacks."""
         return await self.run_task(page, task_description)
@@ -716,15 +798,21 @@ class AIAgent:
         return await self.run_task(
             page,
             "Go to https://rewards.bing.com/earn and complete ALL uncompleted "
-            "tasks. Look for cards with point badges like '+5', '+10', '+50'. "
+            "tasks. SCROLL DOWN FULLY first — the page has lazy-loaded sections.\n"
+            "Look for these sections:\n"
+            "  - 'Keep earning' (cards with +5, +10, etc. — quizzes, polls, visits)\n"
+            "  - 'Explore on Bing' (12 cards, +10 each, 'Search on Bing for ...')\n"
+            "  - 'Trending now', 'Discover', or any other new card section\n"
+            "  - 'Quests' (multi-step quest cards with subtasks)\n\n"
             "For each uncompleted task:\n"
             "1. Click the task card\n"
             "2. If it opens a quiz - answer all questions correctly then go back\n"
             "3. If it opens a poll - pick any option then go back\n"
-            "4. If it opens an article/page - wait 5 seconds then go back\n"
+            "4. If it opens an article/search page - wait 5 seconds then go back\n"
             "5. Navigate back to https://rewards.bing.com/earn\n"
             "6. Click the next uncompleted task\n"
-            "7. When ALL tasks show checkmarks/completed, respond 'done'"
+            "7. Skip cards that say 'Completed' or have a checkmark\n"
+            "8. When ALL tasks show checkmarks/completed, respond 'done'"
         )
 
     async def complete_daily_set(self, page: Page) -> dict:
@@ -768,12 +856,13 @@ class AIAgent:
             "2. The task may open a new page or tab — wait 5 seconds\n"
             "3. Navigate back to https://rewards.bing.com\n"
             "4. Click the quest card again to check progress\n"
-            "5. Move to next available task\n\n"
-            "When ALL available tasks are completed (remaining are either ✅ done "
-            "or 🔒 locked), respond 'done'. If only locked tasks remain, that's "
-            "fine — respond 'done' with message about waiting.\n\n"
-            "NOTE: Do NOT try to click locked tasks. They will not unlock until "
-            "24+ hours after the previous day's task was completed."
+            "5. Move to the next available task inside the Quest\n\n"
+            "CRITICAL INSTRUCTION FOR MULTIPLE QUEST CARDS:\n"
+            "There may be MULTIPLE Quest cards on the page. You MUST check ALL of them! "
+            "If you hit a 🔒 locked task inside one Quest card, close its panel/modal and click the NEXT Quest card on the page.\n\n"
+            "When ALL available tasks across ALL quest cards are completed (remaining are either ✅ done "
+            "or 🔒 locked), ONLY THEN respond 'done'. If only locked tasks remain across all cards, "
+            "respond 'done' with a message about waiting."
         )
 
     async def complete_all_rewards(self, page: Page) -> dict:

@@ -48,6 +48,7 @@ from src.browser import BrowserManager
 from src.login import LoginManager
 from src.searcher import Searcher
 from src.universal_task import UniversalTaskScanner
+from src.google_sheets import GoogleSheetsLogger
 from src.quiz import QuizSolver
 from src.points import PointsTracker
 from src.notifier import Notifier
@@ -401,10 +402,19 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
         remaining.append(f"Edge Minutes {edge_minutes}/{edge_target}")
 
     pending_tasks = snapshot.get("pending_tasks", [])
-    for title in pending_tasks[:5]:
+    
+    # Filter out notoriously slow-updating tasks (Quests, URL visits)
+    filtered_tasks = []
+    ignored_keywords = ["click to complete", "click here", "explore on bing", "tulip", "ipl", "cherry blossoms", "league"]
+    for title in pending_tasks:
+        lower_ttl = title.lower()
+        if not any(k in lower_ttl for k in ignored_keywords):
+            filtered_tasks.append(title)
+            
+    for title in filtered_tasks[:5]:
         remaining.append(f"Task: {title[:60]}")
-    if len(pending_tasks) > 5:
-        remaining.append(f"{len(pending_tasks) - 5} more task(s)")
+    if len(filtered_tasks) > 5:
+        remaining.append(f"{len(filtered_tasks) - 5} more task(s)")
 
     return remaining
 
@@ -760,8 +770,12 @@ async def run_all_tasks(
                 minutes_done = edge_streak_info.get("minutes", 0)
                 minutes_target = edge_streak_info.get("target", 30)
                 streak_done = edge_streak_info.get("done", False)
+                edge_exists = edge_streak_info.get("exists", False)
+                offer_id = edge_streak_info.get("offerId", "")
 
-                if streak_done or minutes_done >= minutes_target:
+                if not edge_exists or not offer_id:
+                    console.print("[green][SKIP] Edge Streak task is not available or already completed[/green]")
+                elif streak_done or minutes_done >= minutes_target:
                     console.print(f"[green][SKIP] Edge Streak already complete ({minutes_done}/{minutes_target} min)[/green]")
                 else:
                     # --- Verify-and-Retry Loop ---
@@ -825,8 +839,13 @@ async def run_all_tasks(
                     pass
 
             # ─── Log & Notify ────────────────────────────────────────
+            # Create verification-only settings to prevent Native Edge from reopening loops
+            verify_settings = dict(settings)
+            verify_settings["native_edge_runtime_enabled"] = False
+            verify_settings["bootstrap_attach_existing_edge"] = False
+
             final_search_status, final_points_info = await _refresh_account_summary(
-                settings,
+                verify_settings,
                 account,
                 session_proxy,
                 login_mgr,
@@ -846,7 +865,7 @@ async def run_all_tasks(
             console.print("\n[bold][ Final Rewards Verification ][/bold]")
             try:
                 verification = await _collect_final_verification(
-                    settings,
+                    verify_settings,
                     account,
                     session_proxy,
                     login_mgr,
@@ -946,6 +965,26 @@ async def run_all_tasks(
                 verified_complete=account_complete,
                 remaining_items=remaining_items,
             )
+            
+            # Google Sheets Webhook
+            webhook_url = settings.get("google_sheets_webhook_url", "")
+            if settings.get("google_sheets_enabled", False) and webhook_url:
+                try:
+                    offers_total = punch_stats.get("completed", 0) + promo_stats.get("completed", 0)
+                    from src.google_sheets import GoogleSheetsLogger
+                    
+                    GoogleSheetsLogger.log_account(
+                        webhook_url=webhook_url,
+                        email=email,
+                        total_points=total_points,
+                        earned_today=earned_today,
+                        pc_search=final_search_status.get("pc_current", 0),
+                        mobile_search=final_search_status.get("mobile_current", 0),
+                        offers=offers_total
+                    )
+                except Exception as e:
+                    console.print(f"[dim]Failed to log to Google Sheets: {e}[/dim]")
+                    
             await browser_mgr.close()
 
         except Exception as e:

@@ -171,7 +171,6 @@ class BrowserManager:
 
         try:
             self.browser = await self.playwright.chromium.launch(
-                channel="msedge",
                 headless=self.settings.get("headless", True),
                 args=clean_args,
                 ignore_default_args=["--enable-automation", "--no-sandbox"],
@@ -241,7 +240,6 @@ class BrowserManager:
 
             context = await self.playwright.chromium.launch_persistent_context(
                 profile_dir,
-                channel="msedge",
                 headless=self.settings.get("headless", True),
                 args=clean_args,
                 ignore_default_args=["--enable-automation", "--no-sandbox"],
@@ -424,7 +422,6 @@ class BrowserManager:
 
         launch_args = [
             # Core anti-detection (minimal footprint)
-
             "--disable-infobars",
             "--no-first-run",
             "--start-maximized",
@@ -432,6 +429,27 @@ class BrowserManager:
 
         # Use REAL Microsoft Edge (installed on system) instead of Chromium
         # This is the #1 anti-detection measure — Edge has genuine fingerprints
+        # and the user's saved credentials (no passkey/2FA prompts)
+        #
+        # IMPORTANT: On Windows, if Edge processes are already running,
+        # Playwright cannot launch a new controlled instance — the OS merges
+        # it with the existing process tree and it dies immediately.
+        # We must kill stale Edge processes first.
+        if not self.settings.get("headless", True):
+            try:
+                import subprocess
+                # Only kill if not attached via CDP (preserve user's Edge if we're connecting to it)
+                result = subprocess.run(
+                    ["taskkill", "/F", "/IM", "msedge.exe"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0:
+                    logger.info("Killed stale Edge processes before launch")
+                    import asyncio
+                    await asyncio.sleep(2)  # Give OS time to release locks
+            except Exception:
+                pass  # No Edge processes running, or taskkill not available
+
         try:
             self.browser = await self.playwright.chromium.launch(
                 channel="msedge",
@@ -442,7 +460,7 @@ class BrowserManager:
             self._attached_via_cdp = False
             self._preserve_browser_defaults = False
             logger.info(
-                f"Browser started (Microsoft Edge, "
+                f"Browser started (Real Edge, "
                 f"headless={self.settings.get('headless', True)})"
             )
         except Exception as e:

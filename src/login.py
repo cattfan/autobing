@@ -626,7 +626,21 @@ class LoginManager:
         return True
 
     async def _enter_email(self, page: Page, email: str) -> None:
-        """Enter email and click submit."""
+        """Enter email and click submit. Handles account selection tiles if present."""
+        
+        # 1. Check for account tile (Pick an account)
+        try:
+            tiles = await page.query_selector_all("[role='button'], .row.tile, .table-row")
+            for tile in tiles:
+                text = await tile.inner_text()
+                if text and email.lower() in text.lower():
+                    logger.info(f"Account tile found for {email[:5]}***, clicking tile...")
+                    await tile.click()
+                    await self._wait_after_email_submit(page)
+                    return
+        except Exception as e:
+            pass
+
         # Try modern selector first, then fallback
         for selector in [SELECTORS["email_input"], SELECTORS["email_input_old"]]:
             try:
@@ -1049,8 +1063,8 @@ window.location.replace(
 
             current_url = page.url.lower()
             if allow_navigation and "bing.com" not in current_url:
-                await page.goto(BING_HOME_URL, wait_until="domcontentloaded", timeout=35000)
-                await asyncio.sleep(1.5)
+                await page.goto(REWARDS_URL, wait_until="domcontentloaded", timeout=35000)
+                await asyncio.sleep(2.0)
             else:
                 await asyncio.sleep(0.5 if allow_navigation else 0.2)
 
@@ -1076,6 +1090,8 @@ window.location.replace(
                 return await self._has_auth_cookie(page)
 
             if "rewards.bing.com" in url:
+                if "/welcome" in url:
+                    return False
                 return True
 
             sign_in_text = " ".join(

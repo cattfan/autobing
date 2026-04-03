@@ -148,6 +148,14 @@ class UniversalTaskScanner:
         stats["total"] = len(tasks)
         self._log("info", f"Found {len(tasks)} total tasks")
 
+        # 1b. DOM Cross-Validation — override stale API completion status
+        dom_completed_ids = await self._dom_verify_task_status(page, tasks)
+        if dom_completed_ids:
+            self._log("info", f"👁️ DOM detected {len(dom_completed_ids)} additional completed tasks")
+            for task in tasks:
+                if not task.is_complete and task.id in dom_completed_ids:
+                    task.is_complete = True
+
         # 2. Load state for time-gated task tracking
         state = _load_state()
         account_state = state.get(account_email, {})
@@ -185,6 +193,20 @@ class UniversalTaskScanner:
                     "locked_since": datetime.now().isoformat(),
                 }
                 continue
+
+            # Local Memory Cache check (skip tasks recently visited to outpace Microsoft API delay)
+            visited_tasks = account_state.setdefault("visited_tasks", {})
+            if task.id in visited_tasks:
+                visited_at_str = visited_tasks[task.id]
+                try:
+                    visited_at = datetime.fromisoformat(visited_at_str)
+                    if datetime.now() - visited_at < timedelta(hours=12):
+                        stats["skipped_done"] += 1
+                        category_stats["skipped_done"] += 1
+                        self._log("info", f"✅ Local Cache: Skipping recently completed task: {task.title[:30]}")
+                        continue
+                except ValueError:
+                    pass
 
             actionable.append(task)
 
@@ -224,6 +246,12 @@ class UniversalTaskScanner:
                         "status": "completed",
                         "type": task.task_type,
                     })
+
+                    # Register completed task into memory cache to outsmart lagging MS APIs
+                    state = _load_state()
+                    account_state = state.setdefault(account_email, {})
+                    account_state.setdefault("visited_tasks", {})[task.id] = datetime.now().isoformat()
+                    _save_state(state)
                 else:
                     stats["failed"] += 1
                     stats["by_category"].setdefault(task.category, {}).setdefault("failed", 0)
@@ -238,8 +266,8 @@ class UniversalTaskScanner:
                 # Clean up tabs
                 try:
                     await close_other_tabs(page)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"Tab cleanup suppressed: {_e}")
 
                 await self.humanizer.short_delay()
 
@@ -259,16 +287,16 @@ class UniversalTaskScanner:
                     ss_path = ss_dir / f"task_error_{ts}.png"
                     await page.screenshot(path=str(ss_path))
                     logger.debug(f"Error screenshot saved: {ss_path}")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"Error screenshot suppressed: {_e}")
                 # Recovery
                 try:
                     await close_other_tabs(page)
                     await page.goto(REWARDS_URL,
                                     wait_until="domcontentloaded", timeout=35000)
                     await asyncio.sleep(2)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"Recovery navigation suppressed: {_e}")
 
         # 6. Auto-retry: re-scan API to find still-incomplete tasks
         retry_limit = int(self.settings.get("session_task_retry_limit", 3))
@@ -318,6 +346,24 @@ class UniversalTaskScanner:
                 
             failed_tasks = still_failed
 
+        # ── Quests (AI-driven multi-step cards) ──
+        if "quests" not in skip_categories and self.ai_agent and self.ai_agent.enabled:
+            try:
+                self._log("info", "🗺️ AI Smart Scan – checking /earn page for Quests...")
+                quest_res = await self.ai_agent.complete_quests(page)
+                if quest_res and quest_res.get("success"):
+                    stats["completed"] += 1
+            except Exception as e:
+                self._log("debug", f"Quests scan softly failed: {e}")
+
+        # ── Explore on Bing (DOM-scraped from /earn page) ──
+        if "explore" not in skip_categories:
+            try:
+                explore_done = await self._scan_explore_on_bing(page)
+                stats["completed"] += explore_done
+            except Exception as e:
+                self._log("info", f"Explore on Bing scan skipped: {e}")
+
         self._log("info",
                    f"✅ Tasks: {stats['completed']}/{stats['total']} completed, "
                    f"{stats['skipped_locked']} locked, {stats['failed']} failed")
@@ -360,13 +406,23 @@ class UniversalTaskScanner:
             raise RuntimeError("Manual verification challenge not resolved")
 
     async def _verify_task_completion(self, page: Page, task: RewardsTask) -> bool:
-        """Re-check the Rewards API so we only count tasks that actually completed."""
-        # Unreliable API bypass: Microsoft API often fails to reflect 'complete: true' for simple URL-based punch cards
-        if task.category == "punch_card" and task.task_type in ("urlreward", "visit"):
-            self._log("info", f"  ✅ Optimistically completed URL punch card (skipping strict API verify)")
+        """Hybrid 3-layer verification: Memory Cache → DOM visual → API."""
+
+        # Layer 1: URL/visit tasks — optimistic pass (they always count)
+        if task.task_type in ("urlreward", "visit"):
+            self._log("info", f"  ✅ Optimistically completed URL task (skipping strict API verify)")
             return True
 
-        # Punch cards need more time for server-side processing
+        # Layer 2: DOM visual cues — check if the page shows completion
+        try:
+            dom_done = await self._dom_check_single_task_done(page, task)
+            if dom_done:
+                self._log("info", f"  ✅ DOM visual confirms task completed")
+                return True
+        except Exception as _e:
+            logger.debug(f"DOM visual check suppressed: {_e}")
+
+        # Layer 3: API verification (slowest, may lag)
         initial_wait = 5 if task.category == "punch_card" else 2
         max_attempts = 2 if task.category == "punch_card" else 1
 
@@ -407,6 +463,147 @@ class UniversalTaskScanner:
                 logger.warning(f"Task verification failed for {task.title[:30]}: {e}")
                 return False
         return False
+
+    async def _dom_check_single_task_done(self, page: Page, task: RewardsTask) -> bool:
+        """Check if a single task shows visual completion cues on the current page."""
+        title_snippet = (task.title or "")[:30]
+        if not title_snippet:
+            return False
+        try:
+            return await page.evaluate("""
+                (titleSnippet) => {
+                    const normalize = s => (s || '').replace(/[\u200b\u00a0]/g, ' ').trim().toLowerCase();
+                    const target = normalize(titleSnippet);
+                    if (!target) return false;
+
+                    const cards = document.querySelectorAll(
+                        'mee-card, [class*="card"], [data-bi-area], [class*="earn"]'
+                    );
+
+                    for (const card of cards) {
+                        const text = normalize(card.innerText || card.textContent || '');
+                        if (!text.includes(target)) continue;
+
+                        // Check visual completion cues
+                        if (text.includes('completed') || text.includes('✓') || text.includes('✔')) {
+                            return true;
+                        }
+
+                        // Check for checkmark icons
+                        const icons = card.querySelectorAll(
+                            'svg, [class*="check"], [class*="complete"], [class*="done"], [aria-label*="complete"]'
+                        );
+                        if (icons.length > 0) {
+                            for (const ic of icons) {
+                                const cl = (ic.className || '').toLowerCase();
+                                const al = (ic.getAttribute('aria-label') || '').toLowerCase();
+                                if (cl.includes('check') || cl.includes('complete') || cl.includes('done')
+                                    || al.includes('check') || al.includes('complete')) {
+                                    return true;
+                                }
+                            }
+                        }
+
+                        // Check for muted/disabled styling
+                        const style = window.getComputedStyle(card);
+                        if (parseFloat(style.opacity) < 0.6) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            """, title_snippet)
+        except Exception:
+            return False
+
+    async def _dom_verify_task_status(self, page: Page, tasks: list) -> set:
+        """Cross-validate API tasks against DOM visual cues on the earn page.
+
+        Returns a set of task IDs that DOM shows as completed but API says incomplete.
+        """
+        completed_ids = set()
+        if not tasks:
+            return completed_ids
+
+        try:
+            # Navigate to /earn to get the full rendered card layout
+            if "rewards.bing.com/earn" not in page.url:
+                await page.goto(
+                    "https://rewards.bing.com/earn",
+                    wait_until="domcontentloaded",
+                    timeout=35000,
+                )
+                await asyncio.sleep(3)
+
+            # Scrape all visible card completion status from the DOM
+            dom_cards = await page.evaluate("""
+                () => {
+                    const normalize = s => (s || '').replace(/[\u200b\u00a0]/g, ' ').trim().toLowerCase();
+                    const results = [];
+
+                    const cards = document.querySelectorAll(
+                        'mee-card, [class*="card"], [data-bi-area], [class*="earn"], [class*="promo"]'
+                    );
+
+                    for (const card of cards) {
+                        const rect = card.getBoundingClientRect();
+                        if (rect.width < 10 || rect.height < 10) continue;
+
+                        const text = normalize(card.innerText || card.textContent || '');
+                        if (!text || text.length < 5) continue;
+
+                        let isCompleted = false;
+
+                        // Check text cues
+                        if (text.includes('completed') || text.includes('✓') || text.includes('✔')) {
+                            isCompleted = true;
+                        }
+
+                        // Check for checkmark elements  
+                        if (!isCompleted) {
+                            const icons = card.querySelectorAll(
+                                '[class*="check"], [class*="complete"], [class*="done"], '
+                                + '[aria-label*="complete"], [aria-label*="done"]'
+                            );
+                            if (icons.length > 0) isCompleted = true;
+                        }
+
+                        // Check opacity
+                        if (!isCompleted) {
+                            const style = window.getComputedStyle(card);
+                            if (parseFloat(style.opacity) < 0.6) isCompleted = true;
+                        }
+
+                        results.push({ text: text.substring(0, 200), completed: isCompleted });
+                    }
+                    return results;
+                }
+            """)
+
+            if not dom_cards:
+                return completed_ids
+
+            # Match DOM cards to API tasks by title fuzzy match
+            completed_dom_texts = [
+                c["text"] for c in dom_cards if c.get("completed")
+            ]
+
+            for task in tasks:
+                if task.is_complete:
+                    continue
+                task_title_lower = (task.title or "").lower().strip()[:40]
+                if not task_title_lower or len(task_title_lower) < 5:
+                    continue
+
+                for dom_text in completed_dom_texts:
+                    if task_title_lower in dom_text:
+                        completed_ids.add(task.id)
+                        break
+
+        except Exception as e:
+            logger.debug(f"DOM cross-validation failed: {e}")
+
+        return completed_ids
 
     # ─── API Data Fetch ────────────────────────────────────────────────
 
@@ -730,6 +927,9 @@ class UniversalTaskScanner:
 
         if task.category in {"daily_set", "streak"}:
             pages.append(REWARDS_URL)
+            # Also try /earn — Daily Set items render reliably there
+            if task.category == "daily_set":
+                pages.append("https://rewards.bing.com/earn")
 
         if task.category in {"more_promo", "punch_card"}:
             pages.append("https://rewards.bing.com/earn")
@@ -834,7 +1034,8 @@ class UniversalTaskScanner:
 
         locators = []
 
-        if task.category == "daily_set":
+        # Only open Daily Set panel on the main dashboard, not on /earn
+        if task.category == "daily_set" and "rewards.bing.com/earn" not in page.url:
             await self._open_daily_set_panel(page)
 
         if task.destination_url:
@@ -856,6 +1057,9 @@ class UniversalTaskScanner:
                         ).first,
                         page.locator('[data-bi-area="DailySet"] a', has_text=title).first,
                         page.locator('mee-card a', has_text=title).first,
+                        # /earn page selectors ─ Daily Set section
+                        page.locator('[data-bi-id] a', has_text=title).first,
+                        page.locator('mee-rewards-daily-set-item-content:not([complete]) a', has_text=title).first,
                     ]
                 )
             locators.extend(
@@ -1203,3 +1407,453 @@ class UniversalTaskScanner:
 
         except Exception as e:
             logger.warning(f"Quiz attempt failed: {e}")
+
+    # ── AI-Driven Earn Page Smart Scan ────────────────────────────────────
+
+    async def _scan_explore_on_bing(self, page: Page) -> int:
+        """Intelligently scan the /earn page for non-API task sections.
+
+        Microsoft keeps adding new sections (e.g. "Explore on Bing",
+        "Trending now", seasonal promotions) that are rendered client-side
+        via Next.js RSC and are **not** part of the ``getuserinfo`` API.
+
+        Strategy:
+          Phase 1 – AI Discovery (if AI agent is available):
+            Navigate to /earn, scroll to load everything, then ask the AI
+            to read the page snapshot and extract every uncompleted task
+            card / link it can find that looks like a points-earning card.
+          Phase 2 – Fallback DOM scrape (if AI is off or returns nothing):
+            Generic heuristic that looks for ``a[href*="bing.com/search"]``
+            links inside card-like containers with point badges (``+10`` etc.).
+          Phase 3 – Execute:
+            Visit each discovered URL to register task completion.
+        """
+        self._log("info", "🔎 AI Smart Scan – checking /earn page for extra tasks...")
+
+        # ── Navigate and scroll ────────────────────────────────────────
+        try:
+            await page.goto(
+                "https://rewards.bing.com/earn",
+                wait_until="domcontentloaded",
+                timeout=35000,
+            )
+            await asyncio.sleep(5)
+        except Exception:
+            self._log("info", "  Could not load /earn page")
+            return 0
+
+        # Scroll to trigger lazy rendering of ALL sections
+        for _ in range(30):
+            await page.evaluate("window.scrollBy(0, 400)")
+            await asyncio.sleep(0.25)
+        await asyncio.sleep(3)
+
+        # ── Phase 1: AI-powered discovery ──────────────────────────────
+        cards: list[dict] = []
+
+        if self.ai_agent and self.ai_agent.enabled:
+            cards = await self._ai_discover_earn_cards(page)
+
+        # ── Phase 2: Fallback DOM heuristic ────────────────────────────
+        if not cards:
+            cards = await self._dom_discover_earn_cards(page)
+
+        if not cards:
+            self._log("info", "  No extra earn-page tasks found")
+            return 0
+
+        # Deduplicate by href
+        seen = set()
+        unique = []
+        for c in cards:
+            href = c.get("href", "")
+            selector = c.get("selector", "")
+            key = href if href else selector
+            
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(c)
+        cards = unique
+
+        # Memory Cache filter — skip cards visited recently
+        state = _load_state()
+        account_state = state.get(self._active_account_email, {})
+        visited_cards = account_state.setdefault("visited_cards", {})
+        fresh_cards = []
+        for c in cards:
+            href = c.get("href", "")
+            selector = c.get("selector", "")
+            if not href and not selector:
+                continue
+                
+            cache_key = (href.split("?")[0][:120]) if href else selector
+            if cache_key in visited_cards:
+                try:
+                    visited_at = datetime.fromisoformat(visited_cards[cache_key])
+                    if datetime.now() - visited_at < timedelta(hours=12):
+                        self._log("info", f"  ✅ Cache: Skipping recently visited card: {c.get('text', '')[:30]}")
+                        continue
+                except ValueError:
+                    pass
+            fresh_cards.append(c)
+        cards = fresh_cards
+
+        self._log("info", f"  ✨ Discovered {len(cards)} earn-page cards to visit")
+
+        # ── Phase 3: Visit each URL ───────────────────────────────────
+        completed = 0
+        for i, card in enumerate(cards):
+            title = card.get("text", "")[:50]
+            href = card.get("href", "")
+            selector = card.get("selector", "")
+            if not href and not selector:
+                continue
+
+            self._log("info", f"  [{i + 1}/{len(cards)}] {title}")
+
+            try:
+                active_page = page
+                if href:
+                    await page.goto(href, wait_until="domcontentloaded", timeout=25000)
+                else:
+                    pages_before = len(page.context.pages)
+                    await page.click(selector, timeout=10000)
+                    await asyncio.sleep(3)
+                    pages_after = page.context.pages
+                    if len(pages_after) > pages_before:
+                        # Grab the newly opened page
+                        active_page = pages_after[-1]
+                        try:
+                            await active_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                        except Exception:
+                            pass
+                            
+                await asyncio.sleep(random.uniform(3, 6))
+
+                # If this task explicitly asks to "Search on Bing" (e.g., "Search on Bing for your favorite movie")
+                try:
+                    text_lower = title.lower()
+                    if "search" in text_lower or "tìm" in text_lower or "explore" in text_lower:
+                        input_box = active_page.locator("input[type='search'], textarea[type='search'], input[name='q'], textarea[name='q']").first
+                        if await input_box.is_visible(timeout=3000):
+                            self._log("info", "    ⌨️ Detected 'Search' requirement, context-aware query loading...")
+                            search_term = None
+                            
+                            # Ask AI agent to deduce what we should type based on the title
+                            if getattr(self, "ai_agent", None) and self.ai_agent.enabled:
+                                try:
+                                    search_term = await self.ai_agent.generate_search_query(title)
+                                except Exception as agent_e:
+                                    pass
+                            
+                            # Fallback if AI fails or disabled
+                            if not search_term:
+                                if "movie" in text_lower or "phim" in text_lower:
+                                    search_term = random.choice(["Titanic movie", "Interstellar", "The Matrix", "Avengers"])
+                                elif "book" in text_lower or "sách" in text_lower or "read" in text_lower:
+                                    search_term = random.choice(["Harry Potter books", "Lord of the Rings", "Dune book"])
+                                elif "translate" in text_lower or "từ" in text_lower:
+                                    search_term = random.choice(["translate hello to french", "meaning of serendipity"])
+                                elif "loan" in text_lower or "vay" in text_lower or "credit" in text_lower:
+                                    search_term = random.choice(["personal loan interest rates", "student loan calculator"])
+                                elif "diy" in text_lower or "craft" in text_lower:
+                                    search_term = random.choice(["fun DIY kits", "craft supplies near me"])
+                                elif "pet" in text_lower or "thú" in text_lower:
+                                    search_term = random.choice(["best dog food", "cool cat toys"])
+                                else:
+                                    search_term = random.choice(["Microsoft surface", "Windows 11 features", "OpenAI ChatGPT"])
+                                
+                            await input_box.fill(search_term)
+                            await input_box.press("Enter")
+                            await asyncio.sleep(random.uniform(5, 8))
+                except Exception as e:
+                    pass
+                
+                # Simulate brief reading
+                try:
+                    await active_page.evaluate("window.scrollBy(0, 300)")
+                except Exception:
+                    pass
+                await asyncio.sleep(random.uniform(1, 2))
+                
+                try:
+                    await close_other_tabs(page)
+                except Exception:
+                    pass
+                    
+                # If active_page was original page and it navigated away, go back
+                if active_page == page and "rewards" not in page.url:
+                    await page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=25000)
+                    await asyncio.sleep(2)
+                
+                completed += 1
+
+                # Register visited card into memory cache
+                cache_key = (href.split("?")[0][:120]) if href else selector
+                state = _load_state()
+                account_state = state.setdefault(self._active_account_email, {})
+                account_state.setdefault("visited_cards", {})[cache_key] = datetime.now().isoformat()
+                _save_state(state)
+            except Exception as e:
+                self._log("info", f"  ⚠️ Card failed: {e}")
+
+            await asyncio.sleep(random.uniform(1, 3))
+
+        self._log("info", f"  ✅ Earn-page smart scan: {completed}/{len(cards)} cards visited")
+        return completed
+
+    # ── AI Discovery ───────────────────────────────────────────────────
+
+    async def _ai_discover_earn_cards(self, page: Page) -> list[dict]:
+        """Use AI agent with screenshot + text to discover task cards."""
+        try:
+            # Build a focused page snapshot for the AI
+            snapshot = await self.ai_agent._get_page_snapshot(page, max_text_len=6000)
+
+            # Component 3: Try to capture a screenshot for vision-capable LLMs
+            screenshot_b64 = None
+            try:
+                import base64
+                screenshot_bytes = await page.screenshot(full_page=False, type="jpeg", quality=60)
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+            except Exception:
+                pass
+
+            prompt = (
+                "You are analyzing the Microsoft Rewards Earn page.\n"
+                "I need you to find ALL uncompleted task cards that I can click to earn points.\n"
+                "Look for sections like:\n"
+                "  - 'Explore on Bing' (cards with +10 points, 'Search on Bing for ...')\n"
+                "  - 'Trending now', 'Discover', or any other card section\n"
+                "  - Any card with a point badge (+5, +10, +15, +20, +50) that is NOT yet completed\n"
+                "  - Cards that say 'Completed' or have a checkmark should be SKIPPED\n"
+                "  - Cards that appear faded/greyed out or have reduced opacity are COMPLETED — SKIP them\n\n"
+                "For each card found, extract the URL (href) from the link.\n\n"
+                "Respond with a JSON array of objects, each with 'text' and 'href'.\n"
+                "Example: [{\"text\": \"Learn song lyrics\", \"href\": \"https://www.bing.com/search?q=...\"}, ...]\n"
+                "If no cards found, respond with an empty array: []\n\n"
+                "IMPORTANT: Only return the JSON array, nothing else.\n\n"
+                f"{snapshot}"
+            )
+
+            # Build messages — include screenshot if available for vision LLMs
+            if screenshot_b64:
+                messages = [
+                    {"role": "system", "content": (
+                        "You are a Rewards page analyzer with vision. You can see screenshots "
+                        "and read page text to extract task card URLs. Respond ONLY with a valid JSON array."
+                    )},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:image/jpeg;base64,{screenshot_b64}",
+                            "detail": "low",
+                        }},
+                    ]},
+                ]
+            else:
+                messages = [
+                    {"role": "system", "content": (
+                        "You are a Rewards page analyzer. You extract task card URLs from "
+                        "page snapshots. Respond ONLY with a valid JSON array."
+                    )},
+                    {"role": "user", "content": prompt},
+                ]
+
+            result = await self.ai_agent._call_llm(messages)
+
+            if result is None:
+                return []
+
+            # The LLM might return a dict with the array, or the array directly
+            if isinstance(result, list):
+                cards = result
+            elif isinstance(result, dict):
+                # Try common wrapper keys
+                for key in ["cards", "tasks", "items", "data", "results"]:
+                    if key in result and isinstance(result[key], list):
+                        cards = result[key]
+                        break
+                else:
+                    return []
+            else:
+                return []
+
+            # Validate
+            valid = []
+            for c in cards:
+                if isinstance(c, dict) and c.get("href"):
+                    valid.append({
+                        "text": str(c.get("text", ""))[:120],
+                        "href": str(c["href"]),
+                    })
+
+            self._log("info", f"  🧠 AI found {len(valid)} task cards" + (" (with vision)" if screenshot_b64 else ""))
+            return valid
+
+        except Exception as e:
+            self._log("info", f"  AI discovery failed: {e}")
+            return []
+
+    # ── DOM Fallback Discovery ─────────────────────────────────────────
+
+    async def _dom_discover_earn_cards(self, page: Page) -> list[dict]:
+        """Adaptive DOM discovery: scrape the earn page for task cards using
+        multiple flexible strategies that survive Microsoft layout changes."""
+        return await page.evaluate("""
+            () => {
+                const cards = [];
+                const seenHrefs = new Set();
+
+                const isCompleted = (text) => {
+                    const t = (text || '').toLowerCase();
+                    return t.includes('completed') || t.includes('\u2713') || t.includes('\u2714')
+                        || t.includes('done') || t.includes('claimed');
+                };
+
+                const addCard = (a, contextEl) => {
+                    if (!a || !a.href || seenHrefs.has(a.href)) return;
+                    const parentText = (contextEl || a.parentElement)?.textContent || '';
+                    if (isCompleted(parentText)) return;
+
+                    // Check if card is visually faded (completed)
+                    const card = a.closest('[class*="card"]') || a.closest('[data-bi-area]') || a.parentElement;
+                    if (card) {
+                        const style = window.getComputedStyle(card);
+                        if (parseFloat(style.opacity) < 0.6) return;
+                    }
+
+                    seenHrefs.add(a.href);
+                    cards.push({
+                        text: (a.textContent || '').trim().substring(0, 120),
+                        href: a.href
+                    });
+                };
+
+                // Strategy 1: Known section IDs (fast path)
+                const knownIds = [
+                    'exploreonbing', 'trendingnow', 'discover',
+                    'explore-on-bing', 'trending-now', 'discover-on-bing',
+                    'moreactivities', 'more-activities', 'quests'
+                ];
+                for (const sectionId of knownIds) {
+                    const section = document.getElementById(sectionId);
+                    if (!section) continue;
+                    
+                    // Capture both a[href] and routable mee-cards
+                    section.querySelectorAll('a[href], mee-card').forEach(el => {
+                        const href = el.href || el.getAttribute('href') || '';
+                        if (href && href.includes('bing.com')) {
+                            addCard(el, el.closest('[class*="card"]') || el.parentElement);
+                        } else if (el.tagName.toLowerCase() === 'mee-card') {
+                            const dataBiId = el.getAttribute('data-bi-id');
+                            if (dataBiId) {
+                                seenHrefs.add(dataBiId);
+                                cards.push({
+                                    text: (el.textContent || '').trim().substring(0, 120),
+                                    href: '',
+                                    selector: `mee-card[data-bi-id="${dataBiId}"]`
+                                });
+                            }
+                        }
+                    });
+                }
+
+                // Strategy 2: Find sections by heading text (flexible)
+                const headingKeywords = [
+                    'explore on bing', 'trending now', 'discover on bing',
+                    'quests', 'more activities', 'featured', 'earn more',
+                    'bonus', 'weekly', 'seasonal', 'special'
+                ];
+                const headingEls = document.querySelectorAll('h1, h2, h3, h4, h5, span[class*="title"], span[class*="heading"]');
+                for (const el of headingEls) {
+                    const headText = (el.textContent || '').trim().toLowerCase();
+                    const isMatch = headingKeywords.some(kw => headText.includes(kw));
+                    if (!isMatch) continue;
+
+                    // Walk up to find the section container
+                    const parent = el.closest('section')
+                        || el.closest('[class*="section"]')
+                        || el.closest('[data-bi-area]')
+                        || el.parentElement?.parentElement?.parentElement
+                        || el.parentElement?.parentElement;
+                    if (!parent) continue;
+
+                    parent.querySelectorAll('a[href], mee-card').forEach(cb => {
+                        const href = cb.href || cb.getAttribute('href') || '';
+                        if (href && (href.includes('bing.com') || href.includes('rewards.'))) {
+                            addCard(cb, cb.closest('[class*="card"]') || cb.parentElement);
+                        } else if (cb.tagName.toLowerCase() === 'mee-card') {
+                            const dataBiId = cb.getAttribute('data-bi-id');
+                            if (dataBiId) {
+                                seenHrefs.add(dataBiId);
+                                cards.push({
+                                    text: (cb.textContent || '').trim().substring(0, 120),
+                                    href: '',
+                                    selector: `mee-card[data-bi-id="${dataBiId}"]`
+                                });
+                            }
+                        }
+                    });
+                }
+
+                // Strategy 3: Structural scan — any link inside card-like containers with point badges
+                const cardContainers = document.querySelectorAll(
+                    '[class*="card"], [class*="Card"], [data-bi-area], '
+                    + '[class*="earn"], [class*="Earn"], [class*="quest"], [class*="Quest"], '
+                    + '[class*="promo"], [class*="Promo"], mee-card'
+                );
+                for (const container of cardContainers) {
+                    const text = container.textContent || '';
+                    // Must contain a point badge pattern (+5, +10, +15, etc.)
+                    if (!/\\+\\d+/.test(text)) continue;
+                    if (isCompleted(text)) continue;
+
+                    container.querySelectorAll('a[href], mee-card').forEach(cb => {
+                        const href = cb.href || cb.getAttribute('href') || '';
+                        if (href && (href.includes('bing.com') || href.includes('rewards.'))) {
+                            addCard(cb, container);
+                        } else if (cb.tagName.toLowerCase() === 'mee-card') {
+                            const dataBiId = cb.getAttribute('data-bi-id');
+                            if (dataBiId && !seenHrefs.has(dataBiId)) {
+                                seenHrefs.add(dataBiId);
+                                cards.push({
+                                    text: (cb.textContent || '').trim().substring(0, 120),
+                                    href: '',
+                                    selector: `mee-card[data-bi-id="${dataBiId}"]`
+                                });
+                            }
+                        }
+                    });
+                }
+
+                // Strategy 4: Broad search link scan (last resort)
+                if (cards.length === 0) {
+                    document.querySelectorAll('a[href*="bing.com/search"], mee-card[data-bi-id]').forEach(cb => {
+                        const container = cb.closest('[class*="card"]')
+                            || cb.closest('[data-bi-area]')
+                            || cb.parentElement;
+                        const text = container ? (container.textContent || '') : '';
+                        if (/\\+\\d+/.test(text) && !isCompleted(text)) {
+                            const href = cb.href || cb.getAttribute('href') || '';
+                            if (href) {
+                                addCard(cb, container);
+                            } else if (cb.tagName.toLowerCase() === 'mee-card') {
+                                const dataBiId = cb.getAttribute('data-bi-id');
+                                if (dataBiId && !seenHrefs.has(dataBiId)) {
+                                    seenHrefs.add(dataBiId);
+                                    cards.push({
+                                        text: (cb.textContent || '').trim().substring(0, 120),
+                                        href: '',
+                                        selector: `mee-card[data-bi-id="${dataBiId}"]`
+                                    });
+                                }
+                            }
+                        }
+                    });
+                }
+
+                return cards;
+            }
+        """)
+

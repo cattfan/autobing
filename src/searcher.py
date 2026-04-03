@@ -211,6 +211,7 @@ class Searcher:
         self._current_mode = mode
         stats = {"completed": 0, "failed": 0, "queries": [], "fatal_error": "", "early_abort": False}
         seen_queries: set[str] = set()
+        _consecutive_closed = 0  # Guard: abort if page is persistently closed
 
         if self.settings.get("use_google_trends", True):
             await self.trends.fetch_trending()
@@ -246,6 +247,7 @@ class Searcher:
                     success = await self._search_via_box(page, query, i + 1, count)
 
                 if success:
+                    _consecutive_closed = 0  # Reset on success
                     stats["completed"] += 1
                     stats["queries"].append(query)
                 else:
@@ -294,6 +296,30 @@ class Searcher:
                     self.on_error(stats["fatal_error"])
                 break
             except Exception as e:
+                err_str = str(e).lower()
+                # Detect persistent "page closed" zombie loop and abort early
+                is_closed_err = any(kw in err_str for kw in (
+                    "target page, context or browser has been closed",
+                    "execution context was destroyed",
+                    "target closed",
+                    "session closed",
+                ))
+                if is_closed_err:
+                    _consecutive_closed += 1
+                    if _consecutive_closed >= 5:
+                        msg = (
+                            f"Aborting {mode} searches: browser context closed "
+                            f"for 5+ consecutive searches (page is gone). "
+                            f"Completed: {stats['completed']}/{count}"
+                        )
+                        logger.error(msg)
+                        stats["fatal_error"] = msg
+                        if self.on_error:
+                            self.on_error(msg)
+                        break
+                else:
+                    _consecutive_closed = 0  # Reset on non-closed error
+
                 logger.error(f"Search {i + 1}/{count} failed: {e}")
                 stats["failed"] += 1
                 if self.on_error:

@@ -185,6 +185,7 @@ def get_default_settings() -> dict:
         "captcha_api_key": "",
         "ai_enabled": False,
         "ai_api_key": "",
+        "ai_api_url": "",
         "ai_model": "meta-llama/llama-3.3-70b-instruct:free",
         "master_password_hash": "",
     }

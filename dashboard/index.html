@@ -1,473 +1,854 @@
 <!DOCTYPE html>
 <html lang="vi">
+
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Rewards Bot</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>AutoBing — Rewards Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
-<div class="layout">
+  <div class="layout">
 
-  <!-- ═══ Sidebar ═══ -->
-  <aside class="sidebar">
-    <div class="sidebar-brand">
-      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-      <span>Rewards Bot <small>v1.0</small></span>
-    </div>
-    <div class="sidebar-section">Main</div>
-    <nav class="sidebar-nav" id="mainNav">
-      <a class="nav-item active" data-page="accounts">
-        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>
-        Tài khoản <span class="badge" id="navBadge">0</span>
-      </a>
-      <a class="nav-item" data-page="controls">
-        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.25 5.65c0-.86.92-1.4 1.67-.99l11.54 6.35a1.13 1.13 0 010 1.97l-11.54 6.35a1.13 1.13 0 01-1.67-.99V5.65z"/></svg>
-        Điều khiển
-      </a>
-      <a class="nav-item" data-page="log">
-        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
-        Log
-      </a>
-    </nav>
-    <div class="sidebar-section">Others</div>
-    <nav class="sidebar-nav" id="otherNav">
-      <a class="nav-item" data-page="settings">
-        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87a6.47 6.47 0 01.22.128c.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124a6.47 6.47 0 01.22-.128c.332-.183.582-.495.644-.869l.214-1.28z"/><circle cx="12" cy="12" r="3" stroke-width="2"/></svg>
-        Cài đặt
-      </a>
-    </nav>
-    <div class="sidebar-foot">
-      <a href="https://rewards.bing.com/welcome?rh=CE9698B&ref=rafsrchae" target="_blank" style="color:var(--green);text-decoration:none;font-size:11px;display:block;margin-bottom:6px">Dang ky Microsoft Rewards</a>
-      <span>Built by cattfan</span>
-    </div>
-  </aside>
-
-  <!-- ═══ Main Content ═══ -->
-  <div class="main">
-    <!-- Topbar -->
-    <div class="topbar">
-      <div class="topbar-left">
-        <h2 id="pageTitle">Tài khoản</h2>
-        <span id="stStatus"></span>
+    <!-- ═══ Sidebar ═══ -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+        </svg>
+        <div class="sidebar-brand-name">
+          <span>AutoBing</span>
+          <small>Rewards Bot v1.0</small>
+        </div>
       </div>
+      <div class="sidebar-section">Main</div>
+      <nav class="sidebar-nav" id="mainNav">
+        <a class="nav-item active" data-page="accounts">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
+          </svg>
+          <span>Tài khoản <span class="badge" id="navBadge">0</span></span>
+        </a>
+        <a class="nav-item" data-page="controls">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M5.25 5.65c0-.86.92-1.4 1.67-.99l11.54 6.35a1.13 1.13 0 010 1.97l-11.54 6.35A1.13 1.13 0 015.25 12.35V5.65z" />
+          </svg>
+          <span>Điều khiển</span>
+        </a>
+        <a class="nav-item" data-page="log">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+          <span>Live Log</span>
+        </a>
+      </nav>
+      <div class="sidebar-section">System</div>
+      <nav class="sidebar-nav" id="otherNav">
+        <a class="nav-item" data-page="settings">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87a6.47 6.47 0 01.22.128c.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124a6.47 6.47 0 01.22-.128c.332-.183.582-.495.644-.869l.214-1.28z" />
+            <circle cx="12" cy="12" r="3" stroke-width="2" />
+          </svg>
+          <span>Cài đặt</span>
+        </a>
+      </nav>
+      <div class="sidebar-foot">
+        <a href="https://rewards.bing.com/welcome?rh=CE9698B&ref=rafsrchae" target="_blank">🎁 Đăng ký Rewards</a>
+        <span>Built by cattfan</span>
+      </div>
+    </aside>
 
-    </div>
-
-    <!-- ═══ Page: Accounts ═══ -->
-    <div class="page active" id="page-accounts">
-      <div class="toolbar">
-        <input type="text" class="search-box" placeholder="Tìm tài khoản..." id="searchInput" oninput="filterAccounts()">
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-success" onclick="document.getElementById('addForm').classList.toggle('hidden')"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4.5v15m7.5-7.5h-15"/></svg> Thêm</button>
-          <button class="btn btn-primary" data-run="1" onclick="runTask('all')">▶ Chạy tất cả</button>
+    <!-- ═══ Main Content ═══ -->
+    <div class="main">
+      <!-- Topbar -->
+      <div class="topbar">
+        <div class="topbar-left">
+          <h2 id="pageTitle">Tài khoản</h2>
+          <span id="stStatus"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span id="topbarLastRun" style="font-size:11px;color:var(--text-4)"></span>
+          <button onclick="runSmartAll()" data-run="1" class="btn btn-primary btn-sm" id="topRunBtn">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
+                d="M5.25 5.65c0-.86.92-1.4 1.67-.99l11.54 6.35a1.13 1.13 0 010 1.97l-11.54 6.35A1.13 1.13 0 015.25 12.35V5.65z" />
+            </svg>
+            <span id="topRunLabel">▶ Chạy tất cả</span>
+          </button>
+          <button onclick="stopBot()" id="btnStop" class="btn btn-danger btn-sm hidden">⏹ Dừng</button>
         </div>
       </div>
 
-      <!-- Add form (hidden) -->
-      <div id="addForm" class="hidden" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:14px">
-        <div class="form-row form-2" style="margin-bottom:8px">
-          <div class="field"><label class="label">Email</label><input id="aEmail" type="email" placeholder="user@outlook.com" class="input"></div>
-          <div class="field"><label class="label">Mật khẩu</label><input id="aPass" type="password" placeholder="Mật khẩu" class="input"></div>
-        </div>
-        <div class="form-row form-2" style="margin-bottom:10px">
-          <div class="field"><label class="label">TOTP</label><input id="aTotp" type="text" placeholder="Tùy chọn" class="input"></div>
-          <div class="field"><label class="label">Proxy</label><input id="aProxy" type="text" placeholder="http://ip:port" class="input"></div>
-        </div>
-        <button onclick="addAccount()" class="btn btn-primary btn-sm">Lưu tài khoản</button>
-      </div>
-
-      <div class="table-wrap">
-        <table>
-          <thead><tr>
-            <th style="width:40px"><input type="checkbox"></th>
-            <th>Tài khoản</th>
-            <th>Điểm</th>
-            <th>Proxy</th>
-            <th>Session</th>
-            <th>2FA</th>
-            <th style="text-align:right">Hành động</th>
-          </tr></thead>
-          <tbody id="accTable"><tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text-4)">Đang tải...</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- ═══ Page: Controls ═══ -->
-    <div class="page" id="page-controls">
-      <div class="controls-grid">
-        <div class="ctrl-card">
-          <h3>⚡ Chạy nhanh</h3>
-          <div class="run-grid">
-            <button class="btn btn-primary" data-run="1" onclick="runTask('all')" style="grid-column:1/-1;padding:10px">▶ Chạy tất cả</button>
-            <button class="btn btn-ghost" data-run="1" onclick="runTask('bootstrap')" style="padding:10px">Khởi tạo</button>
-            <button class="btn btn-ghost" data-run="1" onclick="runTask('searches')" style="padding:10px">Tìm kiếm</button>
-            <button class="btn btn-ghost" data-run="1" onclick="runTask('daily')" style="padding:10px">Daily Set</button>
-            <button class="btn btn-ghost" data-run="1" onclick="runTask('punch')" style="padding:10px">Punch Cards</button>
-          </div>
-          <button onclick="stopBot()" id="btnStop" class="btn btn-danger hidden" style="width:100%;margin-top:8px;padding:10px">⏹ Dừng ngay</button>
-          <div id="progCard" class="progress-card hidden">
-            <div class="progress-meta"><span id="progLabel">—</span><span id="progCount">0/0</span></div>
-            <div class="progress-bar"><div id="progBar" class="progress-fill" style="width:0"></div></div>
+      <!-- ═══ Page: Accounts ═══ -->
+      <div class="page active" id="page-accounts">
+        <div class="toolbar">
+          <input type="text" class="search-box" placeholder="Tìm tài khoản..." id="searchInput"
+            oninput="filterAccounts()">
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="toggleAddForm()">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              Thêm tài khoản
+            </button>
           </div>
         </div>
-        <div class="ctrl-card">
-          <h3>⏰ Lịch trình</h3>
-          <div class="toggle-row" style="margin-bottom:10px"><div class="toggle-info"><h4>Tự động chạy</h4><p>Chạy bot theo giờ cố định</p></div><div id="tSchedule" onclick="tog(this)" class="toggle"></div></div>
-          <div class="field"><label class="label">Giờ chạy</label><input id="sTime" type="time" value="08:00" class="input"></div>
-          <div style="margin-top:10px;display:flex;gap:8px">
-            <button onclick="saveSchedule()" class="btn btn-primary btn-sm">Lưu lịch</button>
-            <button onclick="createWinTask()" class="btn btn-ghost btn-sm">Tạo Windows Task</button>
+
+        <!-- Add/Edit form -->
+        <div id="addForm" class="hidden">
+          <h4 id="addFormTitle">➕ Thêm tài khoản mới</h4>
+          <div class="form-row form-2" style="margin-bottom:8px">
+            <div class="field"><label class="label">Email</label><input id="aEmail" type="email"
+                placeholder="user@outlook.com" class="input"></div>
+            <div class="field"><label class="label">Mật khẩu</label><input id="aPass" type="password"
+                placeholder="Mật khẩu" class="input"></div>
           </div>
-          <p id="schInfo" style="font-size:11px;color:var(--text-3);margin-top:8px"></p>
-        </div>
-        <div class="ctrl-card ai-card">
-          <h3>🤖 AI Runtime</h3>
-          <div class="ai-grid">
-            <div class="ai-metric">
-              <span class="ai-label">Trạng thái</span>
-              <strong id="aiStateText">Tắt</strong>
-            </div>
-            <div class="ai-metric">
-              <span class="ai-label">Cấu hình</span>
-              <strong id="aiConfigText">Chưa có key</strong>
-            </div>
-            <div class="ai-metric ai-metric-wide">
-              <span class="ai-label">Model</span>
-              <strong id="aiModelText">—</strong>
+          <div class="form-row form-2" style="margin-bottom:8px">
+            <div class="field"><label class="label">TOTP (2FA)</label><input id="aTotp" type="text"
+                placeholder="Tùy chọn" class="input"></div>
+            <div class="field"><label class="label">Proxy</label><input id="aProxy" type="text"
+                placeholder="http://ip:port" class="input"></div>
+          </div>
+          <div class="field" style="margin-bottom:12px">
+            <label class="label">GPM Profile (Tùy chọn)</label>
+            <div style="display:flex;gap:8px">
+              <select id="aGpmProfile" class="select" style="flex:1">
+                <option value="">Không dùng GPM</option>
+              </select>
+              <button onclick="loadGpmProfiles()" class="btn btn-ghost btn-sm" title="Tải lại">↻ Refresh</button>
             </div>
           </div>
-          <div class="ai-runtime-box">
-            <div class="ai-runtime-head">
-              <span>Event gần nhất</span>
-              <span id="aiUpdateText">—</span>
+          <div style="display:flex;gap:8px">
+            <button onclick="addAccount()" class="btn btn-primary btn-sm" id="addFormSubmit">Lưu tài khoản</button>
+            <button onclick="closeAddForm()" class="btn btn-ghost btn-sm">Hủy</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:36px"><input type="checkbox" id="checkAll" onchange="toggleAllChecks(this)"></th>
+                <th>Email</th>
+                <th>Điểm</th>
+                <th>Proxy</th>
+                <th>GPM</th>
+                <th>Session</th>
+                <th>2FA</th>
+                <th style="text-align:right">Hành động</th>
+              </tr>
+            </thead>
+            <tbody id="accTable">
+              <tr>
+                <td colspan="8" style="text-align:center;padding:28px;color:var(--text-4)">Đang tải...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Selection Action Bar -->
+        <div id="selectionBar" class="selection-bar hidden">
+          <div style="display:flex;align-items:center;gap:10px">
+            <button onclick="clearSelection()" class="btn btn-ghost btn-sm"
+              style="padding:3px 8px;font-size:13px;line-height:1">✕</button>
+            <div>
+              <strong id="selCountText" style="color:#fff;font-size:12px">0 đã chọn</strong>
+              <span style="font-size:11px;color:var(--text-3);margin-left:8px">— Bỏ chọn để chạy tất cả</span>
             </div>
-            <p id="aiEventText">AI chưa được gọi trong phiên này.</p>
-            <p id="aiTaskText" class="ai-task">Chưa có task AI.</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="selTaskType" class="select" style="font-size:11px;padding:5px 8px">
+              <option value="all">Tất cả nhiệm vụ</option>
+              <option value="searches">Tìm kiếm</option>
+              <option value="daily">Daily Set</option>
+              <option value="punch">Punch Cards</option>
+            </select>
+            <button class="btn btn-success btn-sm" data-run="1" onclick="runSelectedAccounts()">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:12px;height:12px">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
+                  d="M5.25 5.65c0-.86.92-1.4 1.67-.99l11.54 6.35a1.13 1.13 0 010 1.97l-11.54 6.35A1.13 1.13 0 015.25 12.35V5.65z" />
+              </svg>
+              Chạy <span id="selRunLabel">0</span> account
+            </button>
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- ═══ Page: Log ═══ -->
-    <div class="page" id="page-log">
-      <div class="log-toolbar">
-        <div class="log-filters">
-          <button class="log-filter active" onclick="setLogFilter('all',this)">All</button>
-          <button class="log-filter" onclick="setLogFilter('info',this)">Info</button>
-          <button class="log-filter" onclick="setLogFilter('warning',this)">Warning</button>
-          <button class="log-filter" onclick="setLogFilter('error',this)">Error</button>
-          <button class="log-filter" onclick="setLogFilter('ai',this)">AI</button>
-        </div>
-        <button onclick="clearLogs()" class="btn btn-ghost btn-sm">Xóa log</button>
-      </div>
-      <div id="dashLogs" class="log-box"><div class="empty-state">Chưa có hoạt động nào.</div></div>
-    </div>
+      <!-- ═══ Page: Controls ═══ -->
+      <div class="page" id="page-controls">
+        <div class="controls-grid">
+          <!-- Quick Run -->
+          <div class="ctrl-card">
+            <h3>⚡ Chạy nhanh</h3>
+            <div class="run-grid">
+              <button class="btn btn-primary run-all-btn" data-run="1" onclick="runTask('all')">▶ Chạy tất cả</button>
+              <button class="btn btn-ghost" data-run="1" onclick="runTask('bootstrap')">🚀 Khởi tạo</button>
+              <button class="btn btn-ghost" data-run="1" onclick="runTask('searches')">🔍 Tìm kiếm</button>
+              <button class="btn btn-ghost" data-run="1" onclick="runTask('daily')">📅 Daily Set</button>
+              <button class="btn btn-ghost" data-run="1" onclick="runTask('punch')">🎯 Punch Cards</button>
+            </div>
+            <!-- Progress -->
+            <div id="progCard" class="progress-card hidden">
+              <div class="progress-meta">
+                <span id="progLabel">Đang chạy</span>
+                <span id="progCount">0/0</span>
+              </div>
+              <div class="progress-bar">
+                <div id="progBar" class="progress-fill" style="width:0"></div>
+              </div>
+              <div id="accountsTable"></div>
+            </div>
+          </div>
 
-    <!-- ═══ Page: Settings ═══ -->
-    <div class="page" id="page-settings">
-      <div class="settings-card">
-        <h3>Trình duyệt</h3>
-        <div class="toggle-row"><div class="toggle-info"><h4>Chạy ẩn</h4><p>Ẩn cửa sổ trình duyệt</p></div><div id="tHeadless" onclick="tog(this)" class="toggle"></div></div>
-        <div class="toggle-row"><div class="toggle-info"><h4>Edge runtime riêng</h4><p>Profile Edge riêng cho bot</p></div><div id="tNativeEdge" onclick="tog(this)" class="toggle on"></div></div>
-        <div class="toggle-row"><div class="toggle-info"><h4>Stealth</h4><p>Giảm dấu vết bot</p></div><div id="tStealth" onclick="tog(this)" class="toggle on"></div></div>
-        <div class="toggle-row"><div class="toggle-info"><h4>Chặn hình ảnh</h4><p>Tải trang nhanh hơn</p></div><div id="tImages" onclick="tog(this)" class="toggle on"></div></div>
-        <div class="toggle-row"><div class="toggle-info"><h4>Google Trends</h4><p>Từ khóa thịnh hành</p></div><div id="tTrends" onclick="tog(this)" class="toggle on"></div></div>
-      </div>
-      <div class="settings-card">
-        <h3>Rewards</h3>
-        <div class="toggle-row"><div class="toggle-info"><h4>Bảo vệ streak</h4><p>Theo dõi chuỗi ngày</p></div><div id="tStreak" onclick="tog(this)" class="toggle on"></div></div>
-        <div class="toggle-row"><div class="toggle-info"><h4>Tự đổi thưởng</h4><p>Đổi điểm khi đạt mục tiêu</p></div><div id="tRedeem" onclick="tog(this)" class="toggle"></div></div>
-      </div>
-      <div class="settings-card">
-        <h3>Challenge & Edge</h3>
-        <div class="toggle-row"><div class="toggle-info"><h4>Handoff challenge</h4><p>Tạm dừng khi có captcha</p></div><div id="tManualCaptcha" onclick="tog(this)" class="toggle on"></div></div>
-        <div class="field"><label class="label">Timeout (giây)</label><input id="sCaptchaTimeout" type="number" value="900" class="input"></div>
-        <div class="toggle-row" style="margin-top:8px"><div class="toggle-info"><h4>Attach Edge có sẵn</h4><p>Dùng Edge debug profile</p></div><div id="tAttachBootstrap" onclick="tog(this)" class="toggle on"></div></div>
-        <div class="field"><label class="label">Edge CDP URL</label><input id="sEdgeCDP" type="text" value="http://127.0.0.1:9222" class="input"></div>
-      </div>
-      <div class="settings-card">
-        <h3>AI Agent</h3>
-        <div class="toggle-row"><div class="toggle-info"><h4>Kích hoạt AI</h4><p>Fallback AI cho flow phức tạp</p></div><div id="tAI" onclick="tog(this)" class="toggle"></div></div>
-        <div class="field"><label class="label">API Key</label><input id="sAIKey" type="password" placeholder="sk-or-v1-..." class="input"></div>
-        <div class="field">
-          <label class="label">Model</label>
-          <select id="sAIModel" class="select">
-            <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B — Free</option>
-            <option value="nousresearch/hermes-3-llama-3.1-405b:free">Hermes 3 405B — Free</option>
-            <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 120B — Free</option>
-            <option value="qwen/qwen3-next-80b-a3b-instruct:free">Qwen3 Next 80B — Free</option>
-            <option value="qwen/qwen3-coder:free">Qwen3 Coder — Free</option>
-            <option value="google/gemma-3-27b-it:free">Gemma 3 27B — Free</option>
-            <option value="deepseek/deepseek-chat">DeepSeek V3 — Paid</option>
-          </select>
-        </div>
-      </div>
-      <div class="settings-card">
-        <h3>Thông báo</h3>
-        <div class="field"><label class="label">Discord Webhook</label><input id="sDiscord" type="text" placeholder="https://discord.com/api/webhooks/..." class="input"></div>
-        <div class="form-row form-2">
-          <div class="field"><label class="label">Telegram Token</label><input id="sTgToken" type="text" placeholder="123456:ABC..." class="input"></div>
-          <div class="field"><label class="label">Chat ID</label><input id="sTgChat" type="text" placeholder="123456789" class="input"></div>
-        </div>
-      </div>
-      <button onclick="saveSettings()" class="btn btn-primary" style="width:100%;padding:12px">Lưu tất cả cài đặt</button>
-    </div>
+          <!-- Schedule -->
+          <div class="ctrl-card">
+            <h3>⏰ Lịch trình</h3>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Tự động chạy</h4>
+                <p>Chạy bot theo giờ cố định mỗi ngày</p>
+              </div>
+              <div id="tSchedule" onclick="tog(this)" class="toggle"></div>
+            </div>
+            <div class="field"><label class="label">Giờ chạy</label><input id="sTime" type="time" value="08:00"
+                class="input"></div>
+            <div class="schedule-actions">
+              <button onclick="saveSchedule()" class="btn btn-primary btn-sm">Lưu lịch</button>
+              <button onclick="createWinTask()" class="btn btn-ghost btn-sm">Tạo Windows Task</button>
+            </div>
+            <p id="schInfo" style="font-size:11px;color:var(--text-3);margin-top:8px"></p>
+          </div>
 
+          <!-- AI Status -->
+          <div class="ctrl-card ai-card" style="grid-column:1/-1">
+            <h3>🤖 AI Runtime</h3>
+            <div class="ai-grid">
+              <div class="ai-metric">
+                <span class="ai-label">Trạng thái</span>
+                <strong id="aiStateText">Tắt</strong>
+              </div>
+              <div class="ai-metric">
+                <span class="ai-label">Cấu hình</span>
+                <strong id="aiConfigText">Chưa có key</strong>
+              </div>
+              <div class="ai-metric ai-metric-wide">
+                <span class="ai-label">Model đang dùng</span>
+                <strong id="aiModelText">—</strong>
+              </div>
+            </div>
+            <div class="ai-runtime-box">
+              <div class="ai-runtime-head">
+                <span>Event gần nhất</span>
+                <span id="aiUpdateText">—</span>
+              </div>
+              <p id="aiEventText">AI chưa được gọi trong phiên này.</p>
+              <p id="aiTaskText" class="ai-task">Chưa có task AI.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ Page: Log ═══ -->
+      <div class="page" id="page-log">
+        <div class="log-toolbar">
+          <div class="log-filters">
+            <button class="log-filter active" onclick="setLogFilter('all',this)">All</button>
+            <button class="log-filter" onclick="setLogFilter('info',this)">Info</button>
+            <button class="log-filter" onclick="setLogFilter('warning',this)">Warning</button>
+            <button class="log-filter" onclick="setLogFilter('error',this)">Error</button>
+            <button class="log-filter" onclick="setLogFilter('ai',this)">🤖 AI</button>
+          </div>
+          <button onclick="clearLogs()" class="btn btn-ghost btn-sm">🗑 Xóa log</button>
+        </div>
+        <div id="dashLogs" class="log-box">
+          <div class="empty-state">Chưa có hoạt động nào.</div>
+        </div>
+      </div>
+
+      <!-- ═══ Page: Settings ═══ -->
+      <div class="page" id="page-settings">
+        <div class="settings-grid">
+
+          <!-- GPM -->
+          <div class="settings-card">
+            <h3><span class="icon">🔌</span> GPM Login</h3>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Bật tích hợp GPM Login</h4>
+                <p>Dùng GPM Profiles thay Playwright</p>
+              </div>
+              <div id="tGpmEnabled" onclick="tog(this)" class="toggle"></div>
+            </div>
+            <div class="field"><label class="label">GPM API URL</label><input id="sGpmUrl" type="text"
+                value="http://127.0.0.1:9495" class="input"></div>
+          </div>
+
+          <!-- Browser -->
+          <div class="settings-card">
+            <h3><span class="icon">🌐</span> Trình duyệt</h3>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Chạy ẩn (Headless)</h4>
+                <p>Ẩn cửa sổ trình duyệt</p>
+              </div>
+              <div id="tHeadless" onclick="tog(this)" class="toggle"></div>
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Edge runtime riêng</h4>
+                <p>Profile Edge riêng cho bot</p>
+              </div>
+              <div id="tNativeEdge" onclick="tog(this)" class="toggle on"></div>
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Stealth mode</h4>
+                <p>Giảm dấu vết antibot</p>
+              </div>
+              <div id="tStealth" onclick="tog(this)" class="toggle on"></div>
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Chặn hình ảnh</h4>
+                <p>Tải trang nhanh hơn</p>
+              </div>
+              <div id="tImages" onclick="tog(this)" class="toggle on"></div>
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Google Trends</h4>
+                <p>Từ khóa thịnh hành</p>
+              </div>
+              <div id="tTrends" onclick="tog(this)" class="toggle on"></div>
+            </div>
+            <div class="field"><label class="label">Luồng song song (Max Threads)</label><input id="sMaxThreads"
+                type="number" value="10" min="1" max="20" class="input"></div>
+          </div>
+
+          <!-- Rewards -->
+          <div class="settings-card">
+            <h3><span class="icon">🏆</span> Rewards</h3>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Bảo vệ streak</h4>
+                <p>Theo dõi chuỗi ngày</p>
+              </div>
+              <div id="tStreak" onclick="tog(this)" class="toggle on"></div>
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Tự đổi thưởng</h4>
+                <p>Đổi điểm khi đạt mục tiêu</p>
+              </div>
+              <div id="tRedeem" onclick="tog(this)" class="toggle"></div>
+            </div>
+          </div>
+
+          <!-- Challenge & Edge -->
+          <div class="settings-card">
+            <h3><span class="icon">🚧</span> Challenge & Edge</h3>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Handoff challenge</h4>
+                <p>Tạm dừng khi có captcha</p>
+              </div>
+              <div id="tManualCaptcha" onclick="tog(this)" class="toggle on"></div>
+            </div>
+            <div class="field"><label class="label">Timeout (giây)</label><input id="sCaptchaTimeout" type="number"
+                value="900" class="input"></div>
+            <div class="toggle-row" style="margin-top:8px">
+              <div class="toggle-info">
+                <h4>Attach Edge có sẵn</h4>
+                <p>Dùng Edge debug profile</p>
+              </div>
+              <div id="tAttachBootstrap" onclick="tog(this)" class="toggle on"></div>
+            </div>
+            <div class="field"><label class="label">Edge CDP URL</label><input id="sEdgeCDP" type="text"
+                value="http://127.0.0.1:9222" class="input"></div>
+          </div>
+
+          <!-- AI Agent -->
+          <div class="settings-card">
+            <h3><span class="icon">🤖</span> AI Agent</h3>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Kích hoạt AI</h4>
+                <p>Fallback AI cho flow phức tạp</p>
+              </div>
+              <div id="tAI" onclick="tog(this)" class="toggle"></div>
+            </div>
+            <div class="field"><label class="label">Custom API URL</label><input id="sAIUrl" type="text"
+                placeholder="http://localhost:20128/v1" class="input"></div>
+            <div class="field"><label class="label">API Key</label><input id="sAIKey" type="password"
+                placeholder="sk-or-v1-..." class="input"></div>
+            <div class="field">
+              <label class="label">Model</label>
+              <select id="sAIModel" class="select">
+                <option value="cx/gpt-5.4">Local: cx/gpt-5.4</option>
+                <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B — Free</option>
+                <option value="nousresearch/hermes-3-llama-3.1-405b:free">Hermes 3 405B — Free</option>
+                <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 120B — Free</option>
+                <option value="qwen/qwen3-next-80b-a3b-instruct:free">Qwen3 Next 80B — Free</option>
+                <option value="google/gemma-3-27b-it:free">Gemma 3 27B — Free</option>
+                <option value="deepseek/deepseek-chat">DeepSeek V3 — Paid</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Notifications -->
+          <div class="settings-card">
+            <h3><span class="icon">🔔</span> Thông báo</h3>
+            <div class="field"><label class="label">Discord Webhook</label><input id="sDiscord" type="text"
+                placeholder="https://discord.com/api/webhooks/..." class="input"></div>
+            <div class="form-row form-2">
+              <div class="field"><label class="label">Telegram Token</label><input id="sTgToken" type="text"
+                  placeholder="123456:ABC..." class="input"></div>
+              <div class="field"><label class="label">Chat ID</label><input id="sTgChat" type="text"
+                  placeholder="123456789" class="input"></div>
+            </div>
+          </div>
+
+          <!-- Google Sheets -->
+          <div class="settings-card" style="grid-column:1/-1">
+            <h3><span class="icon">📊</span> Google Sheets</h3>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <h4>Ghi log lên GSheet</h4>
+                <p>Tự động ghi kết quả bằng Webhook</p>
+              </div>
+              <div id="tGsheetEnabled" onclick="tog(this)" class="toggle"></div>
+            </div>
+            <div class="field"><label class="label">Webhook URL (Apps Script)</label><input id="sGsheetWebhook"
+                type="text" placeholder="https://script.google.com/macros/s/..." class="input"></div>
+          </div>
+
+          <!-- Save -->
+          <div class="settings-save-row">
+            <button onclick="saveSettings()" class="btn btn-primary" style="padding:10px 24px">💾 Lưu tất cả cài
+              đặt</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
   </div>
-</div>
 
-<!-- Delete Modal -->
-<div id="delModal" class="modal-bg">
-  <div class="modal">
-    <h3>Xóa tài khoản</h3>
-    <p>Xóa <strong id="delEmail" style="color:#fff"></strong>? Không thể hoàn tác.</p>
-    <div class="modal-actions">
-      <button onclick="closeDelModal()" class="btn btn-ghost">Hủy</button>
-      <button onclick="confirmDelete()" class="btn btn-danger">Xóa</button>
+  <!-- Delete Modal -->
+  <div id="delModal" class="modal-bg">
+    <div class="modal">
+      <h3>🗑 Xóa tài khoản</h3>
+      <p>Bạn chắc chắn muốn xóa <strong id="delEmail" style="color:#fff"></strong>? Hành động này không thể hoàn tác.
+      </p>
+      <div class="modal-actions">
+        <button onclick="closeDelModal()" class="btn btn-ghost">Hủy</button>
+        <button onclick="confirmDelete()" class="btn btn-danger">Xóa</button>
+      </div>
     </div>
   </div>
-</div>
-<div id="toast" class="toast"><div class="toast-box" id="toastMsg"></div></div>
 
-<script>
-const API=location.origin;let logIdx=0,poll=null,delTarget="",lastStatus="idle",currentFilter="all";
+  <div id="toast" class="toast">
+    <div class="toast-box" id="toastMsg"></div>
+  </div>
 
-// ═══ Navigation ═══
-document.querySelectorAll(".nav-item").forEach(n=>{
-    n.addEventListener("click",()=>{
-        document.querySelectorAll(".nav-item").forEach(x=>x.classList.remove("active"));
-        document.querySelectorAll(".page").forEach(p=>p.classList.remove("active"));
+  <script>
+    const API = location.origin;
+    let logIdx = 0, poll = null, delTarget = "", lastStatus = "idle", currentFilter = "all";
+    let editingOldEmail = "";
+
+    // ═══ Navigation ═══
+    document.querySelectorAll(".nav-item").forEach(n => {
+      n.addEventListener("click", () => {
+        document.querySelectorAll(".nav-item").forEach(x => x.classList.remove("active"));
+        document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
         n.classList.add("active");
-        const page=n.dataset.page;
-        document.getElementById("page-"+page).classList.add("active");
-        const titles={accounts:"Tài khoản",controls:"Điều khiển",log:"Log",settings:"Cài đặt"};
-        document.getElementById("pageTitle").textContent=titles[page]||page;
+        const page = n.dataset.page;
+        document.getElementById("page-" + page).classList.add("active");
+        const titles = { accounts: "Tài khoản", controls: "Điều khiển", log: "Live Log", settings: "Cài đặt" };
+        document.getElementById("pageTitle").textContent = titles[page] || page;
+      });
     });
-});
 
-// ═══ Helpers ═══
-function setText(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
-function setHTML(id,v){const e=document.getElementById(id);if(e)e.innerHTML=v}
-function maskEmail(v){if(!v)return"—";const p=v.split("@");return p.length!==2?v:`${p[0].length>4?p[0].slice(0,4)+"**":p[0]}@${p[1]}`}
-function formatTime(v){if(!v)return"—";const n=String(v).replace("T"," ").trim().split(" ");return n.length>1?n[1].slice(0,8):n[0].slice(0,8)}
-function formatDateTime(v){if(!v)return"—";const d=new Date(v);if(Number.isNaN(d.getTime()))return formatTime(v);return d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}
-function humanizeTask(t){return{all:"Chạy tất cả",bootstrap:"Khởi tạo",searches:"Tìm kiếm",daily:"Daily Set",punch:"Punch Cards",promos:"Promos"}[t]||t||"Sẵn sàng"}
-function renderStatus(s){
-    if(s==="running")return'<span class="badge-status badge-running"><span class="dot"></span>Đang chạy</span>';
-    if(s==="error")return'<span class="badge-status badge-error"><span class="dot"></span>Lỗi</span>';
-    return'<span class="badge-status badge-idle"><span class="dot"></span>Sẵn sàng</span>';
-}
-function renderAIState(ai){
-    if(!ai||!ai.enabled)return"Đang tắt";
-    if(ai.active)return"Đang chạy";
-    if(ai.configured)return"Sẵn sàng";
-    return"Thiếu key";
-}
-function renderAIConfig(ai){
-    if(!ai||!ai.enabled)return"Chưa bật";
-    return ai.configured?"Sẵn sàng":"Chưa có key";
-}
-function renderAIStatus(ai={}){
-    setText("aiStateText",renderAIState(ai));
-    setText("aiConfigText",renderAIConfig(ai));
-    setText("aiModelText",ai.model||"—");
-    setText("aiUpdateText",formatDateTime(ai.last_update));
-    setText("aiEventText",ai.last_event||"AI chưa được gọi trong phiên này.");
-    setText("aiTaskText",ai.task?`Task: ${ai.task}`:"Chưa có task AI.");
-}
-function isAILogMessage(msg){return String(msg||"").includes("[AI]")}
+    // ═══ Helpers ═══
+    function setText(id, v) { const e = document.getElementById(id); if (e) e.textContent = v }
+    function setHTML(id, v) { const e = document.getElementById(id); if (e) e.innerHTML = v }
+    function maskEmail(v) { if (!v) return "—"; const p = v.split("@"); return p.length !== 2 ? v : `${p[0].length > 4 ? p[0].slice(0, 4) + "**" : p[0]}@${p[1]}` }
+    function formatDateTime(v) { if (!v) return "—"; const d = new Date(v); if (Number.isNaN(d.getTime())) return String(v).replace("T", " ").trim().slice(0, 8); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) }
+    function humanizeTask(t) { return { all: "Chạy tất cả", bootstrap: "Khởi tạo", searches: "Tìm kiếm", daily: "Daily Set", punch: "Punch Cards", promos: "Promos" }[t] || t || "Sẵn sàng" }
 
-// ═══ API ═══
-async function apiJSON(url,o={}){const r=await fetch(url,o);let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw new Error(d.error||"Thất bại");return d}
+    function renderStatus(s) {
+      if (s === "running") return '<span class="badge-status badge-running"><span class="dot"></span>Đang chạy</span>';
+      if (s === "error") return '<span class="badge-status badge-error"><span class="dot"></span>Lỗi</span>';
+      return '<span class="badge-status badge-idle"><span class="dot"></span>Sẵn sàng</span>';
+    }
+    function renderAIState(ai) { if (!ai || !ai.enabled) return "Đang tắt"; if (ai.active) return "Đang chạy"; if (ai.configured) return "Sẵn sàng"; return "Thiếu key"; }
+    function renderAIConfig(ai) { if (!ai || !ai.enabled) return "Chưa bật"; return ai.configured ? "Sẵn sàng" : "Chưa có key"; }
+    function renderAIStatus(ai = {}) {
+      setText("aiStateText", renderAIState(ai));
+      setText("aiConfigText", renderAIConfig(ai));
+      setText("aiModelText", ai.model || "—");
+      setText("aiUpdateText", formatDateTime(ai.last_update));
+      setText("aiEventText", ai.last_event || "AI chưa được gọi trong phiên này.");
+      setText("aiTaskText", ai.task ? `Task: ${ai.task}` : "Chưa có task AI.");
+    }
+    function isAILogMessage(msg) { return String(msg || "").includes("[AI]") }
 
-// ═══ Tick ═══
-async function tick(){
-    try{
-        const s=await apiJSON(`${API}/api/status`);
-        setHTML("stStatus",renderStatus(s.status));
-        renderAIStatus(s.ai||{});
-        const running=s.status==="running";
-        document.querySelectorAll("[data-run='1']").forEach(b=>b.disabled=running);
-        const pc=document.getElementById("progCard");
-        if(running){
+    // ═══ API ═══
+    async function apiJSON(url, o = {}) { const r = await fetch(url, o); let d = {}; try { d = await r.json() } catch (e) { } if (!r.ok) throw new Error(d.error || "Thất bại"); return d }
+
+    // ═══ Tick (polling) ═══
+    async function tick() {
+      try {
+        const s = await apiJSON(`${API}/api/status`);
+        setHTML("stStatus", renderStatus(s.status));
+        renderAIStatus(s.ai || {});
+        const running = s.status === "running";
+
+        // Topbar buttons
+        document.querySelectorAll("[data-run='1']").forEach(b => b.disabled = running);
+        document.getElementById("btnStop").classList.toggle("hidden", !running);
+        document.getElementById("topRunBtn").classList.toggle("hidden", running);
+
+        // Progress card
+        const pc = document.getElementById("progCard");
+        if (running) {
+          pc.classList.remove("hidden");
+          setText("progLabel", s.current_task || "Đang chạy...");
+          setText("progCount", `${s.progress}/${s.progress_total}`);
+          document.getElementById("progBar").style.width = `${s.progress_total > 0 ? (s.progress / s.progress_total) * 100 : 0}%`;
+          renderAccountsTable(s.accounts || {});
+        } else {
+          pc.classList.add("hidden");
+          document.getElementById("progBar").style.width = "0%";
+          // Show account results table after run
+          if (s.accounts && Object.keys(s.accounts).length > 0) {
             pc.classList.remove("hidden");
-            document.getElementById("btnStop").classList.remove("hidden");
-            setText("progLabel",s.current_task||"Đang chạy");
-            setText("progCount",`${s.progress}/${s.progress_total}`);
-            document.getElementById("progBar").style.width=`${s.progress_total>0?(s.progress/s.progress_total)*100:0}%`;
-        }else{
-            pc.classList.add("hidden");
-            document.getElementById("btnStop").classList.add("hidden");
-            document.getElementById("progBar").style.width="0%";
+            setText("progLabel", s.last_run ? `Hoàn thành lúc ${s.last_run.split(" ")[1] || s.last_run}` : "Hoàn thành");
+            setText("progCount", "");
+            document.getElementById("progBar").style.width = "100%";
+            renderAccountsTable(s.accounts);
+          }
         }
-        if(lastStatus==="running"&&s.status!=="running")loadAccounts();
-        lastStatus=s.status;
-        const lr=await apiJSON(`${API}/api/logs?since=${logIdx}`);
-        if(lr.logs&&lr.logs.length){logIdx+=lr.logs.length;appendLogs(lr.logs)}
-    }catch(e){}
-}
 
-// ═══ Logs ═══
-function appendLogs(logs){
-    const box=document.getElementById("dashLogs");
-    if(!box.querySelector(".log-line"))box.innerHTML="";
-    logs.forEach(l=>{
-        const r=document.createElement("div");
-        const aiLine=isAILogMessage(l.message);
-        r.className=`log-line${aiLine?" ai":""}`;
-        r.dataset.level=l.level;
-        r.dataset.ai=aiLine?"1":"0";
-        if(currentFilter==="ai"){
-            r.style.display=aiLine?"":"none";
-        }else if(currentFilter!=="all"&&l.level!==currentFilter){
-            r.style.display="none";
-        }
-        r.innerHTML=`<span class="log-time">${l.time}</span><span class="log-lvl ${l.level==="error"?"error":l.level==="warning"?"warning":"info"}">${l.level}</span><span class="log-msg">${l.message}</span>`;
+        // Topbar last run
+        if (s.last_run) setText("topbarLastRun", `Lần cuối: ${s.last_run.includes(" ") ? s.last_run.split(" ")[1] : s.last_run}`);
+
+        if (lastStatus === "running" && s.status !== "running") loadAccounts();
+        lastStatus = s.status;
+
+        // Logs
+        const lr = await apiJSON(`${API}/api/logs?since=${logIdx}`);
+        if (lr.logs && lr.logs.length) { logIdx += lr.logs.length; appendLogs(lr.logs) }
+      } catch (e) { }
+    }
+
+    // ═══ Logs ═══
+    function appendLogs(logs) {
+      const box = document.getElementById("dashLogs");
+      if (!box.querySelector(".log-line")) box.innerHTML = "";
+      logs.forEach(l => {
+        const r = document.createElement("div");
+        const aiLine = isAILogMessage(l.message);
+        r.className = `log-line${aiLine ? " ai" : ""}`;
+        r.dataset.level = l.level;
+        r.dataset.ai = aiLine ? "1" : "0";
+        if (currentFilter === "ai") { r.style.display = aiLine ? "" : "none"; }
+        else if (currentFilter !== "all" && l.level !== currentFilter) { r.style.display = "none"; }
+        r.innerHTML = `<span class="log-time">${l.time}</span><span class="log-lvl ${l.level}">${l.level}</span><span class="log-msg">${l.message}</span>`;
         box.appendChild(r);
-    });
-    box.scrollTop=box.scrollHeight;
-}
-function clearLogs(){logIdx=0;document.getElementById("dashLogs").innerHTML='<div class="empty-state">Đã xóa log.</div>'}
-function setLogFilter(f,btn){
-    currentFilter=f;
-    document.querySelectorAll(".log-filter").forEach(x=>x.classList.remove("active"));
-    btn.classList.add("active");
-    document.querySelectorAll(".log-line").forEach(l=>{
-        if(f==="ai"){
-            l.style.display=l.dataset.ai==="1"?"":"none";
-            return;
+      });
+      box.scrollTop = box.scrollHeight;
+    }
+    function clearLogs() { logIdx = 0; document.getElementById("dashLogs").innerHTML = '<div class="empty-state">Đã xóa log.</div>' }
+
+    // ═══ Per-account Table ═══
+    function renderAccountsTable(accounts) {
+      const el = document.getElementById('accountsTable');
+      const entries = Object.entries(accounts);
+      if (!entries.length) { el.innerHTML = ''; return; }
+      const statusIcon = s => s === 'done' ? '✅' : s === 'error' ? '❌' : s === 'running' ? '🟡' : '⏳';
+      const statusColor = s => s === 'done' ? 'var(--green)' : s === 'error' ? 'var(--red)' : s === 'running' ? 'var(--amber)' : 'var(--text-3)';
+      let rows = entries.map(([k, v]) => {
+        const pct = v.progress_total > 0 ? Math.round(v.progress / v.progress_total * 100) : (v.status === 'done' ? 100 : 0);
+        return `<tr>
+          <td>${k}</td>
+          <td style="color:${statusColor(v.status)}">${statusIcon(v.status)} ${v.status}</td>
+          <td style="max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v.task || ''}</td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px">
+              <div style="flex:1;background:var(--surface-3);border-radius:99px;height:4px;min-width:60px">
+                <div style="width:${pct}%;background:${statusColor(v.status)};height:4px;border-radius:99px;transition:width .4s"></div>
+              </div>
+              <span style="font-size:10px;color:var(--text-3);min-width:28px;text-align:right">${pct}%</span>
+            </div>
+          </td>
+          <td style="color:var(--amber)">${v.points ? v.points.toLocaleString() + ' pts' : ''}</td>
+        </tr>`;
+      }).join('');
+      el.innerHTML = `<table style="width:100%;border-collapse:collapse;margin-top:8px">
+        <thead><tr>
+          <th>Tài khoản</th><th>Trạng thái</th><th>Nhiệm vụ</th><th>Tiến trình</th><th>Điểm</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    }
+
+    function setLogFilter(f, btn) {
+      currentFilter = f;
+      document.querySelectorAll(".log-filter").forEach(x => x.classList.remove("active"));
+      btn.classList.add("active");
+      document.querySelectorAll(".log-line").forEach(l => {
+        if (f === "ai") { l.style.display = l.dataset.ai === "1" ? "" : "none"; return; }
+        l.style.display = (f === "all" || l.dataset.level === f) ? "" : "none";
+      });
+    }
+
+    // ═══ Add Form ═══
+    function toggleAddForm() {
+      const f = document.getElementById("addForm");
+      if (f.classList.contains("hidden")) { f.classList.remove("hidden"); f.scrollIntoView({ behavior: "smooth" }); }
+      else closeAddForm();
+    }
+    function closeAddForm() {
+      document.getElementById("addForm").classList.add("hidden");
+      document.getElementById("addFormTitle").textContent = "➕ Thêm tài khoản mới";
+      document.getElementById("addFormSubmit").textContent = "Lưu tài khoản";
+      ["aEmail", "aPass", "aTotp", "aProxy"].forEach(id => document.getElementById(id).value = "");
+      document.getElementById("aGpmProfile").value = "";
+      document.getElementById("aPass").placeholder = "Mật khẩu";
+      editingOldEmail = "";
+    }
+
+    // ═══ Accounts ═══
+    async function loadAccounts() {
+      try {
+        const r = await apiJSON(`${API}/api/accounts`);
+        const a = r.accounts || [];
+        setText("navBadge", String(a.length));
+        const t = document.getElementById("accTable");
+        if (!a.length) {
+          t.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--text-4)">Chưa có tài khoản nào. Nhấn <strong>Thêm tài khoản</strong> để bắt đầu.</td></tr>';
+          return;
         }
-        l.style.display=(f==="all"||l.dataset.level===f)?"":"none";
-    });
-}
-
-// ═══ Accounts ═══
-async function loadAccounts(){
-    try{
-        const r=await apiJSON(`${API}/api/accounts`);
-        const a=r.accounts||[];
-        setText("navBadge",String(a.length));
-        const t=document.getElementById("accTable");
-        if(!a.length){t.innerHTML='<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text-4)">Chưa có tài khoản</td></tr>';return}
-        t.innerHTML=a.map((x,i)=>`<tr>
-            <td><input type="checkbox"></td>
-            <td style="color:#fff;font-weight:600">${x.email}</td>
-            <td style="font-weight:700;color:var(--green)">${x.points?x.points.toLocaleString():"—"}</td>
-            <td style="font-family:monospace;font-size:12px;color:var(--text-2)">${x.proxy||"—"}</td>
-            <td>${x.has_session?'<span class="tag tag-on">Đã lưu</span>':'<span class="tag tag-off">Chưa</span>'}</td>
-            <td>${x.has_totp?'<span class="tag tag-on">Có</span>':'<span class="tag tag-off">—</span>'}</td>
-            <td><div class="actions-col">
-                <button onclick="runTask('all','${x.email}')" class="btn btn-primary btn-sm" data-run="1">▶ Chạy</button>
-                <button onclick="openDelModal('${x.email}')" class="btn btn-danger btn-sm">🗑</button>
-            </div></td>
+        t.innerHTML = a.map((x, i) => `<tr>
+          <td><input type="checkbox" class="acc-check" value="${x.email}" onchange="updateSelectionBar()"></td>
+          <td style="font-weight:600;color:#fff">${x.email}</td>
+          <td style="font-weight:700;color:var(--green)">${x.points ? x.points.toLocaleString() : '—'}</td>
+          <td style="font-family:monospace;font-size:11px;color:var(--text-2)">${x.proxy || '—'}</td>
+          <td>${x.gpm_profile_id ? `<span class="tag tag-on" title="${x.gpm_profile_id}">GPM</span>` : '<span class="tag tag-off">—</span>'}</td>
+          <td>${x.has_session ? '<span class="tag tag-on">✓ Saved</span>' : '<span class="tag tag-off">—</span>'}</td>
+          <td>${x.has_totp ? '<span class="tag tag-on">2FA</span>' : '<span class="tag tag-off">—</span>'}</td>
+          <td><div class="actions-col">
+            <button onclick="runTask('all',['${x.email}'])" class="btn btn-primary btn-sm" data-run="1">▶</button>
+            <button onclick="editAccount('${x.email}','${x.gpm_profile_id || ''}','${x.proxy || ''}')" class="btn btn-ghost btn-sm">✏️</button>
+            <button onclick="openDelModal('${x.email}')" class="btn btn-danger btn-sm">🗑</button>
+          </div></td>
         </tr>`).join("");
-    }catch(e){toast(e.message||"Lỗi tải accounts")}
-}
+        updateSelectionBar();
+      } catch (e) { toast(e.message || "Lỗi tải accounts") }
+    }
 
-function filterAccounts(){
-    const q=document.getElementById("searchInput").value.toLowerCase();
-    document.querySelectorAll("#accTable tr").forEach(r=>{
-        const email=r.querySelector("td:nth-child(2)")?.textContent?.toLowerCase()||"";
-        r.style.display=email.includes(q)?"":"none";
-    });
-}
+    function filterAccounts() {
+      const q = document.getElementById("searchInput").value.toLowerCase();
+      document.querySelectorAll("#accTable tr").forEach(r => {
+        const email = r.querySelector("td:nth-child(2)")?.textContent?.toLowerCase() || "";
+        r.style.display = email.includes(q) ? "" : "none";
+      });
+    }
 
-async function addAccount(){
-    const email=document.getElementById("aEmail").value.trim(),pw=document.getElementById("aPass").value;
-    if(!email||!pw)return toast("Cần email và mật khẩu");
-    try{
-        await apiJSON(`${API}/api/accounts`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password:pw,totp_secret:document.getElementById("aTotp").value.trim(),proxy:document.getElementById("aProxy").value.trim()})});
-        ["aEmail","aPass","aTotp","aProxy"].forEach(id=>document.getElementById(id).value="");
-        document.getElementById("addForm").classList.add("hidden");
-        loadAccounts();toast("Đã thêm tài khoản");
-    }catch(e){toast(e.message||"Thêm thất bại")}
-}
+    async function addAccount() {
+      const email = document.getElementById("aEmail").value.trim(), pw = document.getElementById("aPass").value;
+      if (!email) return toast("Cần nhập email");
+      if (!editingOldEmail && !pw) return toast("Cần nhập mật khẩu cho tài khoản mới");
+      try {
+        await apiJSON(`${API}/api/accounts`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password: pw, old_email: editingOldEmail, totp_secret: document.getElementById("aTotp").value.trim(), proxy: document.getElementById("aProxy").value.trim(), gpm_profile_id: document.getElementById("aGpmProfile").value })
+        });
+        closeAddForm();
+        loadAccounts();
+        toast("✅ Đã lưu tài khoản");
+      } catch (e) { toast(e.message || "Lưu thất bại") }
+    }
 
-function openDelModal(e){delTarget=e;setText("delEmail",e);document.getElementById("delModal").classList.add("show")}
-function closeDelModal(){document.getElementById("delModal").classList.remove("show")}
-async function confirmDelete(){
-    try{await apiJSON(`${API}/api/accounts/${encodeURIComponent(delTarget)}`,{method:"DELETE"});closeDelModal();loadAccounts();toast("Đã xóa")}
-    catch(e){toast(e.message||"Xóa thất bại")}
-}
+    function editAccount(email, gpmId, proxy) {
+      editingOldEmail = email;
+      document.getElementById("aEmail").value = email;
+      document.getElementById("aPass").value = "";
+      document.getElementById("aPass").placeholder = "Để trống nếu giữ nguyên";
+      document.getElementById("aProxy").value = proxy;
+      document.getElementById("addFormTitle").textContent = `✏️ Sửa: ${email}`;
+      document.getElementById("addFormSubmit").textContent = "Cập nhật";
+      if (document.getElementById("aGpmProfile").options.length <= 1) {
+        loadGpmProfiles().then(() => { document.getElementById("aGpmProfile").value = gpmId; });
+      } else { document.getElementById("aGpmProfile").value = gpmId; }
+      document.getElementById("addForm").classList.remove("hidden");
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
 
-// ═══ Settings ═══
-function setSecretInput(id,v){const e=document.getElementById(id);if(v==="***"){e.value="";e.dataset.masked="1";e.placeholder="Đã lưu";return}e.value=v||"";e.dataset.masked="0"}
-function getSecretValue(id){const e=document.getElementById(id);if(!e.value&&e.dataset.masked==="1")return"__KEEP_EXISTING_SECRET__";return e.value}
-function setTog(id,on){const e=document.getElementById(id);if(on)e.classList.add("on");else e.classList.remove("on");e.dataset.on=on?"1":"0"}
-function tog(el){setTog(el.id,el.dataset.on!=="1")}
-function isOn(id){return document.getElementById(id).dataset.on==="1"}
+    function openDelModal(e) { delTarget = e; setText("delEmail", e); document.getElementById("delModal").classList.add("show") }
+    function closeDelModal() { document.getElementById("delModal").classList.remove("show") }
+    async function confirmDelete() {
+      try { await apiJSON(`${API}/api/accounts/${encodeURIComponent(delTarget)}`, { method: "DELETE" }); closeDelModal(); loadAccounts(); toast("Đã xóa") }
+      catch (e) { toast(e.message || "Xóa thất bại") }
+    }
 
-async function loadSettings(){
-    try{
-        const s=await apiJSON(`${API}/api/settings`);
-        setTog("tHeadless",s.headless);setTog("tNativeEdge",s.native_edge_runtime_enabled!==false);
-        setTog("tStealth",s.use_stealth);setTog("tTrends",s.use_google_trends);setTog("tImages",s.block_images);
-        setTog("tStreak",s.streak_protection);setTog("tRedeem",s.auto_redeem);
-        setTog("tManualCaptcha",s.manual_captcha_handoff!==false);
-        document.getElementById("sCaptchaTimeout").value=s.manual_captcha_timeout||900;
-        setTog("tAttachBootstrap",s.bootstrap_attach_existing_edge!==false);
-        document.getElementById("sEdgeCDP").value=s.edge_cdp_url||"http://127.0.0.1:9222";
-        setTog("tAI",s.ai_enabled);setSecretInput("sAIKey",s.ai_api_key);
-        if(s.ai_model)document.getElementById("sAIModel").value=s.ai_model;
-        setSecretInput("sDiscord",s.discord_webhook);setSecretInput("sTgToken",s.telegram_bot_token);
-        document.getElementById("sTgChat").value=s.telegram_chat_id||"";
-    }catch(e){toast(e.message||"Lỗi tải settings")}
-}
+    async function loadGpmProfiles() {
+      const sel = document.getElementById("aGpmProfile");
+      try {
+        const r = await apiJSON(`${API}/api/gpm/profiles`);
+        const p = r.profiles || [];
+        sel.innerHTML = '<option value="">Không dùng GPM</option>';
+        p.forEach(x => { const o = document.createElement("option"); o.value = x.id; o.textContent = `${x.name}${x.browser ? ` (${x.browser.name})` : ""}`; sel.appendChild(o); });
+        toast(`Đã tải ${p.length} GPM profiles`);
+      } catch (e) { toast("Lỗi tải GPM profiles: " + e.message) }
+    }
 
-async function saveSettings(){
-    try{
-        await apiJSON(`${API}/api/settings`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
-            headless:isOn("tHeadless"),native_edge_runtime_enabled:isOn("tNativeEdge"),use_stealth:isOn("tStealth"),
-            use_google_trends:isOn("tTrends"),block_images:isOn("tImages"),streak_protection:isOn("tStreak"),
-            auto_redeem:isOn("tRedeem"),manual_captcha_handoff:isOn("tManualCaptcha"),
-            manual_captcha_timeout:+document.getElementById("sCaptchaTimeout").value||900,
-            bootstrap_attach_existing_edge:isOn("tAttachBootstrap"),
-            edge_cdp_url:document.getElementById("sEdgeCDP").value.trim()||"http://127.0.0.1:9222",
-            ai_enabled:isOn("tAI"),ai_api_key:getSecretValue("sAIKey"),
-            ai_model:document.getElementById("sAIModel").value,
-            discord_webhook:getSecretValue("sDiscord"),telegram_bot_token:getSecretValue("sTgToken"),
-            telegram_chat_id:document.getElementById("sTgChat").value
-        })});toast("Đã lưu cài đặt");
-    }catch(e){toast(e.message||"Lưu thất bại")}
-}
+    // ═══ Selection ═══
+    function toggleAllChecks(el) {
+      document.querySelectorAll(".acc-check").forEach(cb => { if (cb.closest('tr').style.display !== 'none') cb.checked = el.checked; });
+      updateSelectionBar();
+    }
+    function clearSelection() {
+      document.getElementById("checkAll").checked = false;
+      document.querySelectorAll(".acc-check").forEach(cb => cb.checked = false);
+      updateSelectionBar();
+    }
+    function getSelectedEmails() { return Array.from(document.querySelectorAll(".acc-check:checked")).map(cb => cb.value); }
+    function updateSelectionBar() {
+      const selected = getSelectedEmails();
+      const bar = document.getElementById("selectionBar");
+      const topLabel = document.getElementById("topRunLabel");
+      if (selected.length > 0) {
+        bar.classList.remove("hidden");
+        setText("selCountText", `${selected.length} tài khoản đã chọn`);
+        setText("selRunLabel", String(selected.length));
+        if (topLabel) topLabel.textContent = `\u25b6 Chạy ${selected.length} acc`;
+      } else {
+        bar.classList.add("hidden");
+        document.getElementById("checkAll").checked = false;
+        if (topLabel) topLabel.textContent = "\u25b6 Chạy tất cả";
+      }
+    }
+    function runSmartAll() {
+      const selected = getSelectedEmails();
+      if (selected.length > 0) {
+        // Run only selected
+        runTask("all", selected);
+        clearSelection();
+      } else {
+        // Run all accounts
+        runTask("all");
+      }
+    }
+    function runSelectedAccounts() {
+      const emails = getSelectedEmails();
+      if (!emails.length) return;
+      const taskType = document.getElementById("selTaskType")?.value || "all";
+      runTask(taskType, emails);
+      clearSelection();
+    }
 
-// ═══ Tasks ═══
-async function runTask(t){
-    try{
-        await apiJSON(`${API}/api/run`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task:t})});
-        logIdx=0;document.getElementById("dashLogs").innerHTML='<div class="empty-state">Đang chờ log...</div>';
-        toast(`Bắt đầu: ${humanizeTask(t)}`);tick();
-        // Switch to log page
-        document.querySelector('[data-page="log"]').click();
-    }catch(e){toast(e.message||"Không thể chạy")}
-}
-async function stopBot(){try{await apiJSON(`${API}/api/stop`,{method:"POST"});toast("Đang dừng...")}catch(e){toast(e.message||"Dừng thất bại")}}
+    // ═══ Settings ═══
+    function setSecretInput(id, v) { const e = document.getElementById(id); if (v === "***") { e.value = ""; e.dataset.masked = "1"; e.placeholder = "••• Đã lưu •••"; return } e.value = v || ""; e.dataset.masked = "0" }
+    function getSecretValue(id) { const e = document.getElementById(id); if (!e.value && e.dataset.masked === "1") return "__KEEP_EXISTING_SECRET__"; return e.value }
+    function setTog(id, on) { const e = document.getElementById(id); if (!e) return; if (on) e.classList.add("on"); else e.classList.remove("on"); e.dataset.on = on ? "1" : "0" }
+    function tog(el) { setTog(el.id, el.dataset.on !== "1") }
+    function isOn(id) { const e = document.getElementById(id); return e && e.dataset.on === "1" }
 
-// ═══ Schedule ═══
-async function loadSchedule(){
-    try{
-        const s=await apiJSON(`${API}/api/schedule`);setTog("tSchedule",s.enabled);
-        document.getElementById("sTime").value=s.time||"08:00";
-        document.getElementById("schInfo").innerHTML=`Windows Task: ${s.windows_task_exists?'<span style="color:var(--green)">Hoạt động</span>':'<span style="color:var(--text-4)">Chưa có</span>'}${s.countdown?` · ${s.countdown}`:""}`;
-    }catch(e){document.getElementById("schInfo").textContent="Lỗi tải lịch"}
-}
-async function saveSchedule(){
-    try{await apiJSON(`${API}/api/schedule`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:isOn("tSchedule"),time:document.getElementById("sTime").value})});toast("Đã lưu lịch");loadSchedule()}
-    catch(e){toast(e.message||"Lưu lịch thất bại")}
-}
-async function createWinTask(){
-    try{await apiJSON(`${API}/api/schedule`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:true,time:document.getElementById("sTime").value,create_task:true})});toast("Đã tạo Windows Task");loadSchedule()}
-    catch(e){toast(e.message||"Tạo task thất bại")}
-}
+    async function loadSettings() {
+      try {
+        const s = await apiJSON(`${API}/api/settings`);
+        setTog("tGpmEnabled", s.gpm_integration_enabled); document.getElementById("sGpmUrl").value = s.gpm_api_url || "http://127.0.0.1:9495";
+        setTog("tHeadless", s.headless); setTog("tNativeEdge", s.native_edge_runtime_enabled !== false);
+        setTog("tStealth", s.use_stealth); setTog("tTrends", s.use_google_trends); setTog("tImages", s.block_images);
+        setTog("tStreak", s.streak_protection); setTog("tRedeem", s.auto_redeem);
+        setTog("tManualCaptcha", s.manual_captcha_handoff !== false);
+        document.getElementById("sCaptchaTimeout").value = s.manual_captcha_timeout || 900;
+        setTog("tAttachBootstrap", s.bootstrap_attach_existing_edge !== false);
+        document.getElementById("sEdgeCDP").value = s.edge_cdp_url || "http://127.0.0.1:9222";
+        document.getElementById("sMaxThreads").value = s.max_threads || 10;
+        setTog("tAI", s.ai_enabled); setSecretInput("sAIKey", s.ai_api_key);
+        document.getElementById("sAIUrl").value = s.ai_api_url || "";
+        if (s.ai_model) document.getElementById("sAIModel").value = s.ai_model;
+        setSecretInput("sDiscord", s.discord_webhook); setSecretInput("sTgToken", s.telegram_bot_token);
+        document.getElementById("sTgChat").value = s.telegram_chat_id || "";
+        setTog("tGsheetEnabled", s.google_sheets_enabled);
+        setSecretInput("sGsheetWebhook", s.google_sheets_webhook_url);
+      } catch (e) { toast(e.message || "Lỗi tải settings") }
+    }
 
-// ═══ Toast ═══
-function toast(m){const e=document.getElementById("toast");setText("toastMsg",m);e.classList.add("show");setTimeout(()=>e.classList.remove("show"),2600)}
+    async function saveSettings() {
+      try {
+        await apiJSON(`${API}/api/settings`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            gpm_integration_enabled: isOn("tGpmEnabled"), gpm_api_url: document.getElementById("sGpmUrl").value.trim() || "http://127.0.0.1:9495",
+            headless: isOn("tHeadless"), native_edge_runtime_enabled: isOn("tNativeEdge"), use_stealth: isOn("tStealth"),
+            use_google_trends: isOn("tTrends"), block_images: isOn("tImages"), streak_protection: isOn("tStreak"),
+            auto_redeem: isOn("tRedeem"), manual_captcha_handoff: isOn("tManualCaptcha"),
+            manual_captcha_timeout: +document.getElementById("sCaptchaTimeout").value || 900,
+            bootstrap_attach_existing_edge: isOn("tAttachBootstrap"),
+            edge_cdp_url: document.getElementById("sEdgeCDP").value.trim() || "http://127.0.0.1:9222",
+            max_threads: parseInt(document.getElementById("sMaxThreads").value) || 10,
+            ai_enabled: isOn("tAI"), ai_api_key: getSecretValue("sAIKey"), ai_api_url: document.getElementById("sAIUrl").value.trim(),
+            ai_model: document.getElementById("sAIModel").value,
+            discord_webhook: getSecretValue("sDiscord"), telegram_bot_token: getSecretValue("sTgToken"),
+            telegram_chat_id: document.getElementById("sTgChat").value,
+            google_sheets_enabled: isOn("tGsheetEnabled"), google_sheets_webhook_url: getSecretValue("sGsheetWebhook")
+          })
+        });
+        toast("✅ Đã lưu cài đặt");
+      } catch (e) { toast(e.message || "Lưu thất bại") }
+    }
 
-// ═══ Init ═══
-function init(){loadAccounts();loadSettings();loadSchedule();poll=setInterval(tick,2000);tick()}
-init();
-</script>
+    // ═══ Tasks ═══
+    async function runTask(t, targetEmails = null) {
+      try {
+        const payload = { task: t };
+        if (targetEmails && targetEmails.length > 0) payload.target_emails = targetEmails;
+        await apiJSON(`${API}/api/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        logIdx = 0;
+        document.getElementById("dashLogs").innerHTML = '<div class="empty-state">Đang chờ log...</div>';
+        toast(targetEmails ? `🚀 Bắt đầu: ${humanizeTask(t)} (${targetEmails.length} acc)` : `🚀 Bắt đầu: ${humanizeTask(t)}`);
+        // Switch to controls page to see progress
+        document.querySelector('[data-page="controls"]').click();
+        tick();
+      } catch (e) { toast(e.message || "Không thể chạy") }
+    }
+    async function stopBot() { try { await apiJSON(`${API}/api/stop`, { method: "POST" }); toast("⏹ Đang dừng...") } catch (e) { toast(e.message || "Dừng thất bại") } }
+
+    // ═══ Schedule ═══
+    async function loadSchedule() {
+      try {
+        const s = await apiJSON(`${API}/api/schedule`);
+        setTog("tSchedule", s.enabled);
+        document.getElementById("sTime").value = s.time || "08:00";
+        document.getElementById("schInfo").innerHTML = `Windows Task: ${s.windows_task_exists ? '<span style="color:var(--green)">✓ Hoạt động</span>' : '<span style="color:var(--text-4)">Chưa có</span>'}${s.countdown ? ` · Còn ${s.countdown}` : ""}`;
+      } catch (e) { document.getElementById("schInfo").textContent = "Lỗi tải lịch" }
+    }
+    async function saveSchedule() {
+      try { await apiJSON(`${API}/api/schedule`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: isOn("tSchedule"), time: document.getElementById("sTime").value }) }); toast("✅ Đã lưu lịch"); loadSchedule() }
+      catch (e) { toast(e.message || "Lưu lịch thất bại") }
+    }
+    async function createWinTask() {
+      try { await apiJSON(`${API}/api/schedule`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: true, time: document.getElementById("sTime").value, create_task: true }) }); toast("✅ Đã tạo Windows Task"); loadSchedule() }
+      catch (e) { toast(e.message || "Tạo task thất bại") }
+    }
+
+    // ═══ Toast ═══
+    function toast(m) { const e = document.getElementById("toast"); setText("toastMsg", m); e.classList.add("show"); setTimeout(() => e.classList.remove("show"), 2800) }
+
+    // ═══ Init ═══
+    function init() { loadAccounts(); loadSettings(); loadSchedule(); poll = setInterval(tick, 2000); tick() }
+    init();
+  </script>
+
 </body>
+
 </html>
