@@ -815,6 +815,9 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
             account_complete = True
 
             try:
+                attach_runtime = False
+                cdp_url = ""
+
                 # Desktop session / session bootstrap / activities
 
                 # ══ PRIORITY 0: Edge Session (Edge Streak + Edge Searches) ══
@@ -827,10 +830,30 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                         bm3 = BrowserManager(edge_runtime_settings)
                         bm3.set_account(email)
 
-                        # Use NATIVE Edge runtime (subprocess + CDP) for searches
+                        # Priority 1: Try GPM if enabled
                         edge_streak_native = False
                         edge_streak_cdp_url = ""
-                        if bool(settings.get("native_edge_runtime_enabled", True)):
+                        
+                        if gpm_enabled and gpm_profile_id:
+                            if not attach_runtime:
+                                add_log("info", f"Starting GPM Login profile {gpm_profile_id[:8]} for Edge session...")
+                                try:
+                                    cdp_url = await _start_gpm_profile(gpm_profile_id, gpm_api_url)
+                                    attach_runtime = True
+                                    add_log("info", f"GPM Profile started via {cdp_url}")
+                                except Exception as e:
+                                    add_log("warning", f"GPM start failed: {e}. Falling back to default tools.")
+                            
+                            if attach_runtime and cdp_url:
+                                try:
+                                    edge_streak_cdp_url = cdp_url
+                                    await bm3.start_connected_edge(edge_streak_cdp_url)
+                                    edge_streak_native = True
+                                except Exception as e:
+                                    add_log("warning", f"Connecting to GPM Edge failed: {e}")
+
+                        # Priority 2: NATIVE Edge runtime (subprocess + CDP)
+                        if not edge_streak_native and bool(settings.get("native_edge_runtime_enabled", True)):
                             try:
                                 edge_streak_cdp_url = await bm3.start_native_edge_runtime(email)
                                 add_log("info", f"Using native Edge runtime for searches ({edge_streak_cdp_url})")
@@ -1223,18 +1246,22 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                 if task in ("all", "searches", "daily", "punch", "promos", "bootstrap"):
                     bm = BrowserManager(settings)
                     bm.set_account(email)  # Unique fingerprint per account
-                    attach_runtime = False
-                    cdp_url = ""
 
                     if gpm_enabled and gpm_profile_id:
-                        add_log("info", f"Starting GPM Login profile {gpm_profile_id[:8]}...")
-                        try:
-                            cdp_url = await _start_gpm_profile(gpm_profile_id, gpm_api_url)
-                            await bm.start_connected_edge(cdp_url)
-                            attach_runtime = True
-                            add_log("info", f"GPM Profile started via {cdp_url}")
-                        except Exception as e:
-                            add_log("warning", f"GPM start failed: {e}. Falling back to default tools.")
+                        if not attach_runtime:
+                            add_log("info", f"Starting GPM Login profile {gpm_profile_id[:8]}...")
+                            try:
+                                cdp_url = await _start_gpm_profile(gpm_profile_id, gpm_api_url)
+                                attach_runtime = True
+                                add_log("info", f"GPM Profile started via {cdp_url}")
+                            except Exception as e:
+                                add_log("warning", f"GPM start failed: {e}. Falling back to default tools.")
+                        
+                        if attach_runtime and cdp_url:
+                            try:
+                                await bm.start_connected_edge(cdp_url)
+                            except Exception as e:
+                                add_log("warning", f"Failed to attach to re-used GPM profile: {e}")
 
                     if task == "bootstrap" and bool(settings.get("bootstrap_attach_existing_edge", True)) and not attach_runtime:
                         cdp_url = str(settings.get("edge_cdp_url", "http://127.0.0.1:9222")).strip()
