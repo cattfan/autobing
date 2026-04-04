@@ -1,4 +1,4 @@
-"""
+﻿"""
 Edge Streak - Pure Native Background Mode.
 
 Chạy Edge ở góc màn hình, KHÔNG chiếm chuột/bàn phím.
@@ -176,7 +176,7 @@ class NativeEdgeStreak:
             f"[Edge Streak] Bat dau native browsing: target={target_minutes} min"
         )
 
-        if not await self._launch_edge("https://rewards.bing.com/earn"):
+        if not await self._launch_edge("https://rewards.bing.com/"):
             logger.error("Không thể khởi động Edge")
             return
 

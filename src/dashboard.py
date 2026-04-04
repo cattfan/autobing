@@ -1,4 +1,4 @@
-"""
+﻿"""
 Flask Web Dashboard — Full GUI for Rewards Search Automator.
 Provides API endpoints for accounts, settings, running tasks, logs, and status.
 """
@@ -816,6 +816,410 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
 
             try:
                 # Desktop session / session bootstrap / activities
+
+                # ══ PRIORITY 0: Edge Session (Edge Streak + Edge Searches) ══
+                if task in ("all", "searches"):
+                    state["current_task"] = "Edge Session"
+                    add_log("info", "🔓 Edge Session")
+                    try:
+                        edge_runtime_settings = dict(settings)
+                        edge_runtime_settings["use_stealth"] = False
+                        bm3 = BrowserManager(edge_runtime_settings)
+                        bm3.set_account(email)
+
+                        # Use NATIVE Edge runtime (subprocess + CDP) for searches
+                        edge_streak_native = False
+                        edge_streak_cdp_url = ""
+                        if bool(settings.get("native_edge_runtime_enabled", True)):
+                            try:
+                                edge_streak_cdp_url = await bm3.start_native_edge_runtime(email)
+                                add_log("info", f"Using native Edge runtime for searches ({edge_streak_cdp_url})")
+                                edge_streak_native = True
+                            except Exception as native_err:
+                                add_log("warning", f"Native Edge runtime failed ({native_err}), falling back to Playwright Edge")
+
+                        if not edge_streak_native:
+                            # Fallback to Playwright-managed persistent Edge
+                            storage_state = (
+                                str(storage_state_path) if storage_state_path.exists() else None
+                            )
+                            ctx3, page3 = await bm3.start_clean_edge_persistent(
+                                account_email=email,
+                                storage_state=storage_state,
+                            )
+                            add_log("info", "Using Playwright-managed Edge (telemetry may be limited)")
+                        else:
+                            # Use _open_account_context with native runtime (same as desktop)
+                            ctx3, page3 = await _open_account_context(
+                                bm3,
+                                login_mgr,
+                                account,
+                                session_proxy,
+                                "desktop",
+                                storage_state_path,
+                                attach_existing_edge=True,
+                                attached_cdp_url=edge_streak_cdp_url,
+                            )
+
+                        # Verify login in the context
+                        if not await login_mgr.is_logged_in(page3):
+                            add_log("info", "Edge session not logged in, logging in...")
+                            page3 = await login_mgr.login(
+                                page3,
+                                account["email"],
+                                account["password"],
+                                account.get("totp_secret"),
+                            )
+
+                        # Edge searches (skip if done or no points)
+                        edge_status = await searcher.get_search_points_status(page3)
+                        edge_done = edge_status.get("edge_current", 0)
+                        edge_max = edge_status.get("edge_max", 0)
+                        edge_remaining_pts = max(0, edge_max - edge_done)
+                        remaining_edge = (edge_remaining_pts + 2) // 3 if edge_remaining_pts > 0 else 0
+
+                        if remaining_edge > 0:
+                            state["current_task"] = "Edge Searches"
+                            state["progress"] = 0
+                            state["progress_total"] = remaining_edge
+                            add_log("info", f"🔓 Edge — {edge_done}/{edge_max} pts ({remaining_edge} searches left)")
+
+                            def on_edge(c, t, q):
+                                state["progress"] = c
+                            searcher.on_progress = on_edge
+                            edge_stats = await searcher.run_searches(page3, remaining_edge, "edge")
+                            if edge_stats.get("fatal_error"):
+                                raise RuntimeError(edge_stats["fatal_error"])
+                            add_log("info", "✅ Edge searches done")
+                        else:
+                            if edge_max == 0:
+                                add_log("info", "⏩ Edge searches not available")
+                            else:
+                                add_log("info", f"⏩ Edge searches already complete ({edge_done}/{edge_max})")
+
+                        # Close search browser before streak
+                        await _persist_storage_state(ctx3, storage_state_path)
+                        await bm3.close()
+
+                        # ── Edge Browsing Streak ──
+                        state["current_task"] = "Edge Browsing Streak"
+                        add_log("info", "🌍 Edge Browsing Streak — checking availability...")
+
+                        # The dashboard's TaskDetector already queried the API
+                        # during Edge searches. Re-use that data or re-query.
+                        try:
+                            bm_streak = BrowserManager(edge_runtime_settings)
+                            streak_cdp = ""
+                            streak_attach = False
+
+                            if attach_runtime and cdp_url:
+                                add_log("info", f"Re-using profile for streak...")
+                                try:
+                                    streak_cdp = cdp_url
+                                    await bm_streak.start_connected_edge(streak_cdp)
+                                    streak_attach = True
+                                except Exception:
+                                    pass
+
+                            if not streak_attach:
+                                streak_cdp = await bm_streak.start_native_edge_runtime(email)
+                                streak_attach = True
+
+                            ctx_s, page_s = await _open_account_context(
+                                bm_streak, login_mgr, account,
+                                session_proxy, "desktop", storage_state_path,
+                                attach_existing_edge=streak_attach,
+                                attached_cdp_url=streak_cdp,
+                            )
+                            if not await login_mgr.is_logged_in(page_s):
+                                page_s = await login_mgr.login(
+                                    page_s, email, account["password"],
+                                    account.get("totp_secret"),
+                                )
+
+                            task_detector = TaskDetector()
+                            tasks = await task_detector.get_all_tasks(page_s)
+                            edge_info = tasks.get("streaks", {}).get("edge", {})
+
+                            # Check if Edge Streak promo exists in API at all
+                            offer_id = edge_info.get("offerId", "")
+                            edge_hash = edge_info.get("hash", "")
+                            min_done = edge_info.get("minutes", 0)
+                            min_target = edge_info.get("target", 0)
+                            streak_complete = edge_info.get("done", False)
+
+                            if not edge_info.get("exists", False):
+                                # Edge Streak promo doesn't exist
+                                add_log(
+                                    "info",
+                                    "⏩ Edge Browsing Streak not available or already completed "
+                                    "for this account — skipping",
+                                )
+                            elif streak_complete or min_done >= min_target:
+                                add_log(
+                                    "info",
+                                    f"⏩ Edge Streak already complete "
+                                    f"({min_done}/{min_target} min)",
+                                )
+                            else:
+                                # Promo exists but not complete — try to complete
+                                add_log(
+                                    "info",
+                                    f"Edge Streak: {min_done}/{min_target} min, "
+                                    f"offerId={offer_id}",
+                                )
+                                streak_credited = False
+                                dest_url = edge_info.get("destinationUrl", "")
+
+                                # Try API credit if offerId exists
+                                if offer_id and not streak_credited:
+                                    add_log("info", f"📭 Trying API credit...")
+                                    api_result = await page_s.evaluate("""
+                                        async (offerId) => {
+                                            try {
+                                                const r = await fetch(
+                                                    'https://prod.rewardsplatform.microsoft.com/dapi/me/activities',
+                                                    {
+                                                        method: 'POST',
+                                                        credentials: 'include',
+                                                        headers: {
+                                                            'Content-Type': 'application/json',
+                                                            'Accept': 'application/json',
+                                                        },
+                                                        body: JSON.stringify({
+                                                            id: crypto.randomUUID(),
+                                                            offerId: offerId,
+                                                            type: 'urlreward',
+                                                            amount: 1,
+                                                            timestamp: new Date().toISOString(),
+                                                            attributes: { type: 'urlreward' },
+                                                        }),
+                                                    }
+                                                );
+                                                const text = await r.text();
+                                                return {status: r.status, body: text.substring(0, 300)};
+                                            } catch(e) { return {error: e.message}; }
+                                        }
+                                    """, offer_id)
+                                    add_log("info", f"   API: {json.dumps(api_result)}")
+                                    await asyncio.sleep(5)
+                                    t2 = await task_detector.get_all_tasks(page_s)
+                                    e2 = t2.get("streaks", {}).get("edge", {})
+                                    if e2.get("done") or e2.get("minutes", 0) >= e2.get("target", 30):
+                                        add_log("info", "✅ Edge Streak credited via API!")
+                                        streak_credited = True
+
+                                # Try card click
+                                if dest_url and not streak_credited:
+                                    add_log("info", f"🖱️ Trying card activation...")
+                                    try:
+                                        full_url = (
+                                            dest_url if dest_url.startswith("http")
+                                            else f"https://rewards.bing.com{dest_url}"
+                                        )
+                                        await page_s.goto(full_url, wait_until="domcontentloaded", timeout=35000)
+                                        await asyncio.sleep(5)
+                                        await page_s.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                                        await asyncio.sleep(3)
+                                        t3 = await task_detector.get_all_tasks(page_s)
+                                        e3 = t3.get("streaks", {}).get("edge", {})
+                                        if e3.get("done") or e3.get("minutes", 0) >= e3.get("target", 30):
+                                            add_log("info", "✅ Edge Streak credited via card!")
+                                            streak_credited = True
+                                    except Exception as ce:
+                                        add_log("debug", f"Card error: {ce}")
+
+                                # Fallback: Activate card via CDP, then native Edge browsing
+                                if not streak_credited:
+                                    # CRITICAL: Activate the Edge Streak card on Rewards page FIRST
+                                    # Without this, browsing doesn't count toward streak minutes
+                                    add_log("info", "🔹 Activating Edge Streak card before native browsing...")
+                                    activation_url = None
+                                    for act_url in [
+                                        "https://rewards.bing.com/",
+                                        "https://rewards.bing.com/",
+                                        "https://rewards.bing.com/",
+                                    ]:
+                                        try:
+                                            await page_s.goto(act_url, wait_until="domcontentloaded", timeout=35000)
+                                            await asyncio.sleep(3)
+                                            # Click the Edge Streak card via JS
+                                            clicked = await page_s.evaluate("""
+                                                () => {
+                                                    const allElements = document.querySelectorAll('a, button, [role="link"], [role="button"], mee-card a');
+                                                    for (const el of allElements) {
+                                                        const text = (el.textContent || '').toLowerCase();
+                                                        const href = (el.href || '').toLowerCase();
+                                                        if ((text.includes('edge') && (text.includes('brows') || text.includes('streak') || text.includes('minute')))
+                                                            || href.includes('edge') && href.includes('streak')) {
+                                                            // Capture the destination URL before clicking
+                                                            const dest = el.href || '';
+                                                            el.click();
+                                                            return dest || true;
+                                                        }
+                                                    }
+                                                    const cards = document.querySelectorAll('mee-card, mee-rewards-more-activities-card-item');
+                                                    for (const card of cards) {
+                                                        const text = (card.textContent || '').toLowerCase();
+                                                        if (text.includes('edge') && (text.includes('brows') || text.includes('streak'))) {
+                                                            const link = card.querySelector('a');
+                                                            if (link) { const d = link.href; link.click(); return d || true; }
+                                                            card.click();
+                                                            return true;
+                                                        }
+                                                    }
+                                                    return false;
+                                                }
+                                            """)
+                                            if clicked:
+                                                add_log("info", f"   ✅ Card activated on {act_url}")
+                                                if isinstance(clicked, str) and clicked.startswith("http"):
+                                                    activation_url = clicked
+                                                await asyncio.sleep(3)
+                                                break
+                                        except Exception as _e:
+                                            logger.debug(f"Edge Streak card activation URL failed, trying next: {_e}")
+                                            continue  # try next act_url
+
+                                    add_log(
+                                        "info",
+                                        "Starting Native Edge browsing with verify-and-retry...",
+                                    )
+                                    # Close CDP session -- NativeEdgeStreak needs to kill all Edge
+                                    await bm_streak.close()
+                                    bm_streak = None
+
+                                    state["progress"] = 0
+                                    state["progress_total"] = 30
+
+                                    # --- Verify-and-Retry Loop ---
+                                    # Run native Edge, then reopen CDP to check API.
+                                    # If minutes < target, run more. Max 3 attempts.
+                                    max_attempts = 3
+                                    streak_verified = False
+                                    credited_minutes = min_done  # from initial API check
+
+                                    for attempt in range(1, max_attempts + 1):
+                                        remaining = max(0, min_target - credited_minutes)
+                                        if remaining <= 0:
+                                            streak_verified = True
+                                            break
+
+                                        # Add 5 min buffer per attempt to account for telemetry lag
+                                        run_minutes = remaining + 5
+                                        add_log(
+                                            "info",
+                                            f"[Attempt {attempt}/{max_attempts}] "
+                                            f"Credited: {credited_minutes}/{min_target} min. "
+                                            f"Running native Edge for {run_minutes} min "
+                                            f"({remaining} remaining + 5 buffer)...",
+                                        )
+
+                                        native_streak = NativeEdgeStreak(
+                                            account_email=account.get("email", "")
+                                        )
+
+                                        def _on_native_streak(done, total):
+                                            state["progress"] = min(
+                                                credited_minutes + done, min_target
+                                            )
+
+                                        start_url = activation_url or "https://www.bing.com"
+                                        await native_streak.browse(
+                                            target_minutes=run_minutes,
+                                            on_progress=_on_native_streak,
+                                            start_url=start_url,
+                                        )
+                                        add_log(
+                                            "info",
+                                            f"Native Edge session {attempt} done. "
+                                            f"Verifying via API...",
+                                        )
+
+                                        # Reopen CDP to check API
+                                        try:
+                                            bm_verify_streak = BrowserManager(settings)
+                                            bm_verify_streak.set_account(email)
+                                            verify_cdp = ""
+                                            try:
+                                                verify_cdp = await bm_verify_streak.start_native_edge_runtime(email)
+                                            except Exception:
+                                                await bm_verify_streak.start()
+
+                                            ctx_vs, page_vs = await _open_account_context(
+                                                bm_verify_streak,
+                                                login_mgr,
+                                                account,
+                                                session_proxy,
+                                                "desktop",
+                                                storage_state_path,
+                                                attach_existing_edge=bool(verify_cdp),
+                                                attached_cdp_url=verify_cdp,
+                                            )
+
+                                            vt = await task_detector.get_all_tasks(page_vs)
+                                            ve = vt.get("streaks", {}).get("edge", {})
+                                            credited_minutes = ve.get("minutes", 0)
+                                            v_target = ve.get("target", min_target)
+                                            v_done = ve.get("done", False)
+
+                                            add_log(
+                                                "info",
+                                                f"API check: {credited_minutes}/{v_target} min "
+                                                f"(done={v_done})",
+                                            )
+
+                                            await bm_verify_streak.close()
+
+                                            if v_done or credited_minutes >= v_target:
+                                                streak_verified = True
+                                                break
+
+                                        except Exception as verify_err:
+                                            add_log(
+                                                "warning",
+                                                f"Verify error: {verify_err}",
+                                            )
+                                            try:
+                                                await bm_verify_streak.close()
+                                            except Exception:
+                                                pass
+
+                                    if streak_verified:
+                                        add_log(
+                                            "info",
+                                            f"[OK] Edge Streak verified complete "
+                                            f"({credited_minutes}/{min_target} min)",
+                                        )
+                                    else:
+                                        add_log(
+                                            "warning",
+                                            f"[WARN] Edge Streak not fully verified "
+                                            f"after {max_attempts} attempts "
+                                            f"({credited_minutes}/{min_target} min)",
+                                        )
+
+
+                            if bm_streak is not None:
+                                await bm_streak.close()
+
+                        except Exception as streak_err:
+                            add_log("warning", f"⚠️ Edge Streak error: {streak_err}")
+                            import traceback
+                            add_log("debug", traceback.format_exc())
+                            try:
+                                if bm_streak is not None:
+                                    await bm_streak.close()
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        add_log("warning", f"⚠️ Edge session error: {e}")
+                        try:
+                            await bm3.close()
+                        except Exception:
+                            pass
+
+
                 if task in ("all", "searches", "daily", "punch", "promos", "bootstrap"):
                     bm = BrowserManager(settings)
                     bm.set_account(email)  # Unique fingerprint per account
@@ -884,6 +1288,32 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                     add_log("info", "🌍 Warming up browser...")
                     await humanizer.warm_up_browsing(page)
 
+                    # ══ PRIORITY 1: Universal Task Scanner (Daily Set + Punch Cards + Quests + Promos) ══
+                    # Spec: Edge Streak → Daily Set → Quiz → Promos → Search
+                    if task in ("all", "daily", "punch", "promos"):
+                        state["current_task"] = "All Tasks (Smart Scanner)"
+                        _update_account_state(account_key, task="Tasks", progress=0)
+                        ai = AIAgent(settings, humanizer=humanizer)
+                        add_log("info", "🧠 Smart Task Scanner starting...")
+                        if ai.enabled:
+                            add_log("info", "🤖 AI Agent enabled for complex tasks")
+
+                        scanner = UniversalTaskScanner(
+                            humanizer=humanizer,
+                            ai_agent=ai,
+                            on_log=add_log,
+                            settings=settings,
+                            challenge_handler=challenge_handler,
+                        )
+                        scan_result = await scanner.scan_and_complete(
+                            page, account_email=email,
+                        )
+                        add_log("info",
+                                f"🧠 Smart Scanner: {scan_result['completed']}/{scan_result['total']} completed, "
+                                f"{scan_result['skipped_locked']} locked, {scan_result['failed']} failed")
+                        await close_other_tabs(page)
+
+                    # ══ PRIORITY 5: Desktop Searches ══
                     if task in ("all", "searches"):
                         # ── Check current progress first ──
                         add_log("info", "🔌 Checking search credits...")
@@ -919,30 +1349,6 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             add_log("info", "✅ Desktop searches done")
                         else:
                             add_log("info", f"⏩ Desktop searches already complete ({pc_done}/{pc_max})")
-
-                    # ══ Universal Task Scanner (Daily Set + Punch Cards + Quests + Promos) ══
-                    if task in ("all", "daily", "punch", "promos"):
-                        state["current_task"] = "All Tasks (Smart Scanner)"
-                        _update_account_state(account_key, task="Tasks", progress=0)
-                        ai = AIAgent(settings)
-                        add_log("info", "🧠 Smart Task Scanner starting...")
-                        if ai.enabled:
-                            add_log("info", "🤖 AI Agent enabled for complex tasks")
-
-                        scanner = UniversalTaskScanner(
-                            humanizer=humanizer,
-                            ai_agent=ai,
-                            on_log=add_log,
-                            settings=settings,
-                            challenge_handler=challenge_handler,
-                        )
-                        scan_result = await scanner.scan_and_complete(
-                            page, account_email=email,
-                        )
-                        add_log("info",
-                                f"🧠 Smart Scanner: {scan_result['completed']}/{scan_result['total']} completed, "
-                                f"{scan_result['skipped_locked']} locked, {scan_result['failed']} failed")
-                        await close_other_tabs(page)
 
                     # Read points
                     try:
@@ -1321,408 +1727,6 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                     await bm.close()
 
 
-                # Edge session (searches + browsing streak)
-                if task in ("all", "searches"):
-                    state["current_task"] = "Edge Session"
-                    add_log("info", "🔓 Edge Session")
-                    try:
-                        edge_runtime_settings = dict(settings)
-                        edge_runtime_settings["use_stealth"] = False
-                        bm3 = BrowserManager(edge_runtime_settings)
-                        bm3.set_account(email)
-
-                        # Use NATIVE Edge runtime (subprocess + CDP) for searches
-                        edge_streak_native = False
-                        edge_streak_cdp_url = ""
-                        if bool(settings.get("native_edge_runtime_enabled", True)):
-                            try:
-                                edge_streak_cdp_url = await bm3.start_native_edge_runtime(email)
-                                add_log("info", f"Using native Edge runtime for searches ({edge_streak_cdp_url})")
-                                edge_streak_native = True
-                            except Exception as native_err:
-                                add_log("warning", f"Native Edge runtime failed ({native_err}), falling back to Playwright Edge")
-
-                        if not edge_streak_native:
-                            # Fallback to Playwright-managed persistent Edge
-                            storage_state = (
-                                str(storage_state_path) if storage_state_path.exists() else None
-                            )
-                            ctx3, page3 = await bm3.start_clean_edge_persistent(
-                                account_email=email,
-                                storage_state=storage_state,
-                            )
-                            add_log("info", "Using Playwright-managed Edge (telemetry may be limited)")
-                        else:
-                            # Use _open_account_context with native runtime (same as desktop)
-                            ctx3, page3 = await _open_account_context(
-                                bm3,
-                                login_mgr,
-                                account,
-                                session_proxy,
-                                "desktop",
-                                storage_state_path,
-                                attach_existing_edge=True,
-                                attached_cdp_url=edge_streak_cdp_url,
-                            )
-
-                        # Verify login in the context
-                        if not await login_mgr.is_logged_in(page3):
-                            add_log("info", "Edge session not logged in, logging in...")
-                            page3 = await login_mgr.login(
-                                page3,
-                                account["email"],
-                                account["password"],
-                                account.get("totp_secret"),
-                            )
-
-                        # Edge searches (skip if done or no points)
-                        edge_status = await searcher.get_search_points_status(page3)
-                        edge_done = edge_status.get("edge_current", 0)
-                        edge_max = edge_status.get("edge_max", 0)
-                        edge_remaining_pts = max(0, edge_max - edge_done)
-                        remaining_edge = (edge_remaining_pts + 2) // 3 if edge_remaining_pts > 0 else 0
-
-                        if remaining_edge > 0:
-                            state["current_task"] = "Edge Searches"
-                            state["progress"] = 0
-                            state["progress_total"] = remaining_edge
-                            add_log("info", f"🔓 Edge — {edge_done}/{edge_max} pts ({remaining_edge} searches left)")
-
-                            def on_edge(c, t, q):
-                                state["progress"] = c
-                            searcher.on_progress = on_edge
-                            edge_stats = await searcher.run_searches(page3, remaining_edge, "edge")
-                            if edge_stats.get("fatal_error"):
-                                raise RuntimeError(edge_stats["fatal_error"])
-                            add_log("info", "✅ Edge searches done")
-                        else:
-                            if edge_max == 0:
-                                add_log("info", "⏩ Edge searches not available")
-                            else:
-                                add_log("info", f"⏩ Edge searches already complete ({edge_done}/{edge_max})")
-
-                        # Close search browser before streak
-                        await _persist_storage_state(ctx3, storage_state_path)
-                        await bm3.close()
-
-                        # ── Edge Browsing Streak ──
-                        state["current_task"] = "Edge Browsing Streak"
-                        add_log("info", "🌍 Edge Browsing Streak — checking availability...")
-
-                        # The dashboard's TaskDetector already queried the API
-                        # during Edge searches. Re-use that data or re-query.
-                        try:
-                            bm_streak = BrowserManager(edge_runtime_settings)
-                            streak_cdp = ""
-                            streak_attach = False
-
-                            if attach_runtime and cdp_url:
-                                add_log("info", f"Re-using profile for streak...")
-                                try:
-                                    streak_cdp = cdp_url
-                                    await bm_streak.start_connected_edge(streak_cdp)
-                                    streak_attach = True
-                                except Exception:
-                                    pass
-
-                            if not streak_attach:
-                                streak_cdp = await bm_streak.start_native_edge_runtime(email)
-                                streak_attach = True
-
-                            ctx_s, page_s = await _open_account_context(
-                                bm_streak, login_mgr, account,
-                                session_proxy, "desktop", storage_state_path,
-                                attach_existing_edge=streak_attach,
-                                attached_cdp_url=streak_cdp,
-                            )
-                            if not await login_mgr.is_logged_in(page_s):
-                                page_s = await login_mgr.login(
-                                    page_s, email, account["password"],
-                                    account.get("totp_secret"),
-                                )
-
-                            task_detector = TaskDetector()
-                            tasks = await task_detector.get_all_tasks(page_s)
-                            edge_info = tasks.get("streaks", {}).get("edge", {})
-
-                            # Check if Edge Streak promo exists in API at all
-                            offer_id = edge_info.get("offerId", "")
-                            edge_hash = edge_info.get("hash", "")
-                            min_done = edge_info.get("minutes", 0)
-                            min_target = edge_info.get("target", 0)
-                            streak_complete = edge_info.get("done", False)
-
-                            if not edge_info.get("exists", False) or not offer_id:
-                                # Edge Streak promo doesn't exist or is missing offerId
-                                add_log(
-                                    "info",
-                                    "⏩ Edge Browsing Streak not available or already completed "
-                                    "for this account — skipping",
-                                )
-                            elif streak_complete or min_done >= min_target:
-                                add_log(
-                                    "info",
-                                    f"⏩ Edge Streak already complete "
-                                    f"({min_done}/{min_target} min)",
-                                )
-                            else:
-                                # Promo exists but not complete — try to complete
-                                add_log(
-                                    "info",
-                                    f"Edge Streak: {min_done}/{min_target} min, "
-                                    f"offerId={offer_id}",
-                                )
-                                streak_credited = False
-                                dest_url = edge_info.get("destinationUrl", "")
-
-                                # Try API credit if offerId exists
-                                if offer_id and not streak_credited:
-                                    add_log("info", f"📭 Trying API credit...")
-                                    api_result = await page_s.evaluate("""
-                                        async (offerId) => {
-                                            try {
-                                                const r = await fetch(
-                                                    'https://prod.rewardsplatform.microsoft.com/dapi/me/activities',
-                                                    {
-                                                        method: 'POST',
-                                                        credentials: 'include',
-                                                        headers: {
-                                                            'Content-Type': 'application/json',
-                                                            'Accept': 'application/json',
-                                                        },
-                                                        body: JSON.stringify({
-                                                            id: crypto.randomUUID(),
-                                                            offerId: offerId,
-                                                            type: 'urlreward',
-                                                            amount: 1,
-                                                            timestamp: new Date().toISOString(),
-                                                            attributes: { type: 'urlreward' },
-                                                        }),
-                                                    }
-                                                );
-                                                const text = await r.text();
-                                                return {status: r.status, body: text.substring(0, 300)};
-                                            } catch(e) { return {error: e.message}; }
-                                        }
-                                    """, offer_id)
-                                    add_log("info", f"   API: {json.dumps(api_result)}")
-                                    await asyncio.sleep(5)
-                                    t2 = await task_detector.get_all_tasks(page_s)
-                                    e2 = t2.get("streaks", {}).get("edge", {})
-                                    if e2.get("done") or e2.get("minutes", 0) >= e2.get("target", 30):
-                                        add_log("info", "✅ Edge Streak credited via API!")
-                                        streak_credited = True
-
-                                # Try card click
-                                if dest_url and not streak_credited:
-                                    add_log("info", f"🖱️ Trying card activation...")
-                                    try:
-                                        full_url = (
-                                            dest_url if dest_url.startswith("http")
-                                            else f"https://rewards.bing.com{dest_url}"
-                                        )
-                                        await page_s.goto(full_url, wait_until="domcontentloaded", timeout=35000)
-                                        await asyncio.sleep(5)
-                                        await page_s.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                                        await asyncio.sleep(3)
-                                        t3 = await task_detector.get_all_tasks(page_s)
-                                        e3 = t3.get("streaks", {}).get("edge", {})
-                                        if e3.get("done") or e3.get("minutes", 0) >= e3.get("target", 30):
-                                            add_log("info", "✅ Edge Streak credited via card!")
-                                            streak_credited = True
-                                    except Exception as ce:
-                                        add_log("debug", f"Card error: {ce}")
-
-                                # Fallback: Activate card via CDP, then native Edge browsing
-                                if not streak_credited:
-                                    # CRITICAL: Activate the Edge Streak card on Rewards page FIRST
-                                    # Without this, browsing doesn't count toward streak minutes
-                                    add_log("info", "🔹 Activating Edge Streak card before native browsing...")
-                                    activation_url = None
-                                    for act_url in [
-                                        "https://rewards.bing.com/pointsbreakdown",
-                                        "https://rewards.bing.com/earn",
-                                        "https://rewards.bing.com/",
-                                    ]:
-                                        try:
-                                            await page_s.goto(act_url, wait_until="domcontentloaded", timeout=35000)
-                                            await asyncio.sleep(3)
-                                            # Click the Edge Streak card via JS
-                                            clicked = await page_s.evaluate("""
-                                                () => {
-                                                    const allElements = document.querySelectorAll('a, button, [role="link"], [role="button"], mee-card a');
-                                                    for (const el of allElements) {
-                                                        const text = (el.textContent || '').toLowerCase();
-                                                        const href = (el.href || '').toLowerCase();
-                                                        if ((text.includes('edge') && (text.includes('brows') || text.includes('streak') || text.includes('minute')))
-                                                            || href.includes('edge') && href.includes('streak')) {
-                                                            // Capture the destination URL before clicking
-                                                            const dest = el.href || '';
-                                                            el.click();
-                                                            return dest || true;
-                                                        }
-                                                    }
-                                                    const cards = document.querySelectorAll('mee-card, mee-rewards-more-activities-card-item');
-                                                    for (const card of cards) {
-                                                        const text = (card.textContent || '').toLowerCase();
-                                                        if (text.includes('edge') && (text.includes('brows') || text.includes('streak'))) {
-                                                            const link = card.querySelector('a');
-                                                            if (link) { const d = link.href; link.click(); return d || true; }
-                                                            card.click();
-                                                            return true;
-                                                        }
-                                                    }
-                                                    return false;
-                                                }
-                                            """)
-                                            if clicked:
-                                                add_log("info", f"   ✅ Card activated on {act_url}")
-                                                if isinstance(clicked, str) and clicked.startswith("http"):
-                                                    activation_url = clicked
-                                                await asyncio.sleep(3)
-                                                break
-                                        except Exception as _e:
-                                            logger.debug(f"Edge Streak card activation URL failed, trying next: {_e}")
-                                            continue  # try next act_url
-
-                                    add_log(
-                                        "info",
-                                        "Starting Native Edge browsing with verify-and-retry...",
-                                    )
-                                    # Close CDP session -- NativeEdgeStreak needs to kill all Edge
-                                    await bm_streak.close()
-                                    bm_streak = None
-
-                                    state["progress"] = 0
-                                    state["progress_total"] = 30
-
-                                    # --- Verify-and-Retry Loop ---
-                                    # Run native Edge, then reopen CDP to check API.
-                                    # If minutes < target, run more. Max 3 attempts.
-                                    max_attempts = 3
-                                    streak_verified = False
-                                    credited_minutes = min_done  # from initial API check
-
-                                    for attempt in range(1, max_attempts + 1):
-                                        remaining = max(0, min_target - credited_minutes)
-                                        if remaining <= 0:
-                                            streak_verified = True
-                                            break
-
-                                        # Add 5 min buffer per attempt to account for telemetry lag
-                                        run_minutes = remaining + 5
-                                        add_log(
-                                            "info",
-                                            f"[Attempt {attempt}/{max_attempts}] "
-                                            f"Credited: {credited_minutes}/{min_target} min. "
-                                            f"Running native Edge for {run_minutes} min "
-                                            f"({remaining} remaining + 5 buffer)...",
-                                        )
-
-                                        native_streak = NativeEdgeStreak(
-                                            account_email=account.get("email", "")
-                                        )
-
-                                        def _on_native_streak(done, total):
-                                            state["progress"] = min(
-                                                credited_minutes + done, min_target
-                                            )
-
-                                        start_url = activation_url or "https://www.bing.com"
-                                        await native_streak.browse(
-                                            target_minutes=run_minutes,
-                                            on_progress=_on_native_streak,
-                                            start_url=start_url,
-                                        )
-                                        add_log(
-                                            "info",
-                                            f"Native Edge session {attempt} done. "
-                                            f"Verifying via API...",
-                                        )
-
-                                        # Reopen CDP to check API
-                                        try:
-                                            bm_verify_streak = BrowserManager(settings)
-                                            bm_verify_streak.set_account(email)
-                                            verify_cdp = ""
-                                            try:
-                                                verify_cdp = await bm_verify_streak.start_native_edge_runtime(email)
-                                            except Exception:
-                                                await bm_verify_streak.start()
-
-                                            ctx_vs, page_vs = await _open_account_context(
-                                                bm_verify_streak,
-                                                login_mgr,
-                                                account,
-                                                session_proxy,
-                                                "desktop",
-                                                storage_state_path,
-                                                attach_existing_edge=bool(verify_cdp),
-                                                attached_cdp_url=verify_cdp,
-                                            )
-
-                                            vt = await task_detector.get_all_tasks(page_vs)
-                                            ve = vt.get("streaks", {}).get("edge", {})
-                                            credited_minutes = ve.get("minutes", 0)
-                                            v_target = ve.get("target", min_target)
-                                            v_done = ve.get("done", False)
-
-                                            add_log(
-                                                "info",
-                                                f"API check: {credited_minutes}/{v_target} min "
-                                                f"(done={v_done})",
-                                            )
-
-                                            await bm_verify_streak.close()
-
-                                            if v_done or credited_minutes >= v_target:
-                                                streak_verified = True
-                                                break
-
-                                        except Exception as verify_err:
-                                            add_log(
-                                                "warning",
-                                                f"Verify error: {verify_err}",
-                                            )
-                                            try:
-                                                await bm_verify_streak.close()
-                                            except Exception:
-                                                pass
-
-                                    if streak_verified:
-                                        add_log(
-                                            "info",
-                                            f"[OK] Edge Streak verified complete "
-                                            f"({credited_minutes}/{min_target} min)",
-                                        )
-                                    else:
-                                        add_log(
-                                            "warning",
-                                            f"[WARN] Edge Streak not fully verified "
-                                            f"after {max_attempts} attempts "
-                                            f"({credited_minutes}/{min_target} min)",
-                                        )
-
-
-                            if bm_streak is not None:
-                                await bm_streak.close()
-
-                        except Exception as streak_err:
-                            add_log("warning", f"⚠️ Edge Streak error: {streak_err}")
-                            import traceback
-                            add_log("debug", traceback.format_exc())
-                            try:
-                                if bm_streak is not None:
-                                    await bm_streak.close()
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        add_log("warning", f"⚠️ Edge session error: {e}")
-                        try:
-                            await bm3.close()
-                        except Exception:
-                            pass
-
                 # ── Post-run Verification (with error handling) ──
                 if task in ("all", "searches"):
                     add_log("info", "🔄 Verifying search credits...")
@@ -1926,8 +1930,8 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
 
     async def _safe_process(idx, acc):
         try:
-            # 20-minute timeout per account to prevent deadlocks
-            await asyncio.wait_for(_process_single_account(idx, acc), timeout=1200.0)
+            # 45-minute timeout per account (to accommodate 15-30 min recovery pauses)
+            await asyncio.wait_for(_process_single_account(idx, acc), timeout=2700.0)
         except asyncio.TimeoutError:
             email = acc.get("email", f"acc_{idx}")
             _update_account_state(email, status="error", task="Timeout")

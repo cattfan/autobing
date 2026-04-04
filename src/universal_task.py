@@ -1,4 +1,4 @@
-"""
+﻿"""
 Universal Task Scanner & Executor for Microsoft Rewards.
 
 Replaces task-specific modules with a single intelligent system:
@@ -374,10 +374,10 @@ class UniversalTaskScanner:
     def _task_sort_key(task: RewardsTask) -> tuple[int, int, str]:
         """Prioritize simpler, immediately-available tasks first."""
         category_order = {
-            "daily_set": 0,
-            "more_promo": 1,
-            "punch_card": 2,
-            "streak": 3,
+            "streak": 0,      # Edge Streak — priority #1 per spec
+            "daily_set": 1,   # Daily Set Streak — priority #2
+            "punch_card": 2,  # Punch Cards / Quests — priority #3
+            "more_promo": 3,  # Promotions — priority #4
         }
         type_order = {
             "visit": 0,
@@ -527,9 +527,9 @@ class UniversalTaskScanner:
 
         try:
             # Navigate to /earn to get the full rendered card layout
-            if "rewards.bing.com/earn" not in page.url:
+            if "rewards.bing.com/" not in page.url:
                 await page.goto(
-                    "https://rewards.bing.com/earn",
+                    "https://rewards.bing.com/",
                     wait_until="domcontentloaded",
                     timeout=35000,
                 )
@@ -929,10 +929,10 @@ class UniversalTaskScanner:
             pages.append(REWARDS_URL)
             # Also try /earn — Daily Set items render reliably there
             if task.category == "daily_set":
-                pages.append("https://rewards.bing.com/earn")
+                pages.append("https://rewards.bing.com/")
 
         if task.category in {"more_promo", "punch_card"}:
-            pages.append("https://rewards.bing.com/earn")
+            pages.append("https://rewards.bing.com/")
 
         parent_promo = task.raw_data.get("parent_promotion", {})
         parent_offer = parent_promo.get("offerId") or task.parent_id
@@ -1035,7 +1035,7 @@ class UniversalTaskScanner:
         locators = []
 
         # Only open Daily Set panel on the main dashboard, not on /earn
-        if task.category == "daily_set" and "rewards.bing.com/earn" not in page.url:
+        if task.category == "daily_set" and "rewards.bing.com/" not in page.url:
             await self._open_daily_set_panel(page)
 
         if task.destination_url:
@@ -1433,7 +1433,7 @@ class UniversalTaskScanner:
         # ── Navigate and scroll ────────────────────────────────────────
         try:
             await page.goto(
-                "https://rewards.bing.com/earn",
+                "https://rewards.bing.com/",
                 wait_until="domcontentloaded",
                 timeout=35000,
             )
@@ -1583,7 +1583,7 @@ class UniversalTaskScanner:
                     
                 # If active_page was original page and it navigated away, go back
                 if active_page == page and "rewards" not in page.url:
-                    await page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=25000)
+                    await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=25000)
                     await asyncio.sleep(2)
                 
                 completed += 1

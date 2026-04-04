@@ -1,4 +1,4 @@
-"""
+﻿"""
 Utility functions and retry logic for the Rewards Search Automator.
 """
 
@@ -571,5 +571,5 @@ def today_str() -> str:
 BING_SEARCH_URL = "https://www.bing.com/search"
 BING_HOME_URL = "https://www.bing.com"
 REWARDS_URL = "https://rewards.bing.com"
-REWARDS_DASHBOARD_URL = "https://rewards.bing.com/pointsbreakdown"
+REWARDS_DASHBOARD_URL = "https://rewards.bing.com/"
 LOGIN_URL = "https://login.live.com"

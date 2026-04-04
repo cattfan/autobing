@@ -1,4 +1,4 @@
-"""
+﻿"""
 Streak automation for Microsoft Rewards.
 - Bing App Streak: Check in to Bing App daily (mobile visit)
 - Edge Browsing Streak: Browse with Edge for 30 minutes daily
@@ -223,8 +223,8 @@ class TaskDetector:
             )
             if need_dom_progress:
                 pages_to_probe = [page.url]
-                if "https://rewards.bing.com/earn" not in pages_to_probe:
-                    pages_to_probe.append("https://rewards.bing.com/earn")
+                if "https://rewards.bing.com/" not in pages_to_probe:
+                    pages_to_probe.append("https://rewards.bing.com/")
 
                 for rewards_url in pages_to_probe:
                     try:
@@ -294,8 +294,8 @@ class TaskDetector:
                 f"Tasks detected ΓÇö PC: {result['searches']['pc_current']}/{result['searches']['pc_max']}, "
                 f"Mobile: {result['searches']['mobile_current']}/{result['searches']['mobile_max']}, "
                 f"Daily: {result['daily_set']['completed']}/{result['daily_set']['total']}, "
-                f"BingApp: {'' if result['streaks']['bing_app']['done'] else ('' if result['streaks']['bing_app'].get('exists', False) else '-')}, "
-                f"Edge: {'' if result['streaks']['edge']['done'] else ('' if result['streaks']['edge'].get('exists', False) else '-')}"
+                f"BingApp: {'' if result['streaks']['bing_app']['done'] else (str(result['streaks']['bing_app']['current']) + '/1' if result['streaks']['bing_app'].get('exists', False) else '-')}, "
+                f"Edge: {'' if result['streaks']['edge']['done'] else (str(result['streaks']['edge']['minutes']) + '/' + str(result['streaks']['edge']['target']) if result['streaks']['edge'].get('exists', False) else '-')}"
             )
 
         except Exception as e:
@@ -468,7 +468,7 @@ class BingAppStreak:
                 if attempt < 2:
                     try:
                         await page.goto(
-                            "https://rewards.bing.com/earn",
+                            "https://rewards.bing.com/",
                             wait_until="domcontentloaded",
                             timeout=35000,
                         )
@@ -546,8 +546,8 @@ class EdgeBrowsingStreak:
         try:
             # Method 1: Direct activation URL (most reliable)
             activation_urls = [
-                "https://rewards.bing.com/pointsbreakdown",
-                "https://rewards.bing.com/earn",
+                "https://rewards.bing.com/",
+                "https://rewards.bing.com/",
                 REWARDS_URL,
             ]
             streak_activated = False
@@ -776,8 +776,8 @@ class EdgeBrowsingStreak:
                                 )
                                 # Try the points breakdown page which has direct streak links
                                 for retry_url in [
-                                    "https://rewards.bing.com/pointsbreakdown",
-                                    "https://rewards.bing.com/earn",
+                                    "https://rewards.bing.com/",
+                                    "https://rewards.bing.com/",
                                     REWARDS_URL,
                                 ]:
                                     try:

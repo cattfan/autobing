@@ -1,4 +1,4 @@
-"""
+﻿"""
 AI Agent for Microsoft Rewards — powered by OpenRouter API.
 
 Uses LLM to intelligently navigate and complete rewards tasks:
@@ -26,56 +26,81 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_LOCAL_API_URL = "http://localhost:20128/v1/chat/completions"
 
 # System prompt — tells the LLM how to act
-SYSTEM_PROMPT = """You are a Microsoft Rewards automation assistant. Your job is to analyze web pages and complete rewards tasks.
+SYSTEM_PROMPT = """You are AutoBing Agent — a Microsoft Rewards 2026 automation specialist.
+Your mission: maximize points while keeping the account ABSOLUTELY SAFE with 100% human-like behavior.
+
+=== CORE PRINCIPLES ===
+1. Safety > Points > Speed
+2. Never click too fast or repeat fixed patterns
+3. If UI looks changed or suspicious → skip safely
+4. Always verify points after important tasks
+5. Homepage is https://rewards.bing.com/ — always return there between tasks
+6. NEVER navigate to /earn or /pointsbreakdown (404 in 2026)
+
+=== 6-STEP WORKFLOW (follow for EVERY task) ===
+1. OBSERVATION — Analyze URL (must be rewards.bing.com), title, mee-cards, notifications
+2. CLASSIFICATION — Identify task type: EdgeStreak, DailySet, Quest, Promotion, Search, Quiz, Poll
+3. PLANNING — Create 3-8 step plan with timing and humanizer
+4. EXECUTION — Execute plan with appropriate delay level
+5. VERIFICATION — Check for completion signals (checkmarks, point changes)
+6. REPORT — Return structured JSON to runner
 
 You receive a PAGE SNAPSHOT containing:
 - URL, title
 - Visible text content
 - Clickable elements (buttons, links) with their selectors
 
-You must respond with a JSON action. Available actions:
+=== RESPONSE FORMAT (ALWAYS valid JSON, nothing else) ===
+{
+  "step": "observation|classification|planning|execution|verification|report",
+  "task_type": "EdgeStreak|DailySet|Quest|Promotion|Search|Quiz|Poll|Unknown",
+  "thought": "Brief chain-of-thought reasoning",
+  "plan": ["step 1", "step 2"],
+  "action": {
+    "type": "click|fill|scroll|wait|navigate|answer|done|skip",
+    "target": "CSS_SELECTOR",
+    "value": "text to type (for fill)",
+    "url": "https://... (for navigate)",
+    "index": 0,
+    "humanizer_level": "normal|slow|very_slow"
+  },
+  "status": "in_progress|success|failed|partial",
+  "points_earned": 0,
+  "next_step": "what to do next or null",
+  "reasoning": "concise explanation (max 20 words)"
+}
 
-1. Click an element:
-   {"action": "click", "selector": "CSS_SELECTOR", "reason": "why"}
+=== ACTION TYPES ===
+- click: {"type": "click", "target": "CSS_SELECTOR", "humanizer_level": "normal"}
+- fill:  {"type": "fill", "target": "CSS_SELECTOR", "value": "text"}
+- scroll: {"type": "scroll", "target": "down"}
+- navigate: {"type": "navigate", "url": "https://..."}
+- wait: {"type": "wait", "value": "3"}
+- answer: {"type": "answer", "index": 0}
+- done: {"type": "done"}
+- skip: {"type": "skip"}
 
-2. Fill a text input:
-   {"action": "fill", "selector": "CSS_SELECTOR", "text": "text to type", "reason": "why"}
+humanizer_level: "normal" (0.8-3.2s), "slow" (3-6s), "very_slow" (6-10s)
 
-3. Scroll the page:
-   {"action": "scroll", "direction": "down", "reason": "why"}
-
-4. Go to a URL:
-   {"action": "navigate", "url": "https://...", "reason": "why"}
-
-5. Wait for something:
-   {"action": "wait", "seconds": 3, "reason": "why"}
-
-6. Answer a quiz question:
-   {"action": "answer", "index": 0, "reason": "why this answer is correct"}
-
-7. Task is complete:
-   {"action": "done", "reason": "why task is complete"}
-
-8. Task cannot be completed:
-   {"action": "skip", "reason": "why"}
-
-RULES:
-- ALWAYS respond with valid JSON only, no other text
-- Prefer clicking visible, interactive elements
-- For quizzes, analyze the question and pick the CORRECT answer
-- If the page looks like rewards dashboard, look for uncompleted tasks
-- If you see a checkmark or "completed" indicator, skip that task
-- If stuck after 3 attempts, respond with {"action": "skip"}
-- Be concise in "reason" fields (max 20 words)
+=== TASK-SPECIFIC RULES ===
+- Edge Streak: find card on homepage, click to activate offerId, then native browse 30+ min
+- Daily Set: complete in order (Discover → Shop → News), +5 pts each, return to homepage after each
+- Quests: check Activities, skip 🔒 locked and ✅ done tasks
+- Promotions: don't rush, 4-8s between clicks, max 3-4 per session
+- Quizzes: call quiz_solver first, analyze carefully, 1.5-3s per answer
+- Search: click 2-4 results randomly + scroll 30-60%
+- If 403/429 or challenge → {"action": {"type": "skip"}, "reasoning": "safety_stop"}
+- If stuck 3 attempts → {"action": {"type": "skip"}, "reasoning": "stuck"}
 """
 
 
 class AIAgent:
     """AI Agent that uses LLM to navigate and complete rewards tasks."""
 
-    def __init__(self, settings: dict, on_event: Optional[Callable[[str, str, dict], None]] = None):
+    def __init__(self, settings: dict, on_event: Optional[Callable[[str, str, dict], None]] = None, humanizer=None):
         self.api_key = settings.get("ai_api_key", "")
         self.model = settings.get("ai_model", "cx/gpt-5.4")
+        self.humanizer = humanizer  # Humanizer instance for human-like actions
 
         # Support custom API base URL (local LLM)
         custom_url = settings.get("ai_api_url", "").rstrip("/")
@@ -466,10 +491,56 @@ class AIAgent:
             logger.debug(f"Snapshot error: {e}")
             return f"URL: {page.url}\nError reading page: {e}"
 
+    @staticmethod
+    def _normalize_v2_response(raw: dict) -> dict:
+        """Convert V2 nested format to flat format for _execute_action().
+
+        Supports both V1 flat format and V2 nested format:
+        V1: {"action": "click", "selector": "...", "reason": "..."}
+        V2: {"action": {"type": "click", "target": "..."}, "reasoning": "..."}
+        """
+        action_field = raw.get("action", {})
+
+        # V1 format: action is a string
+        if isinstance(action_field, str):
+            return raw
+
+        # V2 format: action is a dict with "type"
+        if isinstance(action_field, dict):
+            flat = {
+                "action": action_field.get("type", "skip"),
+                "selector": action_field.get("target", ""),
+                "text": action_field.get("value", ""),
+                "url": action_field.get("url", ""),
+                "index": action_field.get("index", 0),
+                "direction": action_field.get("target", "down"),  # scroll uses target for direction
+                "seconds": int(action_field.get("value", 3) or 3) if action_field.get("type") == "wait" else 3,
+                "humanizer_level": action_field.get("humanizer_level", "normal"),
+                "reason": raw.get("reasoning", raw.get("thought", "")),
+                # Preserve V2 metadata
+                "_v2_step": raw.get("step", ""),
+                "_v2_task_type": raw.get("task_type", ""),
+                "_v2_status": raw.get("status", ""),
+                "_v2_points_earned": raw.get("points_earned", 0),
+            }
+            return flat
+
+        # Fallback
+        return raw
+
     async def _execute_action(self, page: Page, action: dict) -> bool:
-        """Execute an AI-decided action on the page."""
+        """Execute an AI-decided action on the page with humanizer enforcement."""
         act = action.get("action", "")
         reason = action.get("reason", "")
+        h_level = action.get("humanizer_level", "normal")
+
+        # Humanizer delay ranges based on level
+        delay_map = {
+            "normal": (0.8, 3.2),
+            "slow": (3.0, 6.0),
+            "very_slow": (6.0, 10.0),
+        }
+        delay_lo, delay_hi = delay_map.get(h_level, (0.8, 3.2))
 
         try:
             if act == "click":
@@ -478,9 +549,16 @@ class AIAgent:
                 el = page.locator(selector).first
                 if await el.count() > 0:
                     await el.scroll_into_view_if_needed()
-                    await asyncio.sleep(random.uniform(0.3, 0.8))
-                    await el.click(timeout=5000)
-                    await asyncio.sleep(random.uniform(1, 3))
+                    # Use humanizer if available, otherwise fallback
+                    if self.humanizer:
+                        try:
+                            await self.humanizer.human_click(page, selector)
+                        except Exception:
+                            await el.click(timeout=5000)
+                    else:
+                        await asyncio.sleep(random.uniform(0.3, 0.8))
+                        await el.click(timeout=5000)
+                    await asyncio.sleep(random.uniform(delay_lo, delay_hi))
                     return True
                 else:
                     logger.debug(f"AI: element not found: {selector}")
@@ -490,23 +568,33 @@ class AIAgent:
                 selector = action.get("selector", "")
                 text = action.get("text", "")
                 logger.debug(f"AI fill: {selector} = '{text}' ({reason})")
-                el = page.locator(selector).first
-                await el.fill(text)
-                await asyncio.sleep(random.uniform(0.5, 1))
+                if self.humanizer:
+                    try:
+                        await self.humanizer.type_text(page, selector, text)
+                    except Exception:
+                        el = page.locator(selector).first
+                        await el.fill(text)
+                else:
+                    el = page.locator(selector).first
+                    await el.fill(text)
+                await asyncio.sleep(random.uniform(delay_lo, delay_hi))
                 return True
 
             elif act == "scroll":
                 direction = action.get("direction", "down")
-                delta = 400 if direction == "down" else -400
-                await page.mouse.wheel(0, delta)
-                await asyncio.sleep(random.uniform(1, 2))
+                if self.humanizer:
+                    await self.humanizer.natural_scroll(page, direction, random.randint(200, 400))
+                else:
+                    delta = 400 if direction == "down" else -400
+                    await page.mouse.wheel(0, delta)
+                await asyncio.sleep(random.uniform(1, 3))
                 return True
 
             elif act == "navigate":
                 url = action.get("url", "")
                 logger.debug(f"AI navigate: {url} ({reason})")
                 await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-                await asyncio.sleep(2)
+                await asyncio.sleep(random.uniform(2, 4))
                 return True
 
             elif act == "wait":
@@ -515,7 +603,7 @@ class AIAgent:
                 return True
 
             elif act == "answer":
-                # Click a quiz option by index
+                # Click a quiz option by index — use slow timing per spec
                 idx = action.get("index", 0)
                 options = page.locator(
                     ".rqOption, [id*='rqAnswerOption'], "
@@ -525,8 +613,21 @@ class AIAgent:
                 count = await options.count()
                 if 0 <= idx < count:
                     logger.info(f"🧠 AI answer: option [{idx}] ({reason})")
+                    # Spec: 1.5-3s per answer, 2-4s between questions
+                    await asyncio.sleep(random.uniform(1.5, 3.0))
+                    if self.humanizer:
+                        try:
+                            box = await options.nth(idx).bounding_box()
+                            if box:
+                                await self.humanizer.bezier_move(
+                                    page,
+                                    int(box["x"] + box["width"] / 2),
+                                    int(box["y"] + box["height"] / 2),
+                                )
+                        except Exception:
+                            pass
                     await options.nth(idx).click()
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(random.uniform(2, 4))
                     return True
                 return False
 
@@ -621,11 +722,17 @@ class AIAgent:
 
                 result["steps"] = step + 1
                 result["actions"].append(action)
-                action_name = action.get("action", "unknown")
-                reason = action.get("reason", "")
+
+                # Normalize V2 nested format → flat for _execute_action
+                flat_action = self._normalize_v2_response(action)
+                action_name = flat_action.get("action", "unknown")
+                reason = flat_action.get("reason", "")
+                v2_task_type = flat_action.get("_v2_task_type", "")
+                task_type_str = f" [{v2_task_type}]" if v2_task_type else ""
+
                 self._emit(
                     "info",
-                    f"Bước {step + 1}/{self._max_steps}: {action_name}"
+                    f"Bước {step + 1}/{self._max_steps}: {action_name}{task_type_str}"
                     + (f" - {reason}" if reason else ""),
                     active=True,
                     model=self._current_model,
@@ -635,7 +742,7 @@ class AIAgent:
                 )
 
                 # Check if done
-                if action.get("action") == "done":
+                if flat_action.get("action") == "done":
                     result["success"] = True
                     self._emit(
                         "info",
@@ -647,10 +754,10 @@ class AIAgent:
                     )
                     break
 
-                if action.get("action") == "skip":
+                if flat_action.get("action") == "skip":
                     self._emit(
                         "info",
-                        f"Bỏ qua: {action.get('reason', '') or 'không xử lý được'}",
+                        f"Bỏ qua: {flat_action.get('reason', '') or 'không xử lý được'}",
                         active=False,
                         model=self._current_model,
                         task=task_label,
@@ -659,8 +766,8 @@ class AIAgent:
                     )
                     break
 
-                # Execute action
-                success = await self._execute_action(page, action)
+                # Execute action (using normalized flat format)
+                success = await self._execute_action(page, flat_action)
                 if not success:
                     consecutive_failures += 1
                     self._emit(
@@ -797,7 +904,7 @@ class AIAgent:
         """Use AI to complete all earn page tasks."""
         return await self.run_task(
             page,
-            "Go to https://rewards.bing.com/earn and complete ALL uncompleted "
+            "Go to https://rewards.bing.com/ and complete ALL uncompleted "
             "tasks. SCROLL DOWN FULLY first — the page has lazy-loaded sections.\n"
             "Look for these sections:\n"
             "  - 'Keep earning' (cards with +5, +10, etc. — quizzes, polls, visits)\n"
@@ -809,7 +916,7 @@ class AIAgent:
             "2. If it opens a quiz - answer all questions correctly then go back\n"
             "3. If it opens a poll - pick any option then go back\n"
             "4. If it opens an article/search page - wait 5 seconds then go back\n"
-            "5. Navigate back to https://rewards.bing.com/earn\n"
+            "5. Navigate back to https://rewards.bing.com/\n"
             "6. Click the next uncompleted task\n"
             "7. Skip cards that say 'Completed' or have a checkmark\n"
             "8. When ALL tasks show checkmarks/completed, respond 'done'"

@@ -53,8 +53,8 @@ class Searcher:
 
     def _search_delay_bounds(self) -> tuple[float, float]:
         """Return the delay profile used between searches."""
-        lo = float(self.settings.get("search_delay_min", 1.2))
-        hi = float(self.settings.get("search_delay_max", 4.0))
+        lo = float(self.settings.get("search_delay_min", 5.0))
+        hi = float(self.settings.get("search_delay_max", 12.0))
         if hi < lo:
             hi = lo
         return lo, hi
@@ -101,6 +101,24 @@ class Searcher:
             raise SafetyStopError(
                 "Bing requested verification/captcha; stopping to protect the account"
             )
+
+        # Check for HTTP 403/429 rate-limiting signals
+        rate_limit_markers = (
+            "403 forbidden",
+            "429 too many requests",
+            "rate limit",
+            "too many requests",
+            "temporarily blocked",
+            "access denied",
+        )
+        if any(marker in normalized for marker in rate_limit_markers):
+            pause_seconds = random.randint(900, 1800)  # 15-30 minutes per spec
+            logger.warning(
+                f"Rate limiting detected (403/429). Pausing {pause_seconds // 60} min for safety..."
+            )
+            await asyncio.sleep(pause_seconds)
+            # Enable slow_human mode for remaining searches
+            self._slow_human_mode = True
 
     def _add_typo(self, query: str) -> tuple[str, str]:
         """Add a realistic typo to query (20% chance).
@@ -209,9 +227,11 @@ class Searcher:
         """
         logger.info(f"Starting {count} {mode} searches...")
         self._current_mode = mode
+        self._slow_human_mode = getattr(self, '_slow_human_mode', False)
         stats = {"completed": 0, "failed": 0, "queries": [], "fatal_error": "", "early_abort": False}
         seen_queries: set[str] = set()
         _consecutive_closed = 0  # Guard: abort if page is persistently closed
+        _consecutive_failures = 0  # Recovery: slow down after consecutive failures
 
         if self.settings.get("use_google_trends", True):
             await self.trends.fetch_trending()
@@ -248,10 +268,18 @@ class Searcher:
 
                 if success:
                     _consecutive_closed = 0  # Reset on success
+                    _consecutive_failures = 0  # Reset on success
                     stats["completed"] += 1
                     stats["queries"].append(query)
                 else:
                     stats["failed"] += 1
+                    _consecutive_failures += 1
+                    # Enable slow_human mode after 2 consecutive failures
+                    if _consecutive_failures >= 2 and not self._slow_human_mode:
+                        self._slow_human_mode = True
+                        logger.warning(
+                            f"2+ consecutive search failures — activating slow_human mode (doubling delays)"
+                        )
 
                 # Clean up leftover tabs after each search
                 await close_other_tabs(page)
@@ -278,12 +306,14 @@ class Searcher:
                         logger.debug(f"Credit probe failed: {e}")
 
                 # ─── Variable delay between searches ─────
+                # Apply slow_human multiplier if active (doubles all delays)
+                slow_mult = 2.0 if self._slow_human_mode else 1.0
                 if i < count - 1:
                     if (i + 1) >= next_break_at:
                         await self._session_break(page)
                         next_break_at = (i + 1) + self._session_break_interval()
                     else:
-                        await self.humanizer.random_delay(delay_lo, delay_hi)
+                        await self.humanizer.random_delay(delay_lo * slow_mult, delay_hi * slow_mult)
 
                     # Occasionally simulate tab-switch
                     if random.random() < 0.08:
