@@ -699,6 +699,49 @@ tbody tr:hover td {
 }
 
 /* ── Log ── */
+.log-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border)
+}
+
+.log-tab {
+  padding: 6px 14px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all .15s;
+  white-space: nowrap
+}
+
+.log-tab:hover {
+  background: var(--surface-2);
+  color: var(--text-2)
+}
+
+.log-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(79, 126, 248, .4);
+  font-weight: 600
+}
+
+.log-panel {
+  display: none
+}
+
+.log-panel.active {
+  display: block
+}
+
 .log-toolbar {
   display: flex;
   align-items: center;

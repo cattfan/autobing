@@ -256,6 +256,9 @@
 
       <!-- ═══ Page: Log ═══ -->
       <div class="page" id="page-log">
+        <div class="log-tabs" id="logTabs">
+          <button class="log-tab active" data-log-target="__global__" onclick="switchLogTab('__global__',this)">📋 Tất cả</button>
+        </div>
         <div class="log-toolbar">
           <div class="log-filters">
             <button class="log-filter active" onclick="setLogFilter('all',this)">All</button>
@@ -266,8 +269,10 @@
           </div>
           <button onclick="clearLogs()" class="btn btn-ghost btn-sm">🗑 Xóa log</button>
         </div>
-        <div id="dashLogs" class="log-box">
-          <div class="empty-state">Chưa có hoạt động nào.</div>
+        <div id="logPanels">
+          <div class="log-box log-panel active" id="logPanel-__global__" data-log-key="__global__">
+            <div class="empty-state">Chưa có hoạt động nào.</div>
+          </div>
         </div>
       </div>
 
@@ -460,6 +465,9 @@
     const API = location.origin;
     let logIdx = 0, poll = null, delTarget = "", lastStatus = "idle", currentFilter = "all";
     let editingOldEmail = "";
+    let activeLogTab = "__global__";
+    const accLogIdx = {};  // per-account log index: {"yunat***": 0, ...}
+    let knownAccLogTabs = new Set(["__global__"]);
 
     // ═══ Navigation ═══
     document.querySelectorAll(".nav-item").forEach(n => {
@@ -541,15 +549,65 @@
         if (lastStatus === "running" && s.status !== "running") loadAccounts();
         lastStatus = s.status;
 
-        // Logs
+        // Logs — Global
         const lr = await apiJSON(`${API}/api/logs?since=${logIdx}`);
-        if (lr.logs && lr.logs.length) { logIdx += lr.logs.length; appendLogs(lr.logs) }
+        if (lr.logs && lr.logs.length) { logIdx += lr.logs.length; appendLogs(lr.logs, '__global__') }
+
+        // Logs — Per-account: discover new account tabs
+        try {
+          const accList = await apiJSON(`${API}/api/logs/accounts`);
+          if (accList.accounts) {
+            accList.accounts.forEach(acc => {
+              if (!knownAccLogTabs.has(acc)) {
+                knownAccLogTabs.add(acc);
+                accLogIdx[acc] = 0;
+                createAccountLogTab(acc);
+              }
+            });
+            // Fetch logs for each account
+            for (const acc of accList.accounts) {
+              const since = accLogIdx[acc] || 0;
+              const alr = await apiJSON(`${API}/api/logs/accounts?account=${encodeURIComponent(acc)}&since=${since}`);
+              if (alr.logs && alr.logs.length) {
+                accLogIdx[acc] = (accLogIdx[acc] || 0) + alr.logs.length;
+                appendLogs(alr.logs, acc);
+              }
+            }
+          }
+        } catch(e) {}
       } catch (e) { }
     }
 
-    // ═══ Logs ═══
-    function appendLogs(logs) {
-      const box = document.getElementById("dashLogs");
+    // ═══ Log Tab Management ═══
+    function createAccountLogTab(accKey) {
+      const tabBar = document.getElementById('logTabs');
+      const btn = document.createElement('button');
+      btn.className = 'log-tab';
+      btn.dataset.logTarget = accKey;
+      btn.textContent = `👤 ${accKey}`;
+      btn.onclick = () => switchLogTab(accKey, btn);
+      tabBar.appendChild(btn);
+
+      const panels = document.getElementById('logPanels');
+      const panel = document.createElement('div');
+      panel.className = 'log-box log-panel';
+      panel.id = `logPanel-${accKey}`;
+      panel.dataset.logKey = accKey;
+      panel.innerHTML = '<div class="empty-state">Đang chờ log...</div>';
+      panels.appendChild(panel);
+    }
+
+    function switchLogTab(key, btn) {
+      activeLogTab = key;
+      document.querySelectorAll('.log-tab').forEach(t => t.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      document.querySelectorAll('.log-panel').forEach(p => {
+        p.classList.toggle('active', p.dataset.logKey === key);
+      });
+    }
+    function appendLogs(logs, panelKey) {
+      panelKey = panelKey || '__global__';
+      const box = document.getElementById(`logPanel-${panelKey}`) || document.getElementById('logPanel-__global__');
       if (!box.querySelector(".log-line")) box.innerHTML = "";
       logs.forEach(l => {
         const r = document.createElement("div");
@@ -564,7 +622,11 @@
       });
       box.scrollTop = box.scrollHeight;
     }
-    function clearLogs() { logIdx = 0; document.getElementById("dashLogs").innerHTML = '<div class="empty-state">Đã xóa log.</div>' }
+    function clearLogs() {
+      logIdx = 0;
+      Object.keys(accLogIdx).forEach(k => accLogIdx[k] = 0);
+      document.querySelectorAll('.log-panel').forEach(p => p.innerHTML = '<div class="empty-state">Đã xóa log.</div>');
+    }
 
     // ═══ Per-account Table ═══
     function renderAccountsTable(accounts) {
@@ -814,7 +876,8 @@
         if (targetEmails && targetEmails.length > 0) payload.target_emails = targetEmails;
         await apiJSON(`${API}/api/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         logIdx = 0;
-        document.getElementById("dashLogs").innerHTML = '<div class="empty-state">Đang chờ log...</div>';
+        Object.keys(accLogIdx).forEach(k => accLogIdx[k] = 0);
+        document.querySelectorAll('.log-panel').forEach(p => p.innerHTML = '<div class="empty-state">Đang chờ log...</div>');
         toast(targetEmails ? `🚀 Bắt đầu: ${humanizeTask(t)} (${targetEmails.length} acc)` : `🚀 Bắt đầu: ${humanizeTask(t)}`);
         // Switch to controls page to see progress
         document.querySelector('[data-page="controls"]').click();

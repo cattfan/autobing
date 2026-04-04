@@ -54,6 +54,7 @@ state = {
     "progress": 0,
     "progress_total": 0,
     "logs": [],
+    "account_logs": {},        # Per-account logs: {"email5***": [{time, level, message}, ...]}
     "last_run": None,
     "accounts_count": 0,
     "total_points": 0,
@@ -557,6 +558,20 @@ def get_logs():
     return jsonify({"logs": state["logs"][since:]})
 
 
+@app.route("/api/logs/accounts", methods=["GET"])
+def get_account_logs():
+    """Get per-account log entries for dashboard tabs."""
+    account = request.args.get("account", "").strip()
+    since = request.args.get("since", 0, type=int)
+    with _state_lock:
+        if account:
+            logs = list(state["account_logs"].get(account, []))
+            return jsonify({"logs": logs[since:], "account": account})
+        # Return list of accounts that have logs
+        accounts_with_logs = list(state["account_logs"].keys())
+    return jsonify({"accounts": accounts_with_logs})
+
+
 async def _collect_final_verification(page, searcher, humanizer, settings) -> dict:
     """Capture the final Rewards state used for honest end-of-run reporting."""
     snapshot = {
@@ -824,9 +839,22 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
 
             # Override add_log to also write to per-account file
             _global_add_log = add_log
+            _acc_key = account_key  # capture for closure
 
-            def add_log(level: str, message: str, _h=_acc_log_handler):
+            def add_log(level: str, message: str, _h=_acc_log_handler, _k=_acc_key):
                 _global_add_log(level, message)
+                # Per-account in-memory log for dashboard
+                acc_entry = {
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "level": level,
+                    "message": message,
+                }
+                with _state_lock:
+                    if _k not in state["account_logs"]:
+                        state["account_logs"][_k] = []
+                    state["account_logs"][_k].append(acc_entry)
+                    if len(state["account_logs"][_k]) > LOG_MAX:
+                        state["account_logs"][_k] = state["account_logs"][_k][-LOG_MAX:]
                 if _h:
                     try:
                         record = logging.LogRecord(
