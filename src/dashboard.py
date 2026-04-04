@@ -806,6 +806,37 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
             gpm_api_url = settings.get("gpm_api_url", "http://127.0.0.1:9495").rstrip("/")
 
             account_key = email[:5] + "***"
+
+            # ── Per-account log file ──
+            _acc_log_handler = None
+            try:
+                acc_log_dir = DATA_DIR / "logs"
+                acc_log_dir.mkdir(parents=True, exist_ok=True)
+                safe_email = email.replace("@", "_at_").replace(".", "_")
+                acc_log_file = acc_log_dir / f"acc_{safe_email}_{datetime.now().strftime('%Y%m%d')}.log"
+                _acc_log_handler = logging.FileHandler(str(acc_log_file), encoding="utf-8")
+                _acc_log_handler.setLevel(logging.INFO)
+                _acc_log_handler.setFormatter(
+                    logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S")
+                )
+            except Exception:
+                _acc_log_handler = None
+
+            # Override add_log to also write to per-account file
+            _global_add_log = add_log
+
+            def add_log(level: str, message: str, _h=_acc_log_handler):
+                _global_add_log(level, message)
+                if _h:
+                    try:
+                        record = logging.LogRecord(
+                            name="AccLog", level=getattr(logging, level.upper(), logging.INFO),
+                            pathname="", lineno=0, msg=message, args=(), exc_info=None,
+                        )
+                        _h.emit(record)
+                    except Exception:
+                        pass
+
             searcher.set_account_context(email)
             session_proxy = get_proxy_for_session(account)
             storage_state_path = _storage_state_path(email)
@@ -1953,6 +1984,12 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                         add_log("info", f"Stopped GPM Profile {gpm_profile_id[:8]}")
                     except Exception as stop_e:
                         add_log("debug", f"Failed to stop GPM Profile: {stop_e}")
+                # Close per-account log handler
+                if _acc_log_handler:
+                    try:
+                        _acc_log_handler.close()
+                    except Exception:
+                        pass
 
 
     async def _safe_process(idx, acc):
