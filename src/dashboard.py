@@ -66,6 +66,10 @@ state = {
 LOG_MAX = 500
 KEEP_EXISTING_SECRET = "__KEEP_EXISTING_SECRET__"
 
+import contextvars
+_current_log_handler = contextvars.ContextVar("current_log_handler", default=None)
+_current_log_key = contextvars.ContextVar("current_log_key", default=None)
+
 # Lock bảo vệ global state dict — tránh race condition khi nhiều accounts chạy đồng thời
 _state_lock = threading.Lock()
 
@@ -81,6 +85,28 @@ def add_log(level: str, message: str):
         state["logs"].append(entry)
         if len(state["logs"]) > LOG_MAX:
             state["logs"] = state["logs"][-LOG_MAX:]
+            
+        # Per-account in-memory log for dashboard
+        _k = _current_log_key.get()
+        if _k:
+            if _k not in state["account_logs"]:
+                state["account_logs"][_k] = []
+            state["account_logs"][_k].append(entry)
+            if len(state["account_logs"][_k]) > LOG_MAX:
+                state["account_logs"][_k] = state["account_logs"][_k][-LOG_MAX:]
+
+    # Per-account file handler logging
+    _h = _current_log_handler.get()
+    if _h:
+        try:
+            record = logging.LogRecord(
+                name="AccLog", level=getattr(logging, level.upper(), logging.INFO),
+                pathname="", lineno=0, msg=message, args=(), exc_info=None,
+            )
+            _h.emit(record)
+        except Exception:
+            pass
+
     # Also write to file/console logger for debugging
     if level == "warning":
         logger.warning(message)
@@ -837,33 +863,9 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
             except Exception:
                 _acc_log_handler = None
 
-            # Override add_log to also write to per-account file
-            _global_add_log = add_log
-            _acc_key = account_key  # capture for closure
-
-            def add_log(level: str, message: str, _h=_acc_log_handler, _k=_acc_key):
-                _global_add_log(level, message)
-                # Per-account in-memory log for dashboard
-                acc_entry = {
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "level": level,
-                    "message": message,
-                }
-                with _state_lock:
-                    if _k not in state["account_logs"]:
-                        state["account_logs"][_k] = []
-                    state["account_logs"][_k].append(acc_entry)
-                    if len(state["account_logs"][_k]) > LOG_MAX:
-                        state["account_logs"][_k] = state["account_logs"][_k][-LOG_MAX:]
-                if _h:
-                    try:
-                        record = logging.LogRecord(
-                            name="AccLog", level=getattr(logging, level.upper(), logging.INFO),
-                            pathname="", lineno=0, msg=message, args=(), exc_info=None,
-                        )
-                        _h.emit(record)
-                    except Exception:
-                        pass
+            # Track per-account context implicitly for add_log
+            _current_log_key.set(account_key)
+            _current_log_handler.set(_acc_log_handler)
 
             searcher.set_account_context(email)
             session_proxy = get_proxy_for_session(account)
