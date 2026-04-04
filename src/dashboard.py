@@ -2010,6 +2010,10 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
             finally:
                 if gpm_enabled and gpm_profile_id:
                     try:
+                        # Grace period: allow Chromium time to flush cookies/localStorage to SQLite db
+                        # before GPM force-kills the process
+                        add_log("info", "Waiting 4s for browser profile data sync...")
+                        await asyncio.sleep(4)
                         _stop_gpm_profile(gpm_profile_id, gpm_api_url)
                         add_log("info", f"Stopped GPM Profile {gpm_profile_id[:8]}")
                     except Exception as stop_e:
