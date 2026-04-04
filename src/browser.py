@@ -292,12 +292,24 @@ class BrowserManager:
 
     async def start_connected_edge(self, cdp_url: str) -> None:
         """Attach to an existing Edge instance exposed via CDP."""
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
-        self._attached_via_cdp = True
-        self._preserve_browser_defaults = True
-        self._native_runtime_cdp_url = cdp_url
-        logger.info(f"Attached to existing Edge via CDP ({cdp_url})")
+        if not self.playwright:
+            self.playwright = await async_playwright().start()
+            
+        import asyncio
+        last_err = None
+        for attempt in range(10):
+            try:
+                self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
+                self._attached_via_cdp = True
+                self._preserve_browser_defaults = True
+                self._native_runtime_cdp_url = cdp_url
+                logger.info(f"Attached to existing Edge via CDP ({cdp_url})")
+                return
+            except Exception as e:
+                last_err = e
+                await asyncio.sleep(1.0)
+        
+        raise RuntimeError(f"Failed to connect to CDP {cdp_url} after 10 retries: {last_err}")
 
     async def start_native_edge_runtime(self, account_email: str) -> str:
         """Launch or attach to a dedicated Edge bot profile exposed via CDP."""

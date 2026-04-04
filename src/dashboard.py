@@ -2033,7 +2033,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
         except asyncio.TimeoutError:
             email = acc.get("email", f"acc_{idx}")
             _update_account_state(email, status="error", task="Timeout")
-            add_log("error", f"❌ {email}: Quá thời gian 20 phút, tự ngắt.")
+            add_log("error", f"❌ {email}: Quá thời gian 45 phút, tự ngắt.")
         except asyncio.CancelledError:
             pass
         except Exception as e:
