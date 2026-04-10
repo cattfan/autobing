@@ -35,8 +35,17 @@ Desktop.ini
 # Logs
 *.log
 
+# Local agent/runtime state
+.claude/
+.omc/
+.omx/
+vendor/
+config/accounts.json.enc.bak
+
 # Debug / test junk (prevent re-adding)
 test_*.py
+!tests/test_*.py
+!tests/test_rewards_trust.py
 capture_*.py
 fetch_*.py
 extract_*.py

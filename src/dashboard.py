@@ -10,6 +10,7 @@ import threading
 import asyncio
 import socket
 import time
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -23,8 +24,19 @@ from src.utils import (
     DATA_DIR,
     PROFILES_DIR,
     close_other_tabs,
+    emit_diagnostic_log,
     get_proxy_for_session,
     is_sensitive_setting,
+    mask_email,
+    summarize_search_status,
+)
+from src.runtime_identity import (
+    build_runtime_descriptor,
+    build_search_verification,
+    choose_search_verification_source,
+    describe_search_remaining_items,
+    invalidate_runtime_attachment,
+    merge_search_status,
 )
 from src.crypto import (
     load_encrypted_accounts,
@@ -36,7 +48,7 @@ from src.crypto import (
 from src.ai_agent import AIAgent
 from src.streaks import EdgeBrowsingStreak, TaskDetector
 from src.edge_streak_native import NativeEdgeStreak
-from src.universal_task import UniversalTaskScanner
+from src.universal_task import UniversalTaskScanner, get_deferred_offer_reason
 from src.google_sheets import GoogleSheetsLogger
 
 
@@ -61,6 +73,14 @@ state = {
     "master_password": "",      # No auth required
     # Per-account tracking (key = "email5***", value = per-account status)
     "accounts": {},
+    "ai": {
+        "active": False,
+        "last_update": "",
+        "last_event": "",
+        "task": "",
+        "model": "",
+        "last_level": "",
+    },
 }
 
 LOG_MAX = 500
@@ -72,6 +92,15 @@ _current_log_key = contextvars.ContextVar("current_log_key", default=None)
 
 # Lock bảo vệ global state dict — tránh race condition khi nhiều accounts chạy đồng thời
 _state_lock = threading.Lock()
+
+
+def _select_mobile_runtime_strategy(gpm_enabled: bool, gpm_mobile_profile_id: str | None) -> tuple[bool, str]:
+    """Decide whether the account can use same-account mobile GPM control."""
+    if not gpm_enabled:
+        return True, "gpm_mobile_disabled"
+    if not str(gpm_mobile_profile_id or "").strip():
+        return True, "missing_gpm_mobile_profile_id"
+    return False, "gpm_mobile_profile"
 
 
 def add_log(level: str, message: str):
@@ -94,6 +123,12 @@ def add_log(level: str, message: str):
             state["account_logs"][_k].append(entry)
             if len(state["account_logs"][_k]) > LOG_MAX:
                 state["account_logs"][_k] = state["account_logs"][_k][-LOG_MAX:]
+            if _k in state["accounts"]:
+                state["accounts"][_k]["last_log_time"] = entry["time"]
+                state["accounts"][_k]["last_message"] = message
+                state["accounts"][_k]["last_level"] = level
+                state["accounts"][_k]["log_count"] = len(state["account_logs"][_k])
+                state["accounts"][_k]["updated_at"] = datetime.now().isoformat(timespec="seconds")
 
     # Per-account file handler logging
     _h = _current_log_handler.get()
@@ -116,18 +151,401 @@ def add_log(level: str, message: str):
         logger.info(message)
 
 
+def _diag_log(settings: dict, message: str, *, level: str = "info", scope: str = "dashboard", **fields) -> None:
+    """Emit structured diagnostic log lines into the dashboard/global log stream."""
+    emit_diagnostic_log(
+        add_log,
+        settings,
+        message,
+        level=level,
+        scope=scope,
+        **fields,
+    )
+
+
 def _update_account_state(account_key: str, **kwargs) -> None:
     """Thread-safe update of per-account state within state['accounts']."""
     with _state_lock:
         if account_key not in state["accounts"]:
             state["accounts"][account_key] = {
+                "id": account_key,
+                "email": "",
+                "display_name": account_key,
                 "task": "",
                 "progress": 0,
                 "progress_total": 0,
                 "status": "pending",
                 "points": 0,
+                "last_message": "",
+                "last_level": "info",
+                "last_log_time": "",
+                "log_count": 0,
+                "updated_at": "",
             }
         state["accounts"][account_key].update(kwargs)
+        state["accounts"][account_key]["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+
+def _update_ai_state(**kwargs) -> None:
+    """Thread-safe dashboard snapshot for AI runtime activity."""
+    with _state_lock:
+        ai_state = state.setdefault("ai", {})
+        ai_state.update(kwargs)
+        ai_state["last_update"] = datetime.now().isoformat(timespec="seconds")
+
+
+def _normalize_account_status(status: str) -> str:
+    if status in {"running", "done", "error", "idle"}:
+        return status
+    return "idle"
+
+
+def _build_profile_views(accounts_snapshot: dict, account_logs_snapshot: dict) -> list[dict]:
+    """Build a stable profile list for the dashboard without breaking the legacy accounts map."""
+    profiles: list[dict] = []
+    for account_key, raw_state in accounts_snapshot.items():
+        item = dict(raw_state or {})
+        status = _normalize_account_status(item.get("status", "idle"))
+        progress = int(item.get("progress", 0) or 0)
+        progress_total = int(item.get("progress_total", 0) or 0)
+        points = int(item.get("points", 0) or 0)
+        logs = account_logs_snapshot.get(account_key, [])
+        label = item.get("display_name") or item.get("email") or account_key
+        profile_id = item.get("email") or item.get("id") or account_key
+        last_message = item.get("last_message") or (logs[-1]["message"] if logs else "")
+        last_level = item.get("last_level") or (logs[-1]["level"] if logs else "info")
+        last_log_time = item.get("last_log_time") or (logs[-1]["time"] if logs else "")
+
+        profiles.append({
+            "id": profile_id,
+            "key": account_key,
+            "email": item.get("email", ""),
+            "label": label,
+            "status": status,
+            "task": item.get("task", ""),
+            "progress": progress,
+            "progress_total": progress_total,
+            "progress_percent": (
+                100 if status == "done"
+                else max(0, min(100, round((progress / progress_total) * 100)))
+                if progress_total > 0 else 0
+            ),
+            "points": points,
+            "updated_at": item.get("updated_at", ""),
+            "last_log_time": last_log_time,
+            "last_message": last_message,
+            "last_level": last_level,
+            "has_logs": bool(logs),
+            "log_count": int(item.get("log_count", len(logs)) or 0),
+        })
+
+    def _profile_sort_key(profile: dict) -> tuple[int, str]:
+        order = {"running": 0, "error": 1, "done": 2, "idle": 3}
+        return order.get(profile["status"], 4), profile["label"].lower()
+
+    profiles.sort(key=_profile_sort_key)
+    return profiles
+
+
+def _build_profile_summary(profiles: list[dict]) -> dict:
+    summary = {
+        "total": len(profiles),
+        "running": 0,
+        "done": 0,
+        "error": 0,
+        "idle": 0,
+        "profiles_with_logs": 0,
+        "total_points": 0,
+    }
+    for profile in profiles:
+        bucket = profile["status"]
+        summary[bucket] = summary.get(bucket, 0) + 1
+        if profile.get("has_logs"):
+            summary["profiles_with_logs"] += 1
+        summary["total_points"] += int(profile.get("points", 0) or 0)
+    return summary
+
+
+def _mobile_credit_delta(before_status: dict, after_status: dict) -> int:
+    return max(
+        0,
+        int(after_status.get("mobile_current", 0))
+        - int(before_status.get("mobile_current", 0)),
+    )
+
+
+def _effective_max_threads(settings: dict) -> tuple[int, str]:
+    """Return the configured dashboard account concurrency."""
+    configured = max(1, int(settings.get("max_threads", 10) or 1))
+    return configured, ""
+
+
+async def _wait_for_mobile_credit_update(searcher, page, settings: dict, *, baseline_status: dict) -> dict:
+    """Poll mobile credits after a search pass so dashboard logs reflect real crediting."""
+    attempts = max(1, int(settings.get("mobile_credit_postcheck_attempts", 3)))
+    delay_seconds = max(2.0, float(settings.get("mobile_credit_postcheck_delay_seconds", 6)))
+    latest_status = baseline_status
+
+    for attempt in range(attempts):
+        await asyncio.sleep(delay_seconds)
+        latest_status = await _read_search_status_with_mobile_recheck(searcher, page, settings)
+        _diag_log(
+            settings,
+            "Polled mobile credits after search pass",
+            scope="mobile-postcheck",
+            attempt=attempt + 1,
+            attempts=attempts,
+            baseline=summarize_search_status(baseline_status),
+            latest=summarize_search_status(latest_status),
+        )
+        if _mobile_credit_delta(baseline_status, latest_status) > 0:
+            add_log(
+                "info",
+                f"📱 Mobile credits advanced after pass on attempt {attempt + 1}: "
+                f"{latest_status.get('mobile_current', 0)}/{latest_status.get('mobile_max', 0)}",
+            )
+            return latest_status
+
+    return latest_status
+
+
+def _describe_deferred_items(snapshot: dict) -> list[str]:
+    deferred_tasks = snapshot.get("deferred_tasks", [])
+    descriptions: list[str] = []
+    for item in deferred_tasks[:5]:
+        title = str(item.get("title", "") or "").strip()
+        reason = str(item.get("reason", "") or "").strip()
+        if not title:
+            continue
+        if reason == "multi_day_search_bar":
+            descriptions.append(f"Deferred: {title[:60]} (multi-day search-bar offer)")
+        elif reason == "external_referral":
+            descriptions.append(f"Deferred: {title[:60]} (requires friend referral activity)")
+        else:
+            descriptions.append(f"Deferred: {title[:60]}")
+    if len(deferred_tasks) > 5:
+        descriptions.append(f"{len(deferred_tasks) - 5} more deferred offer(s)")
+    return descriptions
+
+
+def _empty_search_status() -> dict:
+    return {
+        "pc_current": 0,
+        "pc_max": 0,
+        "mobile_current": 0,
+        "mobile_max": 0,
+        "edge_current": 0,
+        "edge_max": 0,
+        "total_points": 0,
+    }
+
+
+async def _read_search_status_for_runtime_descriptor(
+    settings: dict,
+    account: dict,
+    session_proxy,
+    login_mgr,
+    searcher,
+    storage_state_path: Path,
+    runtime_descriptor: dict | None,
+) -> tuple[dict, dict]:
+    """Read Rewards counters from the runtime family that originally performed the work."""
+    from src.browser import BrowserManager, load_storage_state_cookies
+
+    mode = str((runtime_descriptor or {}).get("mode", "desktop") or "desktop")
+    if not runtime_descriptor:
+        return _empty_search_status(), build_search_verification(
+            mode,
+            None,
+            verified=False,
+            reason="missing_runtime_descriptor",
+        )
+    if not runtime_descriptor.get("account_proven", False):
+        return _empty_search_status(), build_search_verification(
+            mode,
+            runtime_descriptor,
+            verified=False,
+            reason="runtime_account_unproven",
+        )
+
+    runtime_settings = dict(settings)
+    runtime_settings["use_stealth"] = False
+    browser_mgr = BrowserManager(runtime_settings)
+    browser_mgr.set_account(account["email"])
+    started_gpm_profile_id = ""
+    ctx = None
+    patchright_pw = None
+    patchright_browser = None
+
+    try:
+        family = str(runtime_descriptor.get("family", "") or "")
+        source_id = str(runtime_descriptor.get("source_id", "") or "")
+        runtime_cdp_url = str(runtime_descriptor.get("cdp_url", "") or "")
+        live_for_account_run = bool(runtime_descriptor.get("live_for_account_run", False))
+
+        if family in {"gpm_desktop", "gpm_mobile"}:
+            if live_for_account_run and runtime_cdp_url:
+                await browser_mgr.start_connected_edge(runtime_cdp_url)
+            else:
+                if not source_id:
+                    raise RuntimeError("missing_gpm_profile_id")
+                runtime_cdp_url = await _start_gpm_profile(
+                    source_id,
+                    settings.get("gpm_api_url", "http://127.0.0.1:9495").rstrip("/"),
+                )
+                started_gpm_profile_id = source_id
+                await browser_mgr.start_connected_edge(runtime_cdp_url)
+            ctx, page = await _open_account_context(
+                browser_mgr,
+                login_mgr,
+                account,
+                session_proxy,
+                mode,
+                storage_state_path,
+                attach_existing_edge=True,
+                attached_cdp_url=runtime_cdp_url,
+            )
+        elif family == "native_edge":
+            native_cdp = await browser_mgr.start_native_edge_runtime(account["email"])
+            ctx, page = await _open_account_context(
+                browser_mgr,
+                login_mgr,
+                account,
+                session_proxy,
+                mode,
+                storage_state_path,
+                attach_existing_edge=True,
+                attached_cdp_url=native_cdp,
+            )
+        elif family == "managed_edge":
+            await browser_mgr.start()
+            ctx, page = await _open_account_context(
+                browser_mgr,
+                login_mgr,
+                account,
+                session_proxy,
+                mode,
+                storage_state_path,
+                attach_existing_edge=False,
+            )
+        elif family == "patchright_mobile":
+            patchright_pw, patchright_browser, ctx, page = await browser_mgr.create_mobile_patchright(
+                load_storage_state_cookies(storage_state_path)
+            )
+            if not await login_mgr.is_logged_in(page):
+                page = await login_mgr.login(
+                    page,
+                    account["email"],
+                    account["password"],
+                    account.get("totp_secret"),
+                )
+                ctx = page.context
+        else:
+            raise RuntimeError(f"unsupported_runtime_family:{family or 'unknown'}")
+
+        if mode == "mobile":
+            await browser_mgr.toggle_mobile_emulation(page, enable=True)
+            await asyncio.sleep(1)
+
+        status = await _read_search_status_with_mobile_recheck(searcher, page, settings)
+        return status, build_search_verification(
+            mode,
+            runtime_descriptor,
+            verified=True,
+        )
+    except Exception as e:
+        return _empty_search_status(), build_search_verification(
+            mode,
+            runtime_descriptor,
+            verified=False,
+            reason=str(e),
+        )
+    finally:
+        try:
+            if ctx is not None:
+                await _persist_storage_state(ctx, storage_state_path)
+        except Exception:
+            pass
+        if patchright_browser is not None:
+            try:
+                await patchright_browser.close()
+            except Exception:
+                pass
+        if patchright_pw is not None:
+            try:
+                await patchright_pw.stop()
+            except Exception:
+                pass
+        try:
+            await browser_mgr.close()
+        except Exception:
+            pass
+        if started_gpm_profile_id:
+            try:
+                _stop_gpm_profile(
+                    started_gpm_profile_id,
+                    settings.get("gpm_api_url", "http://127.0.0.1:9495").rstrip("/"),
+                )
+            except Exception:
+                pass
+
+
+async def _collect_search_status_snapshot(
+    settings: dict,
+    account: dict,
+    session_proxy,
+    login_mgr,
+    searcher,
+    storage_state_path: Path,
+    *,
+    desktop_runtime: dict | None,
+    mobile_runtime: dict | None,
+) -> tuple[dict, dict]:
+    """Verify desktop/mobile counters using the runtime families that produced them."""
+    desktop_source = choose_search_verification_source(
+        "desktop",
+        desktop_runtime=desktop_runtime,
+        mobile_runtime=mobile_runtime,
+    )
+    mobile_source = choose_search_verification_source(
+        "mobile",
+        desktop_runtime=desktop_runtime,
+        mobile_runtime=mobile_runtime,
+    )
+
+    desktop_status, desktop_meta = await _read_search_status_for_runtime_descriptor(
+        settings,
+        account,
+        session_proxy,
+        login_mgr,
+        searcher,
+        storage_state_path,
+        desktop_source,
+    )
+    mobile_status, mobile_meta = await _read_search_status_for_runtime_descriptor(
+        settings,
+        account,
+        session_proxy,
+        login_mgr,
+        searcher,
+        storage_state_path,
+        mobile_source,
+    )
+
+    merged = merge_search_status(
+        desktop_status=desktop_status,
+        mobile_status=mobile_status,
+    )
+    return merged, {
+        "desktop": desktop_meta,
+        "mobile": mobile_meta,
+        "edge": build_search_verification(
+            "edge",
+            desktop_source,
+            verified=bool(desktop_meta.get("verified", False)),
+            reason=desktop_meta.get("reason", ""),
+        ),
+    }
 
 
 def _storage_state_path(email: str) -> Path:
@@ -182,6 +600,8 @@ async def _start_gpm_profile(gpm_profile_id: str, api_url: str) -> str:
             "Please start GPM Login before running the bot."
         )
     import httpx
+    import re
+    import subprocess
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(f"{api_url}/api/v1/profiles/start/{gpm_profile_id}")
         resp.raise_for_status()
@@ -189,6 +609,23 @@ async def _start_gpm_profile(gpm_profile_id: str, api_url: str) -> str:
         if data.get("success"):
             _gpm_available_cache[api_url] = True
             return f"http://127.0.0.1:{data['data']['remote_debugging_port']}"
+        
+        # If profile is already in use, GPM Login won't return the port via start API.
+        # We can extract the port by parsing the command line of running processes.
+        if "ProfileInUse" in data.get("message", ""):
+            try:
+                # Use powershell via subprocess to dump command lines of all processes
+                cmd = ['powershell', '-NoProfile', '-Command', 'Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine']
+                out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore')
+                for line in out.splitlines():
+                    if gpm_profile_id in line and "--remote-debugging-port=" in line:
+                        m = re.search(r"--remote-debugging-port=(\d+)", line)
+                        if m:
+                            _gpm_available_cache[api_url] = True
+                            return f"http://127.0.0.1:{m.group(1)}"
+            except Exception as subprocess_err:
+                pass
+                
         raise RuntimeError(data.get("message", "Unknown GPM API error"))
 
 
@@ -317,29 +754,95 @@ async def _open_account_context(
     return ctx, page
 
 
-# ─── Static Files ──────────────────────────────────────────────────────────
+async def _page_is_usable(page) -> bool:
+    """Best-effort health check before issuing a long search batch."""
+    if page is None:
+        return False
+    try:
+        is_closed = getattr(page, "is_closed", None)
+        if callable(is_closed) and is_closed():
+            return False
+    except Exception:
+        return False
+    try:
+        context = page.context
+    except Exception:
+        return False
+    try:
+        browser = getattr(context, "browser", None)
+        is_connected = getattr(browser, "is_connected", None)
+        if callable(is_connected) and not is_connected():
+            return False
+    except Exception:
+        return False
+    evaluate = getattr(page, "evaluate", None)
+    if callable(evaluate):
+        try:
+            await page.evaluate("() => 1")
+        except Exception:
+            return False
+    return True
 
-DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
 
+async def _ensure_usable_desktop_search_page(
+    settings: dict,
+    browser_mgr,
+    login_mgr,
+    account: dict,
+    session_proxy,
+    storage_state_path: Path,
+    desktop_runtime: dict | None,
+    ctx,
+    page,
+):
+    """Recover a dead desktop search page from the live runtime before search #1."""
+    if await _page_is_usable(page):
+        return ctx, page
 
-@app.route("/")
-@app.route("/index.html")
-def index():
-    return send_file(DASHBOARD_DIR / "index.html")
+    runtime_cdp_url = str((desktop_runtime or {}).get("cdp_url", "") or "")
+    live_for_account_run = bool((desktop_runtime or {}).get("live_for_account_run", False))
+    runtime_family = str((desktop_runtime or {}).get("family", "") or "")
+    masked_email = mask_email(account.get("email", ""))
 
+    if not (live_for_account_run and runtime_cdp_url):
+        raise RuntimeError(
+            "Desktop search page is no longer usable before search start and no live runtime is available for reacquire."
+        )
 
-@app.route("/assets/<path:filename>")
-def assets(filename):
-    return send_from_directory(str(DASHBOARD_DIR / "assets"), filename)
+    add_log("warning", "🖥️ Desktop page became unusable; reacquiring from live runtime...")
+    _diag_log(
+        settings,
+        "Reacquiring unusable desktop page from live runtime",
+        scope="desktop-reacquire",
+        account=masked_email,
+        runtime_family=runtime_family,
+        cdp_url=runtime_cdp_url,
+    )
 
+    try:
+        ctx, page = await _open_account_context(
+            browser_mgr,
+            login_mgr,
+            account,
+            session_proxy,
+            "desktop",
+            storage_state_path,
+            attach_existing_edge=True,
+            attached_cdp_url=runtime_cdp_url,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"Desktop search page is no longer usable before search start and could not be reacquired from {runtime_cdp_url}: {e}"
+        ) from e
 
-@app.route("/<path:filename>")
-def dashboard_file(filename):
-    """Serve top-level dashboard files such as favicon or direct index links."""
-    file_path = DASHBOARD_DIR / filename
-    if file_path.is_file():
-        return send_file(file_path)
-    return send_file(DASHBOARD_DIR / "index.html")
+    if not await _page_is_usable(page):
+        raise RuntimeError(
+            f"Desktop search page is no longer usable before search start and the live runtime {runtime_cdp_url} still returned an unusable page."
+        )
+
+    add_log("info", "🖥️ Reacquired desktop page from live runtime")
+    return ctx, page
+
 
 
 # ─── Auth ──────────────────────────────────────────────────────────────────
@@ -369,6 +872,7 @@ def get_accounts():
                 "has_totp": bool(a.get("totp_secret")),
                 "has_proxy": bool(a.get("proxy")),
                 "gpm_profile_id": a.get("gpm_profile_id", ""),
+                "gpm_mobile_profile_id": a.get("gpm_mobile_profile_id", ""),
                 "has_session": storage_state.exists(),
                 "session_updated": (
                     datetime.fromtimestamp(storage_state.stat().st_mtime).strftime("%H:%M:%S")
@@ -405,6 +909,7 @@ def add_account():
         "totp_secret": data.get("totp_secret", "").strip() or None,
         "proxy": data.get("proxy", "").strip() or None,
         "gpm_profile_id": data.get("gpm_profile_id", "").strip() or None,
+        "gpm_mobile_profile_id": data.get("gpm_mobile_profile_id", "").strip() or None,
     }
 
     try:
@@ -438,6 +943,47 @@ def add_account():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/accounts/import", methods=["POST"])
+def import_accounts():
+    """Import accounts from raw JSON payload."""
+    try:
+        data = request.json
+        if not data or not isinstance(data, list):
+            return jsonify({"error": "Invalid format, expected JSON array"}), 400
+        
+        accounts = load_encrypted_accounts(state["master_password"])
+        # Merge by email
+        existing_emails = {a["email"] for a in accounts}
+        imported_count = 0
+        for new_acc in data:
+            if "email" in new_acc and new_acc["email"] not in existing_emails:
+                accounts.append(new_acc)
+                existing_emails.add(new_acc["email"])
+                imported_count += 1
+            elif "email" in new_acc:
+                # update existing
+                for a in accounts:
+                    if a["email"] == new_acc["email"]:
+                        a.update(new_acc)
+                        imported_count += 1
+
+        save_encrypted_accounts(accounts, state["master_password"])
+        add_log("info", f"Successfully imported {imported_count} accounts")
+        return jsonify({"status": "ok", "message": f"Imported {imported_count} accounts"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/accounts/export", methods=["GET"])
+def export_accounts():
+    """Export all accounts as plain JSON."""
+    try:
+        accounts = load_encrypted_accounts(state["master_password"])
+        return jsonify(accounts)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/accounts/<email>", methods=["DELETE"])
 def delete_account(email):
     """Delete an account."""
@@ -453,15 +999,6 @@ def delete_account(email):
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/accounts/import", methods=["POST"])
-def import_accounts():
-    """Import from plaintext accounts.json."""
-
-    if migrate_to_encrypted(state["master_password"]):
-        return jsonify({"status": "ok", "message": "Accounts imported"})
-    return jsonify({"error": "No accounts.json found"}), 404
 
 
 # ─── Settings ──────────────────────────────────────────────────────────────
@@ -531,8 +1068,20 @@ def run_bot():
 
     state["status"] = "running"
     state["current_task"] = task
+    state["current_account"] = ""
+    state["progress"] = 0
+    state["progress_total"] = 0
+    state["total_points"] = 0
     state["logs"] = []
+    state["account_logs"] = {}
     state["accounts"] = {}  # Reset per-account tracking on new run
+    _update_ai_state(
+        active=False,
+        last_event="Đã khởi tạo phiên chạy mới.",
+        task=task,
+        model=load_settings().get("ai_model", ""),
+        last_level="info",
+    )
     
     if target_emails:
         add_log("info", f"Starting task: {task} (Targeted: {len(target_emails)})")
@@ -563,17 +1112,38 @@ def stop_bot():
 @app.route("/api/status", methods=["GET"])
 def get_status():
     """Get current bot status including per-account progress."""
+    settings = load_settings()
     with _state_lock:
         accounts_snapshot = dict(state["accounts"])
+        account_logs_snapshot = dict(state["account_logs"])
+        current_account = state["current_account"]
+        current_task = state["current_task"]
+        progress = state["progress"]
+        progress_total = state["progress_total"]
+        last_run = state["last_run"]
+        total_points = state["total_points"]
+        status_value = state["status"]
+        ai_snapshot = dict(state.get("ai", {}))
+    profiles = _build_profile_views(accounts_snapshot, account_logs_snapshot)
+    summary = _build_profile_summary(profiles)
+    current_profile = next((profile for profile in profiles if profile["key"] == current_account), None)
+    ai_snapshot["enabled"] = bool(settings.get("ai_enabled", False))
+    ai_snapshot["configured"] = bool(settings.get("ai_api_key") or settings.get("ai_api_url"))
+    ai_snapshot["model"] = ai_snapshot.get("model") or settings.get("ai_model", "")
     return jsonify({
-        "status": state["status"],
-        "current_account": state["current_account"],
-        "current_task": state["current_task"],
-        "progress": state["progress"],
-        "progress_total": state["progress_total"],
-        "last_run": state["last_run"],
-        "total_points": state["total_points"],
+        "status": status_value,
+        "current_account": current_account,
+        "current_task": current_task,
+        "progress": progress,
+        "progress_total": progress_total,
+        "last_run": last_run,
+        "total_points": total_points,
         "accounts": accounts_snapshot,
+        "profiles": profiles,
+        "summary": summary,
+        "current_profile": current_profile,
+        "ai": ai_snapshot,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
     })
 
 
@@ -598,15 +1168,379 @@ def get_account_logs():
     return jsonify({"accounts": accounts_with_logs})
 
 
-async def _collect_final_verification(page, searcher, humanizer, settings) -> dict:
+def _search_count_setting(settings: dict, mode: str) -> int:
+    """Return configured search count for a mode."""
+    key = "desktop_searches" if mode == "desktop" else f"{mode}_searches"
+    return int(settings.get(key, 30))
+
+
+def _mode_credit(status: dict, mode: str) -> tuple[int, int]:
+    """Return current/max points for one search mode."""
+    if mode == "desktop":
+        return status.get("pc_current", 0), status.get("pc_max", 0)
+    if mode == "mobile":
+        return status.get("mobile_current", 0), status.get("mobile_max", 0)
+    return status.get("edge_current", 0), status.get("edge_max", 0)
+
+
+def _needs_desktop_credit_recheck(status: dict, settings: dict) -> bool:
+    """Detect ambiguous desktop 0/0 reads that should not auto-trigger a full batch."""
+    desktop_searches = _search_count_setting(settings, "desktop")
+    current, maximum = _mode_credit(status, "desktop")
+    return desktop_searches > 0 and current == 0 and maximum == 0
+
+
+def _needs_mobile_credit_recheck(status: dict, settings: dict) -> bool:
+    """Detect ambiguous mobile 0/0 reads that should not auto-skip searches."""
+    mobile_searches = _search_count_setting(settings, "mobile")
+    current, maximum = _mode_credit(status, "mobile")
+    return mobile_searches > 0 and current == 0 and maximum == 0
+
+
+async def _read_search_status_with_mobile_recheck(searcher, page, settings: dict) -> dict:
+    """Retry Rewards counters when mobile credits come back as an ambiguous 0/0."""
+    status = await searcher.get_search_points_status(page)
+    _diag_log(
+        settings,
+        "Initial search-credit read",
+        scope="search-status",
+        status=summarize_search_status(status),
+        page_url=getattr(page, "url", ""),
+    )
+    if not _needs_mobile_credit_recheck(status, settings):
+        return status
+
+    retries = max(1, int(settings.get("mobile_credit_recheck_attempts", 2)))
+    delay_seconds = max(1.0, float(settings.get("mobile_credit_recheck_delay_seconds", 3)))
+
+    add_log("info", "📱 Mobile credits returned 0/0; rechecking before skip.")
+    for attempt in range(retries):
+        await asyncio.sleep(delay_seconds)
+        status = await searcher.get_search_points_status(page)
+        _diag_log(
+            settings,
+            "Mobile credit recheck attempt finished",
+            scope="search-status",
+            attempt=attempt + 1,
+            retries=retries,
+            status=summarize_search_status(status),
+        )
+        if not _needs_mobile_credit_recheck(status, settings):
+            add_log(
+                "info",
+                f"📱 Mobile credit recheck resolved on attempt {attempt + 1}: "
+                f"{status.get('mobile_current', 0)}/{status.get('mobile_max', 0)}",
+            )
+            break
+
+    return status
+
+
+async def _probe_search_status_in_mode(
+    settings: dict,
+    account: dict,
+    session_proxy,
+    login_mgr,
+    searcher,
+    storage_state_path: Path,
+    *,
+    mode: str,
+) -> dict:
+    """Read Rewards counters in a dedicated browser mode/runtime."""
+    from src.browser import BrowserManager
+
+    runtime_settings = dict(settings)
+    runtime_settings["use_stealth"] = False
+    runtime_settings["headless"] = True
+    browser_mgr = BrowserManager(runtime_settings)
+    browser_mgr.set_account(account["email"])
+    masked_email = mask_email(account.get("email", ""))
+
+    try:
+        _diag_log(
+            settings,
+            "Opening dedicated probe runtime",
+            scope="search-probe",
+            account=masked_email,
+            mode=mode,
+            has_storage_state=storage_state_path.exists(),
+            proxy=bool(session_proxy),
+        )
+        await browser_mgr.start()
+        ctx, page = await _open_account_context(
+            browser_mgr,
+            login_mgr,
+            account,
+            session_proxy,
+            mode,
+            storage_state_path,
+            use_persistent_profile=False,
+        )
+        if mode == "mobile":
+            try:
+                await browser_mgr.toggle_mobile_emulation(page, enable=True)
+                await asyncio.sleep(1)
+                _diag_log(
+                    settings,
+                    "Mobile emulation enabled for probe",
+                    scope="search-probe",
+                    account=masked_email,
+                )
+            except Exception as e:
+                add_log("warning", f"📱 Mobile probe emulation activation failed: {e}")
+        status = await _read_search_status_with_mobile_recheck(searcher, page, settings)
+        _diag_log(
+            settings,
+            "Probe runtime returned search status",
+            scope="search-probe",
+            account=masked_email,
+            mode=mode,
+            status=summarize_search_status(status),
+        )
+        await _persist_storage_state(ctx, storage_state_path)
+        return status
+    finally:
+        try:
+            await browser_mgr.close()
+        except Exception:
+            pass
+
+
+async def _resolve_mobile_search_requirement(
+    settings: dict,
+    account: dict,
+    session_proxy,
+    login_mgr,
+    searcher,
+    storage_state_path: Path,
+    baseline_status: dict,
+) -> dict:
+    """Resolve ambiguous mobile 0/0 credits before deciding to skip mobile searches."""
+    if not _needs_mobile_credit_recheck(baseline_status, settings):
+        return baseline_status
+
+    _diag_log(
+        settings,
+        "Resolving ambiguous mobile credits",
+        scope="mobile-resolution",
+        account=mask_email(account.get("email", "")),
+        baseline=summarize_search_status(baseline_status),
+    )
+    add_log("info", "📱 Mobile credits ambiguous on desktop session; probing mobile runtime...")
+    try:
+        probed_status = await _probe_search_status_in_mode(
+            settings,
+            account,
+            session_proxy,
+            login_mgr,
+            searcher,
+            storage_state_path,
+            mode="mobile",
+        )
+    except Exception as e:
+        add_log("warning", f"📱 Mobile probe failed: {e}")
+        return baseline_status
+
+    if _needs_mobile_credit_recheck(probed_status, settings):
+        add_log("warning", "📱 Mobile probe still returned 0/0; will not auto-skip mobile searches.")
+        _diag_log(
+            settings,
+            "Mobile probe remained ambiguous",
+            scope="mobile-resolution",
+            account=mask_email(account.get("email", "")),
+            probed=summarize_search_status(probed_status),
+        )
+        return baseline_status
+
+    merged = dict(baseline_status)
+    merged["mobile_current"] = probed_status.get("mobile_current", 0)
+    merged["mobile_max"] = probed_status.get("mobile_max", 0)
+    if probed_status.get("total_points", 0) > 0:
+        merged["total_points"] = probed_status.get("total_points", 0)
+    add_log(
+        "info",
+        f"📱 Mobile runtime probe resolved credits: "
+        f"{merged.get('mobile_current', 0)}/{merged.get('mobile_max', 0)}",
+    )
+    _diag_log(
+        settings,
+        "Mobile credits resolved after probe merge",
+        scope="mobile-resolution",
+        account=mask_email(account.get("email", "")),
+        merged=summarize_search_status(merged),
+    )
+    return merged
+
+
+async def _resolve_desktop_search_requirement(
+    settings: dict,
+    account: dict,
+    session_proxy,
+    login_mgr,
+    searcher,
+    storage_state_path: Path,
+    baseline_status: dict,
+    desktop_runtime: dict | None,
+) -> dict:
+    """Resolve ambiguous desktop 0/0 credits before deciding to run a fallback batch."""
+    if not _needs_desktop_credit_recheck(baseline_status, settings):
+        return baseline_status
+
+    masked_email = mask_email(account.get("email", ""))
+    runtime_family = str((desktop_runtime or {}).get("family", "") or "")
+    runtime_is_live = bool((desktop_runtime or {}).get("live_for_account_run", False))
+    if runtime_family == "gpm_desktop" and runtime_is_live:
+        add_log(
+            "warning",
+            "🖥️ Desktop credits are ambiguous on the live GPM runtime; skipping secondary probe and using fallback search planning.",
+        )
+        _diag_log(
+            settings,
+            "Skipped secondary desktop probe for live GPM runtime",
+            scope="desktop-resolution",
+            account=masked_email,
+            baseline=summarize_search_status(baseline_status),
+            runtime_family=runtime_family,
+        )
+        return baseline_status
+
+    _diag_log(
+        settings,
+        "Resolving ambiguous desktop credits",
+        scope="desktop-resolution",
+        account=masked_email,
+        baseline=summarize_search_status(baseline_status),
+        runtime_family=runtime_family,
+    )
+    add_log("info", "🖥️ Desktop credits ambiguous on current session; probing original desktop runtime...")
+    try:
+        probed_status, verification = await _read_search_status_for_runtime_descriptor(
+            settings,
+            account,
+            session_proxy,
+            login_mgr,
+            searcher,
+            storage_state_path,
+            desktop_runtime,
+        )
+    except Exception as e:
+        add_log("warning", f"🖥️ Desktop probe failed: {e}")
+        return baseline_status
+
+    if not verification.get("verified", False):
+        _diag_log(
+            settings,
+            "Desktop probe could not verify original runtime",
+            scope="desktop-resolution",
+            account=masked_email,
+            reason=verification.get("reason", ""),
+        )
+        return baseline_status
+
+    if _needs_desktop_credit_recheck(probed_status, settings):
+        add_log("warning", "🖥️ Desktop probe still returned 0/0; will not auto-skip desktop searches.")
+        _diag_log(
+            settings,
+            "Desktop probe remained ambiguous",
+            scope="desktop-resolution",
+            account=masked_email,
+            probed=summarize_search_status(probed_status),
+        )
+        return baseline_status
+
+    merged = dict(baseline_status)
+    merged["pc_current"] = probed_status.get("pc_current", 0)
+    merged["pc_max"] = probed_status.get("pc_max", 0)
+    merged["edge_current"] = probed_status.get("edge_current", merged.get("edge_current", 0))
+    merged["edge_max"] = probed_status.get("edge_max", merged.get("edge_max", 0))
+    if probed_status.get("total_points", 0) > 0:
+        merged["total_points"] = probed_status.get("total_points", 0)
+    add_log(
+        "info",
+        f"🖥️ Desktop runtime probe resolved credits: "
+        f"{merged.get('pc_current', 0)}/{merged.get('pc_max', 0)}",
+    )
+    _diag_log(
+        settings,
+        "Desktop credits resolved after probe merge",
+        scope="desktop-resolution",
+        account=masked_email,
+        merged=summarize_search_status(merged),
+    )
+    return merged
+
+
+def _normalize_reward_title(value: str) -> str:
+    normalized = "".join(
+        ch.lower() if ch.isalnum() or ch.isspace() else " "
+        for ch in (value or "").replace("\u200b", " ").replace("\xa0", " ")
+    )
+    return " ".join(normalized.split())
+
+
+def _reconcile_verification_with_session_proof(snapshot: dict, session_proofs: dict | None = None) -> dict:
+    """Apply run-local Daily Set proof when final APIs lag behind observed completion."""
+    if not session_proofs or not session_proofs.get("daily_set_complete", False):
+        return snapshot
+
+    task_overview = snapshot.setdefault("task_overview", {})
+    daily_overview = task_overview.setdefault("daily_set", {})
+    daily_total = int(daily_overview.get("total", 0))
+    if daily_total > 0:
+        daily_overview["completed"] = daily_total
+
+    category_status = snapshot.setdefault("category_status", {})
+    daily_category = category_status.setdefault("daily_set", {"completed": 0, "total": daily_total})
+    daily_category_total = int(daily_category.get("total", 0))
+    if daily_category_total > 0:
+        daily_category["completed"] = daily_category_total
+
+    stale_title_set = {
+        _normalize_reward_title(title)
+        for title in session_proofs.get("daily_set_titles", [])
+        if title
+    }
+    if stale_title_set:
+        snapshot["pending_tasks"] = [
+            title
+            for title in snapshot.get("pending_tasks", [])
+            if _normalize_reward_title(title) not in stale_title_set
+        ]
+
+    pending_by_category = snapshot.setdefault("pending_by_category", {})
+    pending_by_category["daily_set"] = []
+    return snapshot
+
+
+async def _collect_final_verification(
+    page,
+    searcher,
+    humanizer,
+    settings,
+    *,
+    search_status_override: dict | None = None,
+    search_verification_override: dict | None = None,
+) -> dict:
     """Capture the final Rewards state used for honest end-of-run reporting."""
     snapshot = {
         "search_status": {},
         "task_overview": {},
+        "category_status": {},
         "pending_tasks": [],
+        "pending_by_category": {},
+        "deferred_tasks": [],
     }
 
-    snapshot["search_status"] = await searcher.get_search_points_status(page)
+    if search_status_override is not None:
+        snapshot["search_status"] = dict(search_status_override)
+    else:
+        snapshot["search_status"] = await _read_search_status_with_mobile_recheck(
+            searcher,
+            page,
+            settings,
+        )
+    if search_verification_override is not None:
+        snapshot["search_verification"] = dict(search_verification_override)
     snapshot["task_overview"] = await TaskDetector().get_all_tasks(page)
 
     try:
@@ -617,39 +1551,51 @@ async def _collect_final_verification(page, searcher, humanizer, settings) -> di
         tasks = await scanner._fetch_all_tasks(page)
         seen_titles = set()
         for reward_task in tasks:
-            if reward_task.is_complete or reward_task.is_locked:
-                return
+            category = reward_task.category or "unknown"
+            category_status = snapshot["category_status"].setdefault(
+                category,
+                {"completed": 0, "total": 0},
+            )
+            category_status["total"] += 1
+            if reward_task.is_complete:
+                category_status["completed"] += 1
+                continue
+            if reward_task.is_locked:
+                continue
+            deferred_reason = get_deferred_offer_reason(reward_task)
+            if deferred_reason:
+                snapshot["deferred_tasks"].append({
+                    "title": (reward_task.title or reward_task.id or reward_task.category).strip(),
+                    "reason": deferred_reason,
+                    "category": category,
+                })
+                continue
             title = (reward_task.title or reward_task.id or reward_task.category).strip()
             if not title or title in seen_titles:
-                return
+                continue
             seen_titles.add(title)
             snapshot["pending_tasks"].append(title)
+            snapshot["pending_by_category"].setdefault(category, []).append(title)
     except Exception as e:
         logger.debug(f"Final task verification scan failed: {e}")
+
+    _diag_log(
+        settings,
+        "Final verification snapshot collected",
+        scope="final-verification",
+        search_status=summarize_search_status(snapshot["search_status"]),
+        categories=snapshot.get("category_status", {}),
+        pending_count=len(snapshot.get("pending_tasks", [])),
+        deferred_count=len(snapshot.get("deferred_tasks", [])),
+    )
 
     return snapshot
 
 
 def _describe_remaining_items(snapshot: dict) -> list[str]:
     """Flatten the final verification payload into human-readable remaining work."""
-    remaining = []
-    search_status = snapshot.get("search_status", {})
+    remaining = describe_search_remaining_items(snapshot)
     task_overview = snapshot.get("task_overview", {})
-
-    pc_current = search_status.get("pc_current", 0)
-    pc_max = search_status.get("pc_max", 0)
-    if pc_max > 0 and pc_current < pc_max:
-        remaining.append(f"Desktop {pc_current}/{pc_max}")
-
-    mobile_current = search_status.get("mobile_current", 0)
-    mobile_max = search_status.get("mobile_max", 0)
-    if mobile_max > 0 and mobile_current < mobile_max:
-        remaining.append(f"Mobile {mobile_current}/{mobile_max}")
-
-    edge_current = search_status.get("edge_current", 0)
-    edge_max = search_status.get("edge_max", 0)
-    if edge_max > 0 and edge_current < edge_max:
-        remaining.append(f"Edge Search {edge_current}/{edge_max}")
 
     daily_set = task_overview.get("daily_set", {})
     daily_done = daily_set.get("completed", 0)
@@ -785,6 +1731,13 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
     from src.manual_captcha import ManualCaptchaHandler
 
     settings = load_settings()
+    _update_ai_state(
+        active=False,
+        last_event="AI chưa được gọi trong phiên này.",
+        task="",
+        model=settings.get("ai_model", ""),
+        last_level="info",
+    )
     accounts = load_encrypted_accounts(password)
     if target_emails:
         accounts = [a for a in accounts if a["email"] in target_emails]
@@ -796,12 +1749,37 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
 
     overall_complete = True
 
-    max_threads = int(settings.get('max_threads', 10))
+    max_threads, max_threads_reason = _effective_max_threads(settings)
+    if max_threads_reason:
+        add_log(
+            "info",
+            f"🧵 Effective max_threads={max_threads} — {max_threads_reason}",
+        )
+        _diag_log(
+            settings,
+            "Adjusted effective account concurrency",
+            scope="orchestration",
+            configured_max_threads=int(settings.get("max_threads", 10) or 1),
+            effective_max_threads=max_threads,
+            reason=max_threads_reason,
+        )
     semaphore = asyncio.Semaphore(max_threads)
+    
+    # Track locks per profile ID to prevent overlapping runs on the same browser instance
+    _profile_locks = {}
 
     async def _process_single_account(idx, account):
         nonlocal overall_complete
-        async with semaphore:
+        
+        email = account["email"]
+        gpm_profile_id = account.get("gpm_profile_id")
+        
+        # Determine unique profile identifier for locking
+        profile_key = gpm_profile_id if (settings.get("gpm_integration_enabled") and gpm_profile_id) else f"native_{email}"
+        if profile_key not in _profile_locks:
+            _profile_locks[profile_key] = asyncio.Lock()
+
+        async with semaphore, _profile_locks[profile_key]:
             # Mỗi account có TrendsManager riêng để tránh _used_queries collision
             # khi nhiều accounts chạy đồng thời (shared set gây query trùng/bỏ sót)
             trends = TrendsManager()
@@ -816,6 +1794,14 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                 notifier=notifier,
                 on_log=add_log,
             )
+            def _handle_ai_event(level: str, message: str, meta: dict) -> None:
+                _update_ai_state(
+                    active=bool(meta.get("active", False)),
+                    last_event=message,
+                    task=meta.get("task", ""),
+                    model=meta.get("model", settings.get("ai_model", "")),
+                    last_level=level,
+                )
             login_mgr = LoginManager(humanizer, challenge_handler=challenge_handler)
             searcher = Searcher(
                 humanizer,
@@ -841,8 +1827,6 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                     # Stagger concurrent accounts slightly
                     await asyncio.sleep(idx * 2)
 
-            email = account["email"]
-            gpm_profile_id = account.get("gpm_profile_id")
             gpm_enabled = settings.get("gpm_integration_enabled", False)
             gpm_api_url = settings.get("gpm_api_url", "http://127.0.0.1:9495").rstrip("/")
 
@@ -871,13 +1855,36 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
             session_proxy = get_proxy_for_session(account)
             storage_state_path = _storage_state_path(email)
             state["current_account"] = account_key
-            _update_account_state(account_key, status="running", task="Starting")
+            _update_account_state(
+                account_key,
+                id=email,
+                email=email,
+                display_name=account_key,
+                status="running",
+                task="Starting",
+            )
             add_log("info", f"│││ Account {idx + 1}/{len(accounts)}: {account_key} │││")
+            _diag_log(
+                settings,
+                "Starting account run",
+                scope="account",
+                account=mask_email(email),
+                index=idx + 1,
+                total_accounts=len(accounts),
+                has_proxy=bool(session_proxy),
+                has_storage_state=storage_state_path.exists(),
+                task=task,
+                gpm_enabled=bool(gpm_enabled),
+                diagnostic_logging=bool(settings.get("diagnostic_logging", True)),
+            )
             account_complete = True
 
             try:
                 attach_runtime = False
                 cdp_url = ""
+                session_proofs: dict = {}
+                desktop_runtime: dict | None = None
+                mobile_runtime: dict | None = None
 
                 # Desktop session / session bootstrap / activities
 
@@ -901,6 +1908,13 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                 try:
                                     cdp_url = await _start_gpm_profile(gpm_profile_id, gpm_api_url)
                                     attach_runtime = True
+                                    desktop_runtime = build_runtime_descriptor(
+                                        "gpm_desktop",
+                                        gpm_profile_id,
+                                        "desktop",
+                                        cdp_url=cdp_url,
+                                        live_for_account_run=True,
+                                    )
                                     add_log("info", f"GPM Profile started via {cdp_url}")
                                 except Exception as e:
                                     add_log("warning", f"GPM start failed: {e}. Falling back to default tools.")
@@ -909,6 +1923,13 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                 try:
                                     edge_streak_cdp_url = cdp_url
                                     await bm3.start_connected_edge(edge_streak_cdp_url)
+                                    desktop_runtime = build_runtime_descriptor(
+                                        "gpm_desktop",
+                                        gpm_profile_id,
+                                        "desktop",
+                                        cdp_url=edge_streak_cdp_url,
+                                        live_for_account_run=True,
+                                    )
                                     edge_streak_native = True
                                 except Exception as e:
                                     add_log("warning", f"Connecting to GPM Edge failed: {e}")
@@ -1314,6 +2335,13 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             try:
                                 cdp_url = await _start_gpm_profile(gpm_profile_id, gpm_api_url)
                                 attach_runtime = True
+                                desktop_runtime = build_runtime_descriptor(
+                                    "gpm_desktop",
+                                    gpm_profile_id,
+                                    "desktop",
+                                    cdp_url=cdp_url,
+                                    live_for_account_run=True,
+                                )
                                 add_log("info", f"GPM Profile started via {cdp_url}")
                             except Exception as e:
                                 add_log("warning", f"GPM start failed: {e}. Falling back to default tools.")
@@ -1321,6 +2349,13 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                         if attach_runtime and cdp_url:
                             try:
                                 await bm.start_connected_edge(cdp_url)
+                                desktop_runtime = build_runtime_descriptor(
+                                    "gpm_desktop",
+                                    gpm_profile_id,
+                                    "desktop",
+                                    cdp_url=cdp_url,
+                                    live_for_account_run=True,
+                                )
                             except Exception as e:
                                 add_log("warning", f"Failed to attach to re-used GPM profile: {e}")
 
@@ -1331,6 +2366,14 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             await bm.start_connected_edge(cdp_url)
                             add_log("info", "Attached to existing Edge debug session")
                             attach_runtime = True
+                            desktop_runtime = build_runtime_descriptor(
+                                "attached_edge",
+                                cdp_url,
+                                "desktop",
+                                account_proven=False,
+                                cdp_url=cdp_url,
+                                live_for_account_run=True,
+                            )
                         except Exception as attach_error:
                             add_log(
                                 "warning",
@@ -1341,6 +2384,13 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             cdp_url = await bm.start_native_edge_runtime(email)
                             add_log("info", f"Using dedicated native Edge runtime ({cdp_url})")
                             attach_runtime = True
+                            desktop_runtime = build_runtime_descriptor(
+                                "native_edge",
+                                cdp_url,
+                                "desktop",
+                                cdp_url=cdp_url,
+                                live_for_account_run=True,
+                            )
                         except Exception as native_error:
                             add_log(
                                 "warning",
@@ -1348,6 +2398,11 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             )
                     if not attach_runtime:
                         await bm.start()
+                        desktop_runtime = build_runtime_descriptor(
+                            "managed_edge",
+                            email,
+                            "desktop",
+                        )
                     ctx, page = await _open_account_context(
                         bm,
                         login_mgr,
@@ -1381,7 +2436,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                     if task in ("all", "daily", "punch", "promos"):
                         state["current_task"] = "All Tasks (Smart Scanner)"
                         _update_account_state(account_key, task="Tasks", progress=0)
-                        ai = AIAgent(settings, humanizer=humanizer)
+                        ai = AIAgent(settings, on_event=_handle_ai_event, humanizer=humanizer)
                         add_log("info", "🧠 Smart Task Scanner starting...")
                         if ai.enabled:
                             add_log("info", "🤖 AI Agent enabled for complex tasks")
@@ -1396,6 +2451,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                         scan_result = await scanner.scan_and_complete(
                             page, account_email=email,
                         )
+                        session_proofs = dict(scan_result.get("session_proofs", {}))
                         add_log("info",
                                 f"🧠 Smart Scanner: {scan_result['completed']}/{scan_result['total']} completed, "
                                 f"{scan_result['skipped_locked']} locked, {scan_result['failed']} failed")
@@ -1405,7 +2461,30 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                     if task in ("all", "searches"):
                         # ── Check current progress first ──
                         add_log("info", "🔌 Checking search credits...")
-                        status_before = await searcher.get_search_points_status(page)
+                        status_before = await _read_search_status_with_mobile_recheck(
+                            searcher,
+                            page,
+                            settings,
+                        )
+                        status_before = await _resolve_mobile_search_requirement(
+                            settings,
+                            account,
+                            session_proxy,
+                            login_mgr,
+                            searcher,
+                            storage_state_path,
+                            status_before,
+                        )
+                        status_before = await _resolve_desktop_search_requirement(
+                            settings,
+                            account,
+                            session_proxy,
+                            login_mgr,
+                            searcher,
+                            storage_state_path,
+                            status_before,
+                            desktop_runtime,
+                        )
 
                         # Desktop searches (API returns points, 3 points per search)
                         pc_done = status_before.get("pc_current", 0)
@@ -1413,8 +2492,12 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                         remaining_points = max(0, pc_max - pc_done)
                         # Convert points to search count (3 points per search)
                         remaining_desktop = (remaining_points + 2) // 3  # ceil division
-                        if pc_max == 0 and status_before.get("mobile_max", 0) == 0:
+                        
+                        desktop_status_ambiguous = _needs_desktop_credit_recheck(status_before, settings)
+                        # If counters are still ambiguous after a family-aware probe, use the fallback batch.
+                        if desktop_status_ambiguous:
                             remaining_desktop = settings.get("desktop_searches", 30)
+                            add_log("info", f"🖥️ Desktop — API missing counters after probe. Probing ({remaining_desktop} searches)")
 
                         if remaining_desktop > 0:
                             state["current_task"] = "Desktop Searches"
@@ -1431,6 +2514,17 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                     add_log("info", f"Desktop {c}/{t}: {q[:30]}")
 
                             searcher.on_progress = on_desktop
+                            ctx, page = await _ensure_usable_desktop_search_page(
+                                settings,
+                                bm,
+                                login_mgr,
+                                account,
+                                session_proxy,
+                                storage_state_path,
+                                desktop_runtime,
+                                ctx,
+                                page,
+                            )
                             desktop_stats = await searcher.run_searches(page, remaining_desktop, "desktop")
                             if desktop_stats.get("fatal_error"):
                                 raise RuntimeError(desktop_stats["fatal_error"])
@@ -1450,417 +2544,369 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
 
                     await _persist_storage_state(ctx, storage_state_path)
 
-                # ══ Mobile searches — direct CDP device emulation ══
-                # Replicates exactly what the RSA extension does internally:
-                # Apply device emulation via CDP → search normally → remove emulation
+                # ══ Mobile searches — separate GPM Android profile ══
+                # Instead of CDP device emulation on the desktop profile,
+                # we use a dedicated GPM Android profile for mobile searches.
                 if task in ("all", "searches"):
-                    # Auto-calculate from API (like desktop does on line 706-712)
                     mob_done = status_before.get("mobile_current", 0)
                     mob_max = status_before.get("mobile_max", 0)
+                    mobile_status_ambiguous = _needs_mobile_credit_recheck(status_before, settings)
                     mob_remaining_pts = max(0, mob_max - mob_done)
-                    mob_searches = (mob_remaining_pts + 2) // 3  # ceil division (3 pts per search)
-                    if mob_max == 0 and pc_max == 0:
-                        # Only fallback if both are 0 (API failure). If pc_max > 0, it means it's a Level 1 account.
-                        mob_searches = settings.get("mobile_searches", 20)
-                    elif mob_max == 0:
-                        mob_searches = 0
+                    if mobile_status_ambiguous:
+                        mob_searches = _search_count_setting(settings, "mobile")
+                        add_log(
+                            "info",
+                            "📱 Mobile credits remain ambiguous after probe; "
+                            f"running configured batch ({mob_searches} searches) instead of auto-skipping.",
+                        )
+                    else:
+                        mob_searches = (mob_remaining_pts + 2) // 3
+                    _diag_log(
+                        settings,
+                        "Resolved mobile search plan",
+                        scope="mobile-plan",
+                        account=mask_email(email),
+                        ambiguous=mobile_status_ambiguous,
+                        remaining_points=mob_remaining_pts,
+                        planned_searches=mob_searches,
+                        baseline=summarize_search_status(status_before),
+                    )
 
+                    gpm_mobile_id = account.get("gpm_mobile_profile_id")
+                    fallback_to_native_mobile, mobile_runtime_strategy = _select_mobile_runtime_strategy(
+                        gpm_enabled,
+                        gpm_mobile_id,
+                    )
+                    if fallback_to_native_mobile:
+                        if mobile_runtime_strategy == "missing_gpm_mobile_profile_id":
+                            add_log(
+                                "warning",
+                                "📱 Mobile GPM profile is not configured for this account; "
+                                "using native mobile fallback, so same-account GPM control is unavailable.",
+                            )
+                        else:
+                            add_log(
+                                "info",
+                                "📱 Mobile GPM integration is disabled; using native mobile fallback.",
+                            )
+                        _diag_log(
+                            settings,
+                            "Selected native mobile fallback runtime",
+                            scope="mobile-runtime-selection",
+                            account=mask_email(email),
+                            strategy=mobile_runtime_strategy,
+                            gpm_enabled=gpm_enabled,
+                            has_gpm_mobile_profile=bool(str(gpm_mobile_id or "").strip()),
+                        )
+                    else:
+                        _diag_log(
+                            settings,
+                            "Selected mobile GPM runtime",
+                            scope="mobile-runtime-selection",
+                            account=mask_email(email),
+                            strategy=mobile_runtime_strategy,
+                            gpm_enabled=gpm_enabled,
+                            has_gpm_mobile_profile=True,
+                        )
+                    
                     if mob_searches <= 0:
                         add_log("info", f"⏩ Mobile searches already complete ({mob_done}/{mob_max})")
                     else:
                         add_log("info", f"📱 Mobile — {mob_done}/{mob_max} pts ({mob_searches} searches needed)")
 
-                        cdp_client = None
+                        active_mobile_page = None
+                        ctx_mob = None
+                        bm_mobile = None
+                        patchright_pw = None
+                        patchright_browser = None
+                        
+                        # 1. Save state & close PC browser first
+                        await _persist_storage_state(ctx, storage_state_path)
                         try:
-                            state["current_task"] = "Mobile Searches"
-                            state["progress"] = 0
-                            state["progress_total"] = mob_searches
-
-                            # 1. Get mobile UA and viewport
-                            from src.utils import get_random_user_agent, get_random_viewport
-                            mobile_ua = get_random_user_agent("mobile")
-                            mobile_vp = get_random_viewport("mobile")
-                            is_iphone = "iPhone" in mobile_ua
-
-                            # 2. Build Client Hints metadata (ported from extension's getUAMetadata)
-                            ua_metadata = {"mobile": True, "architecture": "arm64"}
-                            if is_iphone:
-                                ua_metadata["platform"] = "iOS"
-                                import re as _re
-                                ios_match = _re.search(r"OS\s+(\d+_\d+)", mobile_ua)
-                                ua_metadata["platformVersion"] = ios_match.group(1).replace("_", ".") if ios_match else "18.0"
-                                ua_metadata["model"] = "iPhone"
-                                ua_metadata["brands"] = []
-                                ua_metadata["fullVersion"] = ""
-                            else:
-                                # Android
-                                ua_metadata["platform"] = "Android"
-                                import re as _re
-                                android_match = _re.search(r"Android\s+([0-9.]+)", mobile_ua)
-                                ua_metadata["platformVersion"] = android_match.group(1) if android_match else "14.0"
-                                model_match = _re.search(r";\s*([^;)]+)\)\s*AppleWebKit", mobile_ua)
-                                ua_metadata["model"] = model_match.group(1).strip() if model_match else "Pixel 8 Pro"
-                                chrome_match = _re.search(r"Chrome/(\d+)", mobile_ua)
-                                edge_match = _re.search(r"EdgA?/(\d+)", mobile_ua)
-                                chrome_ver = chrome_match.group(1) if chrome_match else "131"
-                                brands = [
-                                    {"brand": "Not_A Brand", "version": "8"},
-                                    {"brand": "Chromium", "version": chrome_ver},
-                                ]
-                                if edge_match:
-                                    brands.append({"brand": "Microsoft Edge", "version": edge_match.group(1)})
-                                else:
-                                    brands.append({"brand": "Google Chrome", "version": chrome_ver})
-                                ua_metadata["brands"] = brands
-                                ua_metadata["fullVersion"] = f"{chrome_ver}.0.0.0"
-
-                            # 3. Apply CDP device emulation
-                            cdp_client = await page.context.new_cdp_session(page)
-
-                            await cdp_client.send("Emulation.clearDeviceMetricsOverride")
-                            await cdp_client.send("Emulation.setDeviceMetricsOverride", {
-                                "mobile": True,
-                                "fitWindow": True,
-                                "width": mobile_vp["width"],
-                                "height": mobile_vp["height"],
-                                "deviceScaleFactor": 3,
-                            })
-
-                            ua_override = {"userAgent": mobile_ua}
-                            if not is_iphone:
-                                ua_override["userAgentMetadata"] = ua_metadata
-                            await cdp_client.send("Network.setUserAgentOverride", ua_override)
-
-                            await cdp_client.send("Network.setBypassServiceWorker", {"bypass": True})
-
-                            add_log("info", f"📱 Emulation applied: {ua_metadata.get('model', 'iPhone')}, "
-                                    f"UA: {mobile_ua[:60]}...")
-
-                            # 4. Clear Bing cookies/cache for fresh mobile session
-                            try:
-                                await cdp_client.send("Network.clearBrowserCookies")
-                                await cdp_client.send("Network.clearBrowserCache")
-                                add_log("info", "📱 Cleared browser cookies & cache")
-                            except Exception as clear_err:
-                                add_log("warning", f"📱 Cookie clear: {clear_err}")
-                            try:
-                                await page.context.clear_cookies()
-                            except Exception:
-                                pass
-
-                            # 5. Re-login with mobile UA
-                            add_log("info", "📱 Re-establishing session with mobile UA...")
-                            await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=20000)
-                            await asyncio.sleep(3)
-
-                            current_url = page.url.lower()
-                            if "login" in current_url or "live.com" in current_url:
-                                add_log("info", "📱 Login page detected, re-authenticating...")
-                                try:
-                                    await page.wait_for_url("**/rewards.bing.com/**", timeout=30000)
-                                    add_log("info", "📱 Auto-login succeeded")
-                                except Exception:
-                                    add_log("warning", "📱 Auto-login timeout, proceeding anyway")
-
-                            # 6. Navigate to Bing and search
-                            await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                            await asyncio.sleep(1.5)
-
-                            # Credit probe: check mobile credits after 3 searches
-                            async def mobile_credit_probe():
-                                try:
-                                    data = await page.evaluate("""
-                                        async () => {
-                                            try {
-                                                const r = await fetch('https://rewards.bing.com/api/getuserinfo?type=1',
-                                                    {credentials: 'include'});
-                                                const d = await r.json();
-                                                const c = d?.dashboard?.userStatus?.counters?.mobileSearch;
-                                                const v = Array.isArray(c) ? c[0] : c;
-                                                return v?.pointProgress || 0;
-                                            } catch(e) { return -1; }
-                                        }
-                                    """)
-                                    return data
-                                except Exception:
-                                    return -1
-
-                            searcher.set_account_context(email)
-                            mobile_result = await searcher.run_searches(
-                                page, mob_searches, mode="mobile",
-                                credit_probe_fn=mobile_credit_probe,
-                            )
-                            add_log("info", f"📱 Mobile searches: {mobile_result.get('completed', 0)}/{mob_searches} OK, "
-                                    f"{mobile_result.get('failed', 0)} failed")
-
-                        except Exception as mob_err:
-                            import traceback
-                            add_log("error", f"📱 Mobile search error: {mob_err}")
-                            add_log("error", f"📱 {traceback.format_exc()[:500]}")
-                        finally:
-                            # Remove emulation (reset all CDP overrides)
-                            if cdp_client:
-                                try:
-                                    await cdp_client.send("Emulation.clearDeviceMetricsOverride")
-                                    await cdp_client.send("Network.setUserAgentOverride", {"userAgent": ""})
-                                    await cdp_client.send("Network.setBypassServiceWorker", {"bypass": False})
-                                    add_log("info", "📱 Emulation cleared")
-                                except Exception:
-                                    pass
-                                try:
-                                    await cdp_client.detach()
-                                except Exception:
-                                    pass
-
-                    # ══╔ Mobile Supplementary Search (deficit retry) ══╔
-                    # After emulation is cleared, check API for mobile deficit and retry
-                    try:
-                        await asyncio.sleep(3)
-                        # Navigate desktop page to rewards to check mobile credits
-                        try:
-                            await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                            await asyncio.sleep(3)
+                            await bm.close()
                         except Exception:
                             pass
-                    
-                        # Fetch raw API data via page.evaluate
-                        raw_data = await page.evaluate("""
-                            async () => {
-                                try {
-                                    const resp = await fetch('https://rewards.bing.com/api/getuserinfo?type=1');
-                                    const data = await resp.json();
-                                    const counters = data?.dashboard?.userStatus?.counters || {};
-                                    const result = {};
-                                    for (const [key, value] of Object.entries(counters)) {
-                                        const v = Array.isArray(value) ? value[0] : value;
-                                        if (v && typeof v === 'object') {
-                                            result[key] = {
-                                                progress: v.pointProgress || 0,
-                                                max: v.pointProgressMax || 0,
-                                                complete: v.complete || false,
-                                            };
-                                        }
-                                    }
-                                    return result;
-                                } catch(e) { return {error: e.message}; }
-                            }
-                        """)
-                    
-                        mob_current = 0
-                        mob_max_api = 0
-                        if raw_data:
-                            add_log("info", f"📨 RAW API counters: {json.dumps(raw_data, indent=None)}")
-                            mob_data = raw_data.get("mobileSearch", {})
-                            mob_current = mob_data.get("progress", 0)
-                            mob_max_api = mob_data.get("max", 0)
-                            add_log("info", f"📱 POST-search mobile credits: {mob_current}/{mob_max_api}")
-                        else:
-                            add_log("warning", "📨 RAW API returned null")
+
+                        # 2. Stop PC GPM profile
+                        if gpm_profile_id:
                             try:
-                                post_status = await asyncio.wait_for(
-                                    searcher.get_search_points_status(page),
-                                    timeout=15,
+                                add_log("info", "Waiting 4s for PC browser profile data sync...")
+                                await asyncio.sleep(4)
+                                _stop_gpm_profile(gpm_profile_id, gpm_api_url)
+                                add_log("info", f"Stopped PC GPM profile {gpm_profile_id[:8]}")
+                                attach_runtime, cdp_url, desktop_runtime = invalidate_runtime_attachment(
+                                    attach_runtime,
+                                    cdp_url,
+                                    desktop_runtime,
+                                    reason="desktop_gpm_profile_stopped_before_mobile_pass",
                                 )
-                                mob_current = post_status.get("mobile_current", 0)
-                                mob_max_api = post_status.get("mobile_max", 60)
-                                add_log("info", f"📱 POST-search mobile credits: {mob_current}/{mob_max_api}")
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                add_log("debug", f"PC GPM stop: {e}")
 
-                        # Supplementary mobile searches if deficit exists
-                        mob_deficit_pts = max(0, mob_max_api - mob_current)
-                        mob_deficit_searches = (mob_deficit_pts + 2) // 3
-                        max_mobile_retries = 2
-                        retry_round = 0
+                        # 3. Cooldown between PC and Mobile sessions
+                        add_log("info", "⏳ Waiting 30s cooldown before mobile session...")
+                        state["current_task"] = "Cooldown (30s)"
+                        _update_account_state(account_key, task="Cooldown (30s)")
+                        await asyncio.sleep(30)
 
-                        while mob_deficit_searches > 0 and retry_round < max_mobile_retries:
-                            retry_round += 1
-                            add_log("info", f"📱 Mobile deficit: {mob_current}/{mob_max_api} pts "
-                                    f"({mob_deficit_searches} more needed, round {retry_round}/{max_mobile_retries})")
-                        
-                            state["current_task"] = "Mobile Supplementary"
-                            state["progress"] = 0
-                            state["progress_total"] = mob_deficit_searches
+                        # 4. Start Mobile Profile (Native or GPM)
+                        try:
+                            bm_mobile = BrowserManager(settings)
+                            bm_mobile.set_account(email)
 
-                            cdp_client2 = None
-                            try:
-                                from src.utils import get_random_user_agent, get_random_viewport
-                                mobile_ua2 = get_random_user_agent("mobile")
-                                mobile_vp2 = get_random_viewport("mobile")
-                                is_iphone2 = "iPhone" in mobile_ua2
+                            if fallback_to_native_mobile:
+                                page_mob = None
+                                if bool(settings.get("mobile_patchright_enabled", True)):
+                                    from src.browser import load_storage_state_cookies
 
-                                # Build Client Hints metadata
-                                ua_metadata2 = {"mobile": True, "architecture": "arm64"}
-                                if is_iphone2:
-                                    ua_metadata2["platform"] = "iOS"
-                                    import re as _re2
-                                    ios_match2 = _re2.search(r"OS\s+(\d+_\d+)", mobile_ua2)
-                                    ua_metadata2["platformVersion"] = ios_match2.group(1).replace("_", ".") if ios_match2 else "18.0"
-                                    ua_metadata2["model"] = "iPhone"
-                                    ua_metadata2["brands"] = []
-                                    ua_metadata2["fullVersion"] = ""
-                                else:
-                                    ua_metadata2["platform"] = "Android"
-                                    import re as _re2
-                                    android_match2 = _re2.search(r"Android\s+([0-9.]+)", mobile_ua2)
-                                    ua_metadata2["platformVersion"] = android_match2.group(1) if android_match2 else "14.0"
-                                    model_match2 = _re2.search(r";\s*([^;)]+)\)\s*AppleWebKit", mobile_ua2)
-                                    ua_metadata2["model"] = model_match2.group(1).strip() if model_match2 else "Pixel 8 Pro"
-                                    chrome_match2 = _re2.search(r"Chrome/(\d+)", mobile_ua2)
-                                    chrome_ver2 = chrome_match2.group(1) if chrome_match2 else "131"
-                                    brands2 = [
-                                        {"brand": "Not_A Brand", "version": "8"},
-                                        {"brand": "Chromium", "version": chrome_ver2},
-                                        {"brand": "Google Chrome", "version": chrome_ver2},
-                                    ]
-                                    ua_metadata2["brands"] = brands2
-                                    ua_metadata2["fullVersion"] = f"{chrome_ver2}.0.0.0"
+                                    try:
+                                        add_log("info", "📱 Native fallback: Launching patchright mobile Edge...")
+                                        patchright_pw, patchright_browser, ctx_mob, page_mob = await bm_mobile.create_mobile_patchright(
+                                            load_storage_state_cookies(storage_state_path)
+                                        )
+                                        mobile_runtime = build_runtime_descriptor(
+                                            "patchright_mobile", email, "mobile",
+                                        )
+                                        try:
+                                            await bm_mobile.toggle_mobile_emulation(page_mob, enable=True)
+                                            await asyncio.sleep(1)
+                                        except Exception as patch_emu_err:
+                                            add_log(
+                                                "warning",
+                                                f"📱 Patchright mobile CDP overlay failed: {patch_emu_err}",
+                                            )
+                                    except Exception as patch_err:
+                                        add_log(
+                                            "warning",
+                                            f"📱 Patchright mobile startup failed, falling back to emulation: {patch_err}",
+                                        )
 
-                                # Apply CDP emulation
-                                cdp_client2 = await page.context.new_cdp_session(page)
-                                await cdp_client2.send("Emulation.clearDeviceMetricsOverride")
-                                await cdp_client2.send("Emulation.setDeviceMetricsOverride", {
-                                    "mobile": True,
-                                    "fitWindow": True,
-                                    "width": mobile_vp2["width"],
-                                    "height": mobile_vp2["height"],
-                                    "deviceScaleFactor": 3,
-                                    "screenOrientation": {"type": "portraitPrimary", "angle": 0},
-                                })
-                                await cdp_client2.send("Network.setUserAgentOverride", {
-                                    "userAgent": mobile_ua2,
-                                    "platform": ua_metadata2["platform"],
-                                    "userAgentMetadata": {
-                                        "mobile": True,
-                                        "platform": ua_metadata2["platform"],
-                                        "platformVersion": ua_metadata2["platformVersion"],
-                                        "architecture": "arm64",
-                                        "model": ua_metadata2.get("model", ""),
-                                        "brands": ua_metadata2.get("brands", []),
-                                        "fullVersion": ua_metadata2.get("fullVersion", ""),
-                                    },
-                                })
-                                add_log("info", f"📱 Supplementary emulation applied: {ua_metadata2.get('model', 'mobile')}")
+                                if page_mob is None:
+                                    add_log("info", "📱 Native Emulation fallback: Launching dedicated headless session...")
+                                    await bm_mobile.start()
+                                    ctx_mob = await bm_mobile.create_context(
+                                        mode="mobile",
+                                        account_email=email,
+                                        proxy=session_proxy,
+                                        storage_state=str(storage_state_path) if storage_state_path.exists() else None,
+                                        use_persistent_profile=False,
+                                    )
+                                    page_mob = await bm_mobile.new_page(ctx_mob)
+                                    mobile_runtime = build_runtime_descriptor(
+                                        "managed_edge", email, "mobile",
+                                    )
+                                    try:
+                                        await bm_mobile.toggle_mobile_emulation(page_mob, enable=True)
+                                        await asyncio.sleep(1)
+                                    except Exception as emu_err:
+                                        add_log("warning", f"📱 Mobile emulation activation failed: {emu_err}")
+                            else:
+                                mobile_cdp = await _start_gpm_profile(gpm_mobile_id, gpm_api_url)
+                                add_log("info", f"📱 Mobile GPM profile started via {mobile_cdp}")
+                                mobile_runtime = build_runtime_descriptor(
+                                    "gpm_mobile", gpm_mobile_id, "mobile",
+                                )
+                                await bm_mobile.start_connected_edge(mobile_cdp)
+                                ctx_mob = await bm_mobile.create_context(
+                                    mode="mobile",
+                                    account_email=email,
+                                )
+                                page_mob = await bm_mobile.new_page(ctx_mob)
 
-                                # Clear cookies and re-login for mobile
-                                await page.context.clear_cookies()
-                                await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                                await asyncio.sleep(2)
-                                await page.goto("https://www.bing.com/rewards/signin", wait_until="domcontentloaded", timeout=35000)
-                                await asyncio.sleep(3)
+                            # Check login status
+                            if not await login_mgr.is_logged_in(page_mob):
+                                add_log("info", "📱 Logging in on mobile profile...")
                                 try:
-                                    await login_mgr.login(page, email, account.get("password", ""), account.get("totp_secret", ""))
-                                except Exception:
-                                    pass
+                                    page_mob = await login_mgr.login(
+                                        page_mob, email, account["password"],
+                                        account.get("totp_secret"),
+                                    )
+                                    ctx_mob = page_mob.context
+                                except Exception as login_err:
+                                    add_log("warning", f"📱 Mobile login attempt: {login_err}")
 
-                                # Run supplementary searches
-                                def on_mob_supp(c, t, q):
-                                    state["progress"] = c
-                                searcher.on_progress = on_mob_supp
-                                searcher.set_account_context(email)
-                                supp_result = await searcher.run_searches(
-                                    page, mob_deficit_searches, mode="mobile",
+                            ctx_mob = page_mob.context
+                            await page_mob.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+                            if hasattr(bm_mobile, "capture_runtime_signature"):
+                                runtime_signature = await bm_mobile.capture_runtime_signature(page_mob)
+                                _diag_log(
+                                    settings,
+                                    "Mobile runtime signature before mobile pass",
+                                    scope="mobile-runtime",
+                                    account=mask_email(email),
+                                    runtime_family=(mobile_runtime or {}).get("family", ""),
+                                    signature=runtime_signature,
                                 )
-                                add_log("info", f"📱 Supplementary mobile: {supp_result.get('completed', 0)}/{mob_deficit_searches} OK")
-
-                            except Exception as supp_err:
-                                add_log("warning", f"📱 Supplementary mobile error: {supp_err}")
-                            finally:
-                                if cdp_client2:
-                                    try:
-                                        await cdp_client2.send("Emulation.clearDeviceMetricsOverride")
-                                        await cdp_client2.send("Network.setUserAgentOverride", {"userAgent": ""})
-                                        await cdp_client2.send("Network.setBypassServiceWorker", {"bypass": False})
-                                    except Exception:
-                                        pass
-                                    try:
-                                        await cdp_client2.detach()
-                                    except Exception:
-                                        pass
-
-                            # Re-check mobile credits after supplementary round
-                            await asyncio.sleep(5)
+                            active_mobile_page = page_mob
+                            
+                        except Exception as mob_err:
+                            import traceback
+                            add_log("error", f"📱 Mobile init error: {mob_err}")
+                            add_log("error", f"📱 {traceback.format_exc()[:500]}")
+                        
+                        
+                        if active_mobile_page:
                             try:
-                                await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=35000)
-                                await asyncio.sleep(3)
-                                recheck = await page.evaluate("""
-                                    async () => {
-                                        try {
-                                            const resp = await fetch('https://rewards.bing.com/api/getuserinfo?type=1');
-                                            const data = await resp.json();
-                                            const mob = data?.dashboard?.userStatus?.counters?.mobileSearch;
-                                            const m = Array.isArray(mob) ? mob[0] : mob;
-                                            return m ? {progress: m.pointProgress||0, max: m.pointProgressMax||0} : null;
-                                        } catch(e) { return null; }
-                                    }
-                                """)
-                                if recheck:
-                                    mob_current = recheck.get("progress", 0)
-                                    mob_max_api = recheck.get("max", mob_max_api)
-                                    add_log("info", f"📱 After supplementary: {mob_current}/{mob_max_api}")
-                                    mob_deficit_pts = max(0, mob_max_api - mob_current)
-                                    mob_deficit_searches = (mob_deficit_pts + 2) // 3
+                                status_before_mobile = await _read_search_status_with_mobile_recheck(
+                                    searcher,
+                                    active_mobile_page,
+                                    settings,
+                                )
+                                _diag_log(
+                                    settings,
+                                    "Collected mobile credits before mobile pass",
+                                    scope="mobile-pass",
+                                    account=mask_email(email),
+                                    before=summarize_search_status(status_before_mobile),
+                                    planned_searches=mob_searches,
+                                )
+
+                                # Run mobile searches
+                                state["current_task"] = "Mobile Searches"
+                                state["progress"] = 0
+                                state["progress_total"] = mob_searches
+                                _update_account_state(
+                                    account_key,
+                                    task="Mobile Searches",
+                                    progress=0,
+                                    progress_total=mob_searches,
+                                )
+
+                                def on_mobile(c, t, q):
+                                    state["progress"] = c
+                                    _update_account_state(account_key, progress=c)
+                                    if c % 5 == 0:
+                                        add_log("info", f"Mobile {c}/{t}: {q[:30]}")
+
+                                searcher.on_progress = on_mobile
+                                searcher.set_account_context(email)
+
+                                mob_result = await searcher.run_searches(
+                                    active_mobile_page, mob_searches, mode="mobile",
+                                )
+                                _diag_log(
+                                    settings,
+                                    "Mobile search loop finished",
+                                    scope="mobile-pass",
+                                    account=mask_email(email),
+                                    completed=mob_result.get("completed", 0),
+                                    failed=mob_result.get("failed", 0),
+                                    requested=mob_searches,
+                                    fatal_error=mob_result.get("fatal_error", ""),
+                                )
+                                status_after_mobile = await _wait_for_mobile_credit_update(
+                                    searcher,
+                                    active_mobile_page,
+                                    settings,
+                                    baseline_status=status_before_mobile,
+                                )
+                                credit_delta = _mobile_credit_delta(
+                                    status_before_mobile,
+                                    status_after_mobile,
+                                )
+                                add_log(
+                                    "info",
+                                    f"📱 Mobile: {mob_result.get('completed', 0)}/{mob_searches} OK, "
+                                    f"{mob_result.get('failed', 0)} failed",
+                                )
+                                if credit_delta > 0:
+                                    add_log(
+                                        "info",
+                                        "📱 Mobile search pass credited "
+                                        f"{credit_delta} points "
+                                        f"({status_after_mobile.get('mobile_current', 0)}/"
+                                        f"{status_after_mobile.get('mobile_max', 0)})",
+                                    )
                                 else:
-                                    mob_deficit_searches = 0
-                            except Exception:
-                                mob_deficit_searches = 0
+                                    add_log(
+                                        "warning",
+                                        "📱 Mobile search pass finished without observed credit change "
+                                        f"({status_before_mobile.get('mobile_current', 0)}/"
+                                        f"{status_before_mobile.get('mobile_max', 0)} -> "
+                                        f"{status_after_mobile.get('mobile_current', 0)}/"
+                                        f"{status_after_mobile.get('mobile_max', 0)})",
+                                    )
+                                _diag_log(
+                                    settings,
+                                    "Finished mobile search pass verification",
+                                    scope="mobile-pass",
+                                    account=mask_email(email),
+                                    before=summarize_search_status(status_before_mobile),
+                                    after=summarize_search_status(status_after_mobile),
+                                    credit_delta=credit_delta,
+                                )
 
-                    except asyncio.TimeoutError:
-                        add_log("warning", "📱 Post-search check timed out")
-                    except Exception as pe:
-                        add_log("warning", f"📱 Post-search check failed: {pe}")
+                            except Exception as run_err:
+                                add_log("error", f"📱 Mobile search execution failed: {run_err}")
+                            finally:
+                                if fallback_to_native_mobile:
+                                    if ctx_mob is not None:
+                                        try:
+                                            await _persist_storage_state(ctx_mob, storage_state_path)
+                                        except Exception:
+                                            pass
+                                    if patchright_browser is not None:
+                                        try:
+                                            await patchright_browser.close()
+                                        except Exception:
+                                            pass
+                                    if patchright_pw is not None:
+                                        try:
+                                            await patchright_pw.stop()
+                                        except Exception:
+                                            pass
+                                    if bm_mobile is not None:
+                                        try:
+                                            await bm_mobile.close()
+                                        except Exception:
+                                            pass
+                                else:
+                                    # Shutdown GPM connection
+                                    if bm_mobile is not None:
+                                        try:
+                                            await bm_mobile.close()
+                                        except Exception:
+                                            pass
+                                    try:
+                                        add_log("info", "Waiting 4s for mobile browser profile data sync...")
+                                        await asyncio.sleep(4)
+                                        _stop_gpm_profile(gpm_mobile_id, gpm_api_url)
+                                        add_log("info", f"📱 Stopped Mobile GPM profile {gpm_mobile_id[:8]}")
+                                    except Exception:
+                                        pass
 
-                    # Close desktop Edge browser
-                    await _persist_storage_state(ctx, storage_state_path)
-                    await bm.close()
+                    # If we used native mode without closing `bm` (unreachable now but kept for safety)
+                    if not (gpm_enabled and gpm_mobile_id) and not fallback_to_native_mobile:
+                        try:
+                            await _persist_storage_state(ctx, storage_state_path)
+                            await bm.close()
+                        except Exception:
+                            pass
 
 
                 # ── Post-run Verification (with error handling) ──
                 if task in ("all", "searches"):
                     add_log("info", "🔄 Verifying search credits...")
                     try:
-                        bm_verify = BrowserManager(settings)
-                        bm_verify.set_account(email)
-                        verify_attach_runtime = False
-                        verify_cdp_url = ""
-                        if bool(settings.get("native_edge_runtime_enabled", True)):
-                            try:
-                                verify_cdp_url = await bm_verify.start_native_edge_runtime(email)
-                                verify_attach_runtime = True
-                            except Exception:
-                                pass
-                        if not verify_attach_runtime:
-                            await bm_verify.start()
-                        ctx_v, page_v = await _open_account_context(
-                            bm_verify,
-                            login_mgr,
+                        final_status, search_verification = await _collect_search_status_snapshot(
+                            settings,
                             account,
                             session_proxy,
-                            "desktop",
+                            login_mgr,
+                            searcher,
                             storage_state_path,
-                            attach_existing_edge=verify_attach_runtime,
-                            attached_cdp_url=verify_cdp_url if verify_attach_runtime else "",
+                            desktop_runtime=desktop_runtime,
+                            mobile_runtime=mobile_runtime,
                         )
-
-                        final_status = await searcher.get_search_points_status(page_v)
-                        pc_final = final_status.get("pc_current", 0)
-                        pc_final_max = final_status.get("pc_max", 0)
-                        mob_final = final_status.get("mobile_current", 0)
-                        mob_final_max = final_status.get("mobile_max", 0)
-
-                        deficit = []
-                        if pc_final_max > 0 and pc_final < pc_final_max:
-                            deficit.append(f"Desktop: {pc_final}/{pc_final_max} ({pc_final_max - pc_final} short)")
-                        if mob_final_max > 0 and mob_final < mob_final_max:
-                            deficit.append(f"Mobile: {mob_final}/{mob_final_max} ({mob_final_max - mob_final} short)")
+                        deficit = describe_search_remaining_items({
+                            "search_status": final_status,
+                            "search_verification": search_verification,
+                        })
 
                         if deficit:
                             add_log("warning", f"⚠️ Search deficit: {', '.join(deficit)}")
                         else:
                             add_log("info", "✅ All search credits verified")
-
-                        await _persist_storage_state(ctx_v, storage_state_path)
-                        await bm_verify.close()
                     except Exception as e:
                         add_log("warning", f"⚠️ Verification error: {e}")
 
@@ -1911,28 +2957,19 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                     add_log("info", "🔄 Final Rewards verification...")
                     bm_final = None
                     try:
+                        verified_search_status, search_verification = await _collect_search_status_snapshot(
+                            settings,
+                            account,
+                            session_proxy,
+                            login_mgr,
+                            searcher,
+                            storage_state_path,
+                            desktop_runtime=desktop_runtime,
+                            mobile_runtime=mobile_runtime,
+                        )
                         bm_final = BrowserManager(settings)
                         bm_final.set_account(email)
-                        final_attach_runtime = False
-                        final_cdp_url = ""
-
-                        if attach_runtime and cdp_url:
-                            add_log("info", f"Re-using profile for verification...")
-                            try:
-                                final_cdp_url = cdp_url
-                                await bm_final.start_connected_edge(final_cdp_url)
-                                final_attach_runtime = True
-                            except Exception as e:
-                                add_log("warning", f"Reconnect failed: {e}")
-
-                        if not final_attach_runtime and bool(settings.get("native_edge_runtime_enabled", True)):
-                            try:
-                                final_cdp_url = await bm_final.start_native_edge_runtime(email)
-                                final_attach_runtime = True
-                            except Exception:
-                                pass
-                        if not final_attach_runtime:
-                            await bm_final.start()
+                        await bm_final.start()
                         ctx_final, page_final = await _open_account_context(
                             bm_final,
                             login_mgr,
@@ -1940,8 +2977,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             session_proxy,
                             "desktop",
                             storage_state_path,
-                            attach_existing_edge=final_attach_runtime,
-                            attached_cdp_url=final_cdp_url if final_attach_runtime else "",
+                            attach_existing_edge=False,
                         )
 
                         verification = await _collect_final_verification(
@@ -1949,8 +2985,24 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             searcher,
                             humanizer,
                             settings,
+                            search_status_override=verified_search_status,
+                            search_verification_override=search_verification,
+                        )
+                        verification = _reconcile_verification_with_session_proof(
+                            verification,
+                            session_proofs,
                         )
                         remaining_items = _describe_remaining_items(verification)
+                        deferred_items = _describe_deferred_items(verification)
+                        _diag_log(
+                            settings,
+                            "Final account verification evaluated",
+                            scope="account",
+                            account=mask_email(email),
+                            verification_status=summarize_search_status(verification.get("search_status", {})),
+                            remaining_items=remaining_items,
+                            deferred_items=deferred_items,
+                        )
 
                         if remaining_items:
                             account_complete = False
@@ -1962,6 +3014,11 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             )
                         else:
                             add_log("info", f"✅ Account {email[:5]}*** fully verified")
+                        if deferred_items:
+                            add_log(
+                                "info",
+                                "ℹ️ Deferred offers: " + ", ".join(deferred_items[:5]),
+                            )
                         
                         # Google Sheets Webhook
                         webhook_url = settings.get("google_sheets_webhook_url", "")
@@ -2006,6 +3063,14 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                 _update_account_state(account_key, status="error", task=f"Error: {str(e)[:40]}")
                 add_log("error", f"❌ {account_key}: {str(e)}")
                 logger.error(f"Account {email} error: {e}")
+                _diag_log(
+                    settings,
+                    "Account run raised exception",
+                    level="error",
+                    scope="account",
+                    account=mask_email(email),
+                    error=str(e),
+                )
                 notifier.send_error(email, str(e))
             finally:
                 if gpm_enabled and gpm_profile_id:
@@ -2018,6 +3083,12 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                         add_log("info", f"Stopped GPM Profile {gpm_profile_id[:8]}")
                     except Exception as stop_e:
                         add_log("debug", f"Failed to stop GPM Profile: {stop_e}")
+                gpm_mobile_id = account.get("gpm_mobile_profile_id")
+                if gpm_enabled and gpm_mobile_id:
+                    try:
+                        _stop_gpm_profile(gpm_mobile_id, gpm_api_url)
+                    except Exception:
+                        pass
                 # Close per-account log handler
                 if _acc_log_handler:
                     try:
@@ -2028,12 +3099,20 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
 
     async def _safe_process(idx, acc):
         try:
-            # 45-minute timeout per account (to accommodate 15-30 min recovery pauses)
-            await asyncio.wait_for(_process_single_account(idx, acc), timeout=2700.0)
+            # 75-minute timeout per account (to accommodate 35m streak + 20m searches + pauses)
+            await asyncio.wait_for(_process_single_account(idx, acc), timeout=4500.0)
         except asyncio.TimeoutError:
             email = acc.get("email", f"acc_{idx}")
-            _update_account_state(email, status="error", task="Timeout")
-            add_log("error", f"❌ {email}: Quá thời gian 45 phút, tự ngắt.")
+            account_key = email[:5] + "***" if "@" in email else email
+            _update_account_state(
+                account_key,
+                id=email,
+                email=email,
+                display_name=account_key,
+                status="error",
+                task="Timeout",
+            )
+            add_log("error", f"❌ {email}: Quá thời gian 75 phút, tự ngắt.")
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -2045,6 +3124,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
     state["status"] = "idle"
     state["current_task"] = ""
     state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _update_ai_state(active=False)
     if task == "all":
         if overall_complete:
             add_log("info", "🏁 All tasks completed and verified!")
@@ -2052,6 +3132,28 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
             add_log("warning", "🏁 Run finished with remaining tasks. Check the warnings above.")
     else:
         add_log("info", f"🏁 Task '{task}' finished")
+
+
+# ─── Static Files ──────────────────────────────────────────────────────────
+
+DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
+
+@app.route("/")
+@app.route("/index.html")
+def index():
+    return send_file(DASHBOARD_DIR / "index.html")
+
+@app.route("/assets/<path:filename>")
+def assets(filename):
+    return send_from_directory(str(DASHBOARD_DIR / "assets"), filename)
+
+@app.route("/<path:filename>")
+def dashboard_file(filename):
+    """Serve top-level dashboard files such as favicon or direct index links."""
+    file_path = DASHBOARD_DIR / filename
+    if file_path.is_file():
+        return send_file(file_path)
+    return send_file(DASHBOARD_DIR / "index.html")
 
 
 def start_dashboard(port: int = 8080, host: str = "127.0.0.1"):

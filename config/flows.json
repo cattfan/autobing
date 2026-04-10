@@ -1,0 +1,32 @@
+{
+  "daily_set": {
+    "description": "Complete all Daily Set tasks on the Rewards homepage",
+    "steps": [
+      "Navigate to https://rewards.bing.com/ and wait for the page to fully load.",
+      "Look at the Daily Set section. Find any task cards that do NOT have a green checkmark (✓). Click the first incomplete card to open it.",
+      "Complete the opened activity: if it is a quiz, answer all questions using on-page clues. If it is a poll, click any option. If it is an article, scroll down and read for 5 seconds. Then close the tab and return to the Rewards homepage.",
+      "Check the Daily Set section again. If there are still incomplete cards (no green checkmark), click the next one and complete it the same way. Repeat until all cards show checkmarks.",
+      "Verify: all Daily Set cards now display green checkmarks. Report done."
+    ]
+  },
+  "keep_earning": {
+    "description": "Complete Keep Earning / More Activities tasks",
+    "steps": [
+      "Navigate to https://rewards.bing.com/ and scroll down to find the 'Keep earning' or 'More activities' section.",
+      "Look for any activity cards that show point values (like +10, +20) and do NOT have checkmarks. Click the first incomplete card.",
+      "Complete the activity: read the page content, scroll through it, interact with any buttons or links as needed. Wait 5-8 seconds on the destination page.",
+      "Close the tab and return to https://rewards.bing.com/. Check for more incomplete cards. Repeat until all visible cards are completed or you've attempted all of them.",
+      "Report the results: how many cards were completed vs total."
+    ]
+  },
+  "explore_bing": {
+    "description": "Visit Explore on Bing earned cards",
+    "steps": [
+      "Navigate to https://rewards.bing.com/ and scroll all the way to the bottom to load all sections.",
+      "Look for sections labeled 'Explore on Bing', 'Trending now', or similar card grids with Bing search links and point badges.",
+      "Click each card that has a point badge (+5, +10 etc) and visit the destination. Spend 3-5 seconds on each page.",
+      "Return to the Rewards page and continue with the next card until all explore cards are visited.",
+      "Report how many explore cards were visited."
+    ]
+  }
+}

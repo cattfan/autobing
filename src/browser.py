@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import random
 import json
+import re
 import socket
 import subprocess
 import time
@@ -31,6 +32,8 @@ from src.utils import (
     logger,
     PROFILES_DIR,
     get_edge_executable_path,
+    get_random_mobile_rewards_user_agent,
+    get_random_mobile_rewards_viewport,
     get_random_user_agent,
     get_random_viewport,
 )
@@ -55,6 +58,206 @@ SCREEN_RESOLUTIONS = [
 ]
 
 
+def load_storage_state_cookies(storage_state: str | Path | dict | None) -> list[dict]:
+    """Load cookies from a Playwright storage-state payload or file path."""
+    if not storage_state:
+        return []
+
+    payload = None
+    if isinstance(storage_state, dict):
+        payload = storage_state
+    else:
+        try:
+            state_path = Path(storage_state)
+            if state_path.exists():
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+
+    cookies = payload.get("cookies", []) if isinstance(payload, dict) else []
+    return cookies if isinstance(cookies, list) else []
+
+
+def _normalize_mobile_platform_version(raw_value: str, *, default: str) -> str:
+    """Return a CH-compatible mobile platformVersion string."""
+    value = str(raw_value or "").strip().replace("_", ".")
+    if not value:
+        return default
+    parts = [segment for segment in value.split(".") if segment]
+    while len(parts) < 3:
+        parts.append("0")
+    return ".".join(parts[:3])
+
+
+def _build_mobile_runtime_profile(mobile_ua: str) -> dict:
+    """Normalize a mobile browser fingerprint profile from the chosen UA."""
+    ua = str(mobile_ua or "").strip()
+    ua_lower = ua.lower()
+    is_ios = "iphone" in ua_lower or "ios" in ua_lower
+
+    platform_name = "iOS" if is_ios else "Android"
+    navigator_platform = "iPhone" if is_ios else "Linux armv81"
+    max_touch_points = 5
+    hardware_concurrency = 4 if is_ios else 8
+    device_memory = 4 if is_ios else 8
+
+    if is_ios:
+        model = "iPhone"
+        architecture = ""
+        platform_version = "17.6.1"
+    else:
+        android_version_match = re.search(r"Android\s+([0-9._]+)", ua, re.IGNORECASE)
+        model_match = re.search(r"Android\s+[0-9._]+\s*;\s*([^) ;]+)", ua, re.IGNORECASE)
+        model = (model_match.group(1).strip() if model_match else "") or "SM-S928B"
+        architecture = "arm"
+        platform_version = _normalize_mobile_platform_version(
+            android_version_match.group(1) if android_version_match else "",
+            default="14.0.0",
+        )
+
+    version_match = (
+        re.search(r"EdgA?/([0-9.]+)", ua, re.IGNORECASE)
+        or re.search(r"Chrome/([0-9.]+)", ua, re.IGNORECASE)
+    )
+    full_version = version_match.group(1) if version_match else "146.0.0.0"
+    major_version = full_version.split(".", 1)[0]
+    primary_brand = "Microsoft Edge" if "edg" in ua_lower else "Google Chrome"
+    brands = [
+        {"brand": "Not_A Brand", "version": "8"},
+        {"brand": "Chromium", "version": major_version},
+        {"brand": primary_brand, "version": major_version},
+    ]
+    full_version_list = [
+        {"brand": "Not_A Brand", "version": "8.0.0.0"},
+        {"brand": "Chromium", "version": full_version},
+        {"brand": primary_brand, "version": full_version},
+    ]
+
+    return {
+        "is_ios": is_ios,
+        "platform_name": platform_name,
+        "navigator_platform": navigator_platform,
+        "max_touch_points": max_touch_points,
+        "hardware_concurrency": hardware_concurrency,
+        "device_memory": device_memory,
+        "architecture": architecture,
+        "bitness": "64" if not is_ios else "",
+        "model": model,
+        "platform_version": platform_version,
+        "full_version": full_version,
+        "major_version": major_version,
+        "brands": brands,
+        "full_version_list": full_version_list,
+    }
+
+
+def _build_mobile_runtime_init_script(profile: dict, *, screen_width: int, screen_height: int) -> str:
+    """Build a shared JS override used by both patchright and CDP mobile flows."""
+    payload = {
+        "navigatorPlatform": profile["navigator_platform"],
+        "platformName": profile["platform_name"],
+        "maxTouchPoints": profile["max_touch_points"],
+        "hardwareConcurrency": profile["hardware_concurrency"],
+        "deviceMemory": profile["device_memory"],
+        "architecture": profile["architecture"],
+        "bitness": profile["bitness"],
+        "brands": profile["brands"],
+        "fullVersionList": profile["full_version_list"],
+        "model": profile["model"],
+        "platformVersion": profile["platform_version"],
+        "screenWidth": int(screen_width),
+        "screenHeight": int(screen_height),
+    }
+    payload_json = json.dumps(payload)
+    return f"""
+    (() => {{
+        const profile = {payload_json};
+        const define = (target, key, getter) => {{
+            try {{
+                Object.defineProperty(target, key, {{
+                    get: getter,
+                    configurable: true,
+                }});
+            }} catch (e) {{}}
+        }};
+
+        const brands = Array.isArray(profile.brands) ? profile.brands : [];
+        const fullVersionList = Array.isArray(profile.fullVersionList) ? profile.fullVersionList : [];
+        const uaDataValue = {{
+            brands,
+            mobile: true,
+            platform: profile.platformName,
+            toJSON() {{
+                return {{
+                    brands,
+                    mobile: true,
+                    platform: profile.platformName,
+                }};
+            }},
+            async getHighEntropyValues(hints) {{
+                const source = {{
+                    architecture: profile.architecture,
+                    bitness: profile.bitness,
+                    brands,
+                    fullVersionList,
+                    mobile: true,
+                    model: profile.model,
+                    platform: profile.platformName,
+                    platformVersion: profile.platformVersion,
+                }};
+                if (!Array.isArray(hints) || hints.length === 0) {{
+                    return source;
+                }}
+                return hints.reduce((acc, hint) => {{
+                    if (Object.prototype.hasOwnProperty.call(source, hint)) {{
+                        acc[hint] = source[hint];
+                    }}
+                    return acc;
+                }}, {{}});
+            }},
+        }};
+
+        define(navigator, 'platform', () => profile.navigatorPlatform);
+        define(navigator, 'maxTouchPoints', () => profile.maxTouchPoints);
+        define(navigator, 'hardwareConcurrency', () => profile.hardwareConcurrency);
+        define(navigator, 'deviceMemory', () => profile.deviceMemory);
+        define(navigator, 'vendor', () => 'Google Inc.');
+        define(navigator, 'userAgentData', () => uaDataValue);
+
+        define(screen, 'width', () => profile.screenWidth);
+        define(screen, 'height', () => profile.screenHeight);
+        define(screen, 'availWidth', () => profile.screenWidth);
+        define(screen, 'availHeight', () => profile.screenHeight);
+        define(screen, 'colorDepth', () => 24);
+        define(screen, 'pixelDepth', () => 24);
+
+        define(window, 'innerWidth', () => profile.screenWidth);
+        define(window, 'innerHeight', () => profile.screenHeight);
+        define(window, 'outerWidth', () => profile.screenWidth);
+        define(window, 'outerHeight', () => profile.screenHeight);
+
+        if (screen.orientation) {{
+            define(screen.orientation, 'type', () => (
+                profile.screenHeight > profile.screenWidth ? 'portrait-primary' : 'landscape-primary'
+            ));
+            define(screen.orientation, 'angle', () => 0);
+        }}
+
+        if (navigator.connection) {{
+            define(navigator.connection, 'effectiveType', () => '4g');
+            define(navigator.connection, 'type', () => 'cellular');
+            define(navigator.connection, 'downlink', () => 10);
+            define(navigator.connection, 'rtt', () => 50);
+            define(navigator.connection, 'saveData', () => false);
+        }}
+
+        if (!('ontouchstart' in window)) {{
+            window.ontouchstart = null;
+        }}
+    }})();
+    """
+
+
 class BrowserManager:
     """Manages Playwright browser instances with advanced stealth."""
 
@@ -64,6 +267,7 @@ class BrowserManager:
         self.browser: Optional[Browser] = None
         self.contexts: list[BrowserContext] = []
         self._attached_via_cdp = False
+        self._owns_browser_process = False
         self._preserve_browser_defaults = False
         self._managed_edge_process: Optional[subprocess.Popen] = None
         self._managed_page_ids: set[int] = set()
@@ -176,7 +380,9 @@ class BrowserManager:
                 ignore_default_args=["--enable-automation", "--no-sandbox"],
             )
             self._attached_via_cdp = False
+            self._owns_browser_process = False
             self._preserve_browser_defaults = False
+            self._native_runtime_cdp_url = ""
             logger.info("Browser started (Clean Edge for Streak, telemetry enabled)")
         except Exception as e:
             logger.warning(f"Clean Edge failed ({e}), using standard launch")
@@ -247,7 +453,9 @@ class BrowserManager:
             )
 
             self._attached_via_cdp = False
+            self._owns_browser_process = False
             self._preserve_browser_defaults = False
+            self._native_runtime_cdp_url = ""
 
             # Import cookies from storage_state into the persistent profile
             # (only needed on first run; subsequent runs have cookies in profile)
@@ -290,7 +498,7 @@ class BrowserManager:
             pg = await self.new_page(ctx)
             return ctx, pg
 
-    async def start_connected_edge(self, cdp_url: str) -> None:
+    async def start_connected_edge(self, cdp_url: str, *, owns_browser_process: bool = False) -> None:
         """Attach to an existing Edge instance exposed via CDP."""
         if not self.playwright:
             self.playwright = await async_playwright().start()
@@ -301,6 +509,7 @@ class BrowserManager:
             try:
                 self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
                 self._attached_via_cdp = True
+                self._owns_browser_process = bool(owns_browser_process)
                 self._preserve_browser_defaults = True
                 self._native_runtime_cdp_url = cdp_url
                 logger.info(f"Attached to existing Edge via CDP ({cdp_url})")
@@ -316,7 +525,7 @@ class BrowserManager:
         cdp_url = self._native_edge_cdp_url(account_email)
 
         if self._is_cdp_port_open(cdp_url):
-            await self.start_connected_edge(cdp_url)
+            await self.start_connected_edge(cdp_url, owns_browser_process=False)
             return cdp_url
 
         edge_exe = get_edge_executable_path()
@@ -333,12 +542,13 @@ class BrowserManager:
             "about:blank",
         ]
         self._managed_edge_process = subprocess.Popen(args)
+        self._owns_browser_process = True
 
         last_error = None
         for _ in range(30):
             time.sleep(0.5)
             try:
-                await self.start_connected_edge(cdp_url)
+                await self.start_connected_edge(cdp_url, owns_browser_process=True)
                 logger.info(
                     f"Dedicated Edge runtime ready for {account_email[:5]}*** "
                     f"(profile={profile_dir.name}, port={port})"
@@ -375,21 +585,24 @@ class BrowserManager:
 
         # If port is already open, just attach
         if self._is_cdp_port_open(cdp_url):
-            await self.start_connected_edge(cdp_url)
+            await self.start_connected_edge(cdp_url, owns_browser_process=False)
             return cdp_url
 
-        # Kill ALL existing Edge processes (Windows single-instance requirement)
+        # Kill ONLY existing Edge processes that lack --user-data-dir (default profile)
         # Without this, --remote-debugging-port is ignored because Edge opens
         # a tab in the existing instance instead of starting a new one.
-        logger.info("Closing all Edge instances for default profile streak...")
+        logger.info("Closing default Edge instances for streak...")
         try:
-            subprocess.run(
-                ["taskkill", "/f", "/im", "msedge.exe"],
-                capture_output=True, timeout=10,
-            )
+            kill_cmd = [
+                "powershell", "-NoProfile", "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+                "Where-Object { $_.CommandLine -notmatch '--user-data-dir' } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+            ]
+            subprocess.run(kill_cmd, capture_output=True, timeout=10)
             time.sleep(2)  # Wait for processes to fully terminate
         except Exception as e:
-            logger.debug(f"taskkill msedge: {e}")
+            logger.debug(f"powershell kill default msedge: {e}")
 
         edge_exe = get_edge_executable_path()
 
@@ -403,12 +616,13 @@ class BrowserManager:
             "https://rewards.bing.com",
         ]
         self._managed_edge_process = subprocess.Popen(args)
+        self._owns_browser_process = True
 
         last_error = None
         for _ in range(30):
             time.sleep(0.5)
             try:
-                await self.start_connected_edge(cdp_url)
+                await self.start_connected_edge(cdp_url, owns_browser_process=True)
                 logger.info(
                     f"Edge Streak runtime ready (DEFAULT profile, port={streak_port})"
                 )
@@ -470,7 +684,9 @@ class BrowserManager:
                 ignore_default_args=["--enable-automation", "--no-sandbox"],
             )
             self._attached_via_cdp = False
+            self._owns_browser_process = False
             self._preserve_browser_defaults = False
+            self._native_runtime_cdp_url = ""
             logger.info(
                 f"Browser started (Real Edge, "
                 f"headless={self.settings.get('headless', True)})"
@@ -483,7 +699,9 @@ class BrowserManager:
                 ignore_default_args=["--enable-automation", "--no-sandbox"],
             )
             self._attached_via_cdp = False
+            self._owns_browser_process = False
             self._preserve_browser_defaults = False
+            self._native_runtime_cdp_url = ""
             logger.info(
                 f"Browser started (Chromium fallback, "
                 f"headless={self.settings.get('headless', True)})"
@@ -516,8 +734,18 @@ class BrowserManager:
             logger.info("Context attached from existing Edge debug session")
             return context
 
-        ua = user_agent or get_random_user_agent(mode)
-        viewport = get_random_viewport(mode)
+        if user_agent:
+            ua = user_agent
+        elif mode == "mobile":
+            ua = get_random_mobile_rewards_user_agent()
+        else:
+            ua = get_random_user_agent(mode)
+
+        viewport = (
+            get_random_mobile_rewards_viewport()
+            if mode == "mobile"
+            else get_random_viewport(mode)
+        )
 
         # Profile dir per account
         profile_dir = None
@@ -621,6 +849,77 @@ class BrowserManager:
         # Block images/fonts
         if self.settings.get("block_images", False):
             await self._block_images(context)
+
+        # Block external protocol navigations (e.g. "Open Microsoft Edge?" dialog)
+        # context.route does NOT work for custom protocols (they bypass the network stack).
+        # Instead, inject JS to intercept at the DOM level before the OS dialog appears.
+        _protocol_block_js = """
+        (() => {
+            const BLOCKED = ['microsoft-edge:', 'ms-windows-store:'];
+            function stripProtocol(url) {
+                if (!url || typeof url !== 'string') return url;
+                for (const p of BLOCKED) {
+                    if (url.startsWith(p)) return url.slice(p.length);
+                }
+                return url;
+            }
+            function isBlocked(url) {
+                if (!url || typeof url !== 'string') return false;
+                for (const p of BLOCKED) {
+                    if (url.startsWith(p)) return true;
+                }
+                return false;
+            }
+            // 1. Rewrite <a href="microsoft-edge:..."> → plain URL
+            function rewriteLinks(root) {
+                try {
+                    const links = (root || document).querySelectorAll('a[href]');
+                    for (const a of links) {
+                        const h = a.getAttribute('href');
+                        if (h && isBlocked(h)) {
+                            a.setAttribute('href', stripProtocol(h));
+                        }
+                    }
+                } catch(e) {}
+            }
+            // 2. MutationObserver to catch dynamically added links
+            try {
+                const obs = new MutationObserver(() => rewriteLinks());
+                obs.observe(document.documentElement, { childList: true, subtree: true });
+            } catch(e) {}
+            // Run on existing DOM
+            if (document.readyState !== 'loading') rewriteLinks();
+            else document.addEventListener('DOMContentLoaded', () => rewriteLinks());
+
+            // 3. Override window.open
+            const origOpen = window.open;
+            window.open = function(url, ...args) {
+                if (isBlocked(url)) { url = stripProtocol(url); }
+                return origOpen.call(this, url, ...args);
+            };
+            // 4. Override location.assign / location.replace
+            const origAssign = location.assign.bind(location);
+            const origReplace = location.replace.bind(location);
+            location.assign = function(url) { return origAssign(isBlocked(url) ? stripProtocol(url) : url); };
+            location.replace = function(url) { return origReplace(isBlocked(url) ? stripProtocol(url) : url); };
+            // 5. Capture click on anchors as last resort
+            document.addEventListener('click', (e) => {
+                const a = e.target.closest('a[href]');
+                if (a) {
+                    const h = a.getAttribute('href');
+                    if (h && isBlocked(h)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        window.location.href = stripProtocol(h);
+                    }
+                }
+            }, true);
+        })();
+        """
+        try:
+            await context.add_init_script(_protocol_block_js)
+        except Exception as e:
+            logger.debug(f"Failed to add protocol-block init script: {e}")
 
         self.contexts.append(context)
         logger.info(f"Context created (mode={mode}, tz={self._fp['timezone']}, locale={self._fp['locale']})")
@@ -994,7 +1293,10 @@ class BrowserManager:
             page: The existing Playwright page to apply emulation to.
             enable: True to activate mobile emulation, False to clear it.
         """
-        from src.utils import get_random_user_agent, get_random_viewport, _EDGE_VERSION
+        from src.utils import (
+            get_random_mobile_rewards_user_agent,
+            get_random_mobile_rewards_viewport,
+        )
 
         context = page.context
 
@@ -1002,12 +1304,9 @@ class BrowserManager:
             client = await context.new_cdp_session(page)
 
             if enable:
-                mobile_ua = get_random_user_agent("mobile")
-                mobile_vp = get_random_viewport("mobile")
-                edge_major = _EDGE_VERSION.split(".")[0]
-
-                ua_lower = mobile_ua.lower()
-                is_ios = "iphone" in ua_lower or "ios" in ua_lower
+                mobile_ua = get_random_mobile_rewards_user_agent()
+                mobile_vp = get_random_mobile_rewards_viewport()
+                profile = _build_mobile_runtime_profile(mobile_ua)
 
                 # ── Step 1: Clear existing device metrics first (extension does this) ──
                 try:
@@ -1031,26 +1330,14 @@ class BrowserManager:
                 }
 
                 # Only set userAgentMetadata for Android (not iOS Safari)
-                if not is_ios:
-                    # Extract Chrome/Edge version from UA
-                    import re
-                    chrome_match = re.search(r'Chrome/(\d+)', mobile_ua)
-                    edge_match = re.search(r'Edg[A]?/(\d+)', mobile_ua)
-                    version = edge_match.group(1) if edge_match else (
-                        chrome_match.group(1) if chrome_match else edge_major
-                    )
-
+                if not profile["is_ios"]:
                     ua_override["userAgentMetadata"] = {
-                        "brands": [
-                            {"brand": "Not_A Brand", "version": "8"},
-                            {"brand": "Chromium", "version": version},
-                            {"brand": "Microsoft Edge", "version": version},
-                        ],
-                        "fullVersion": f"{version}.0.0.0",
-                        "platform": "Android",
-                        "platformVersion": "15.0.0",
-                        "architecture": "arm64",
-                        "model": "SM-S928B",
+                        "brands": profile["brands"],
+                        "fullVersion": profile["full_version"],
+                        "platform": profile["platform_name"],
+                        "platformVersion": profile["platform_version"],
+                        "architecture": profile["architecture"],
+                        "model": profile["model"],
                         "mobile": True,
                     }
 
@@ -1062,7 +1349,7 @@ class BrowserManager:
                 })
 
                 # ── Step 5: Enable touch emulation with maxTouchPoints=10 ──
-                max_touch = 5 if is_ios else 10
+                max_touch = profile["max_touch_points"]
                 await client.send("Emulation.setTouchEmulationEnabled", {
                     "enabled": True,
                     "maxTouchPoints": max_touch,
@@ -1078,7 +1365,11 @@ class BrowserManager:
                 # ── Step 7: Inject anti-fingerprint script via CDP ──
                 # CRITICAL: Playwright's add_init_script does NOT fire on CDP-navigated pages!
                 # Inject the extension's content.js anti-fingerprint directly via CDP.
-                anti_fingerprint_js = """(function() {
+                anti_fingerprint_js = _build_mobile_runtime_init_script(
+                    profile,
+                    screen_width=mobile_vp["width"],
+                    screen_height=mobile_vp["height"],
+                ) + """(function() {
                     // 1. Mask navigator.webdriver (critical bot detection vector)
                     try {
                         Object.defineProperty(navigator, 'webdriver', {
@@ -1187,15 +1478,14 @@ class BrowserManager:
         """
         from patchright.async_api import async_playwright as patchright_async
 
-        from src.utils import get_random_user_agent, get_random_viewport, _EDGE_VERSION
+        from src.utils import (
+            get_random_mobile_rewards_user_agent,
+            get_random_mobile_rewards_viewport,
+        )
 
-        mobile_ua = get_random_user_agent("mobile")
-        mobile_vp = get_random_viewport("mobile")
-        edge_major = _EDGE_VERSION.split(".")[0]
-
-        ua_lower = mobile_ua.lower()
-        is_ios = "iphone" in ua_lower or "ios" in ua_lower
-        platform_name = "iOS" if is_ios else "Android"
+        mobile_ua = get_random_mobile_rewards_user_agent()
+        mobile_vp = get_random_mobile_rewards_viewport()
+        profile = _build_mobile_runtime_profile(mobile_ua)
 
         logger.info(f"📱 Launching patchright Edge for mobile search...")
         logger.info(f"   UA: {mobile_ua[:60]}...")
@@ -1225,10 +1515,14 @@ class BrowserManager:
             locale=self._fp.get("locale", "en-US"),
             timezone_id=self._fp.get("timezone", "America/New_York"),
             extra_http_headers={
-                "sec-ch-ua": f'"Microsoft Edge";v="{edge_major}", "Chromium";v="{edge_major}", "Not_A Brand";v="24"',
+                "sec-ch-ua": (
+                    f'"{profile["brands"][2]["brand"]}";v="{profile["major_version"]}", '
+                    f'"Chromium";v="{profile["major_version"]}", "Not_A Brand";v="8"'
+                ),
                 "sec-ch-ua-mobile": "?1",
-                "sec-ch-ua-platform": f'"{platform_name}"',
-                "sec-ch-ua-platform-version": '"14.0"' if not is_ios else '"17.6.1"',
+                "sec-ch-ua-platform": f'"{profile["platform_name"]}"',
+                "sec-ch-ua-platform-version": f'"{profile["platform_version"]}"',
+                "sec-ch-ua-model": f'"{profile["model"]}"',
                 "sec-fetch-dest": "document",
                 "sec-fetch-mode": "navigate",
                 "sec-fetch-site": "none",
@@ -1274,145 +1568,69 @@ class BrowserManager:
         context._codex_mode = "mobile"
         context._codex_user_agent = mobile_ua
 
-        page = await context.new_page()
-
         # ── Inject comprehensive mobile fingerprint overrides ──
         # Bing server-side checks more than just UA: navigator.platform,
         # maxTouchPoints, screen dimensions, connection type, battery, etc.
         # This must run BEFORE any page loads (addInitScript).
-        mobile_platform = "iPhone" if is_ios else "Linux armv81"
-        mobile_touch_pts = 1 if is_ios else 5
-        mobile_dev_mem = 4
-        mobile_hw_conc = 4 if is_ios else 8
+        mobile_platform = profile["navigator_platform"]
+        mobile_touch_pts = profile["max_touch_points"]
         screen_w = mobile_vp["width"]
         screen_h = mobile_vp["height"]
+        fingerprint_js = _build_mobile_runtime_init_script(
+            profile,
+            screen_width=screen_w,
+            screen_height=screen_h,
+        )
 
-        fingerprint_js = f"""
-        (() => {{
-            // Override navigator properties
-            const platform = '{mobile_platform}';
-            const touchPoints = {mobile_touch_pts};
-            const ua = navigator.userAgent;  // Keep the context's UA
-
-            Object.defineProperty(navigator, 'platform', {{
-                get: () => platform,
-                configurable: true,
-            }});
-            Object.defineProperty(navigator, 'maxTouchPoints', {{
-                get: () => touchPoints,
-                configurable: true,
-            }});
-            Object.defineProperty(navigator, 'hardwareConcurrency', {{
-                get: () => {mobile_hw_conc},
-                configurable: true,
-            }});
-            Object.defineProperty(navigator, 'deviceMemory', {{
-                get: () => {mobile_dev_mem},
-                configurable: true,
-            }});
-            Object.defineProperty(navigator, 'vendor', {{
-                get: () => 'Google Inc.',
-                configurable: true,
-            }});
-
-            // Override screen to match mobile viewport
-            const screenW = {screen_w};
-            const screenH = {screen_h};
-            Object.defineProperty(screen, 'width', {{ get: () => screenW }});
-            Object.defineProperty(screen, 'height', {{ get: () => screenH }});
-            Object.defineProperty(screen, 'availWidth', {{ get: () => screenW }});
-            Object.defineProperty(screen, 'availHeight', {{ get: () => screenH }});
-            Object.defineProperty(screen, 'colorDepth', {{ get: () => 24 }});
-            Object.defineProperty(screen, 'pixelDepth', {{ get: () => 24 }});
-
-            // Override window.screen.orientation for mobile
-            if (screen.orientation) {{
-                Object.defineProperty(screen.orientation, 'type', {{
-                    get: () => screenH > screenW ? 'portrait-primary' : 'landscape-primary',
-                }});
-                Object.defineProperty(screen.orientation, 'angle', {{
-                    get: () => 0,
-                }});
-            }}
-
-            // Override connection to appear mobile
-            if (navigator.connection) {{
-                Object.defineProperty(navigator.connection, 'effectiveType', {{
-                    get: () => '4g',
-                    configurable: true,
-                }});
-                Object.defineProperty(navigator.connection, 'type', {{
-                    get: () => 'cellular',
-                    configurable: true,
-                }});
-                Object.defineProperty(navigator.connection, 'downlink', {{
-                    get: () => 10,
-                    configurable: true,
-                }});
-                Object.defineProperty(navigator.connection, 'rtt', {{
-                    get: () => 50,
-                    configurable: true,
-                }});
-                Object.defineProperty(navigator.connection, 'saveData', {{
-                    get: () => false,
-                    configurable: true,
-                }});
-            }}
-
-            // Override battery API with mobile-like values
-            if (navigator.getBattery) {{
-                const batteryMock = {{
-                    charging: Math.random() > 0.5,
-                    chargingTime: Infinity,
-                    dischargingTime: 3600 + Math.floor(Math.random() * 7200),
-                    level: 0.3 + Math.random() * 0.6,
-                    addEventListener: () => {{}},
-                    removeEventListener: () => {{}},
-                }};
-                navigator.getBattery = () => Promise.resolve(batteryMock);
-            }}
-
-            // Ensure window dimensions match mobile
-            Object.defineProperty(window, 'innerWidth', {{
-                get: () => screenW,
-                configurable: true,
-            }});
-            Object.defineProperty(window, 'innerHeight', {{
-                get: () => screenH,
-                configurable: true,
-            }});
-            Object.defineProperty(window, 'outerWidth', {{
-                get: () => screenW,
-                configurable: true,
-            }});
-            Object.defineProperty(window, 'outerHeight', {{
-                get: () => screenH,
-                configurable: true,
-            }});
-
-            // Ensure ontouchstart exists (mobile signal)
-            if (!('ontouchstart' in window)) {{
-                window.ontouchstart = null;
-            }}
-
-            // Override permissions to look mobile
-            const originalQuery = navigator.permissions?.query;
-            if (originalQuery) {{
-                navigator.permissions.query = (params) => {{
-                    if (params.name === 'notifications') {{
-                        return Promise.resolve({{ state: 'prompt', onchange: null }});
-                    }}
-                    return originalQuery.call(navigator.permissions, params);
-                }};
-            }}
-        }})();
-        """
-
-        await page.add_init_script(fingerprint_js)
+        await context.add_init_script(fingerprint_js)
+        page = await context.new_page()
 
         logger.info(f"📱 Patchright mobile browser ready (viewport {mobile_vp['width']}x{mobile_vp['height']}, "
                      f"platform={mobile_platform}, touch={mobile_touch_pts})")
         return pw, browser, context, page
+
+    async def capture_runtime_signature(self, page: Page) -> dict:
+        """Collect a compact browser/runtime fingerprint snapshot for diagnostics."""
+        try:
+            return await page.evaluate(
+                """async () => {
+                    const uaData = navigator.userAgentData;
+                    let highEntropy = null;
+                    if (uaData?.getHighEntropyValues) {
+                        try {
+                            highEntropy = await uaData.getHighEntropyValues([
+                                'architecture',
+                                'brands',
+                                'bitness',
+                                'fullVersionList',
+                                'mobile',
+                                'model',
+                                'platform',
+                                'platformVersion',
+                            ]);
+                        } catch (e) {}
+                    }
+
+                    return {
+                        userAgent: navigator.userAgent || '',
+                        platform: navigator.platform || '',
+                        maxTouchPoints: navigator.maxTouchPoints || 0,
+                        innerWidth: window.innerWidth || 0,
+                        innerHeight: window.innerHeight || 0,
+                        screenWidth: screen.width || 0,
+                        screenHeight: screen.height || 0,
+                        modeHint: document.documentElement?.clientWidth || 0,
+                        uaData: uaData ? {
+                            mobile: !!uaData.mobile,
+                            platform: uaData.platform || '',
+                            brands: Array.isArray(uaData.brands) ? uaData.brands : [],
+                        } : null,
+                        highEntropy,
+                    };
+                }"""
+            )
+        except Exception as e:
+            return {"error": str(e)}
 
     async def new_page(self, context: BrowserContext) -> Page:
         """Create a new page with Edge-like headers. Closes old tabs after."""
@@ -1420,6 +1638,8 @@ class BrowserManager:
             page = await context.new_page()
             page._codex_owned = True
             self._managed_page_ids.add(id(page))
+            # Inject protocol-block + webdriver removal for CDP pages too
+            await self._inject_protocol_block(page, context)
             return page
 
         existing_pages = context.pages
@@ -1443,16 +1663,79 @@ class BrowserManager:
 
         await page.set_extra_http_headers(self._client_hints_headers(context))
 
-        # CDP-level webdriver flag removal
-        try:
-            client = await context.new_cdp_session(page)
-            await client.send("Page.addScriptToEvaluateOnNewDocument", {
-                "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            })
-        except Exception:
-            pass
+        # Inject protocol-block + webdriver removal
+        await self._inject_protocol_block(page, context)
 
         return page
+
+    _PROTOCOL_BLOCK_JS = """
+    (() => {
+        const BLOCKED = ['microsoft-edge:', 'ms-windows-store:'];
+        function stripP(u) { if (!u || typeof u !== 'string') return u; for (const p of BLOCKED) { if (u.startsWith(p)) return u.slice(p.length); } return u; }
+        function isB(u) { if (!u || typeof u !== 'string') return false; for (const p of BLOCKED) { if (u.startsWith(p)) return true; } return false; }
+        function rewrite(root) { try { for (const a of (root||document).querySelectorAll('a[href]')) { const h=a.getAttribute('href'); if(h&&isB(h)) a.setAttribute('href',stripP(h)); } } catch(e){} }
+        try { new MutationObserver(()=>rewrite()).observe(document.documentElement,{childList:true,subtree:true}); } catch(e){}
+        if(document.readyState!=='loading') rewrite(); else document.addEventListener('DOMContentLoaded',()=>rewrite());
+        const oo=window.open; window.open=function(u,...a){if(isB(u))u=stripP(u);return oo.call(this,u,...a);};
+        try { const la=location.assign.bind(location),lr=location.replace.bind(location); location.assign=function(u){return la(isB(u)?stripP(u):u);}; location.replace=function(u){return lr(isB(u)?stripP(u):u);}; } catch(e){}
+        document.addEventListener('click',(e)=>{const a=e.target.closest('a[href]');if(a){const h=a.getAttribute('href');if(h&&isB(h)){e.preventDefault();e.stopPropagation();window.location.href=stripP(h);}}},true);
+    })();
+    """
+
+    async def _inject_protocol_block(self, page, context) -> None:
+        """Inject protocol-block + webdriver removal into a page via CDP.
+        
+        Uses BOTH:
+        1. addScriptToEvaluateOnNewDocument — runs on every future navigation
+        2. page.evaluate() — runs immediately on the current loaded page
+        3. frameNavigated listener — re-evaluates the script after each navigation
+        4. context popup handler — auto-closes about:blank tabs from protocol dialogs
+        """
+        full_source = (
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});\n"
+            + self._PROTOCOL_BLOCK_JS
+        )
+        try:
+            client = await context.new_cdp_session(page)
+            await client.send("Page.addScriptToEvaluateOnNewDocument", {"source": full_source})
+        except Exception:
+            pass
+        # Run on the CURRENT page immediately
+        try:
+            await page.evaluate(self._PROTOCOL_BLOCK_JS)
+        except Exception:
+            pass
+        # Re-inject after each navigation (SPA navigations lose the script)
+        async def _on_navigated(page_ref):
+            try:
+                await page_ref.evaluate(self._PROTOCOL_BLOCK_JS)
+            except Exception:
+                pass
+        def _frame_nav_handler(frame):
+            if frame == page.main_frame:
+                import asyncio
+                asyncio.ensure_future(_on_navigated(page))
+        page.on("framenavigated", _frame_nav_handler)
+        # Auto-close about:blank popup tabs spawned by protocol dialogs
+        def _on_popup(popup_page):
+            async def _handle():
+                try:
+                    await popup_page.wait_for_load_state("domcontentloaded", timeout=2000)
+                except Exception:
+                    pass
+                url = popup_page.url
+                if url in ("about:blank", "") or url.startswith("microsoft-edge:") or url.startswith("ms-windows-store:"):
+                    try:
+                        await popup_page.close()
+                        logger.debug(f"Auto-closed protocol popup tab: {url}")
+                    except Exception:
+                        pass
+            import asyncio
+            asyncio.ensure_future(_handle())
+        try:
+            page.on("popup", _on_popup)
+        except Exception:
+            pass
 
     async def close_managed_tabs(self, context: BrowserContext, keep: Page | None = None) -> int:
         """Close only tabs that were created by this manager."""
@@ -1480,20 +1763,29 @@ class BrowserManager:
             self._managed_page_ids.discard(id(page))
         await context.close()
 
+    async def disconnect_attached_browser(self) -> None:
+        """Detach from an externally managed CDP browser without shutting it down."""
+        if not self._attached_via_cdp:
+            return
+        self.contexts.clear()
+        self.browser = None
+        self._attached_via_cdp = False
+        self._owns_browser_process = False
+        self._preserve_browser_defaults = False
+        self._managed_page_ids.clear()
+        self._native_runtime_cdp_url = ""
+        if self.playwright:
+            await self.playwright.stop()
+            self.playwright = None
+        logger.info("Detached from existing Edge browser")
+
     async def close(self) -> None:
         """Close all contexts and browser."""
         if self._attached_via_cdp:
-            self.contexts.clear()
-            self.browser = None
-            self._attached_via_cdp = False
-            self._preserve_browser_defaults = False
-            self._managed_page_ids.clear()
-            if self.playwright:
-                await self.playwright.stop()
-                self.playwright = None
-            # Kill the native Edge subprocess if we started one
-            self._kill_managed_edge()
-            logger.info("Detached from existing Edge browser")
+            owns_browser_process = self._owns_browser_process
+            await self.disconnect_attached_browser()
+            if owns_browser_process:
+                self._kill_managed_edge()
             return
 
         for context in self.contexts[:]:
@@ -1534,3 +1826,5 @@ class BrowserManager:
             except Exception:
                 pass
             self._managed_edge_process = None
+        self._owns_browser_process = False
+        self._native_runtime_cdp_url = ""

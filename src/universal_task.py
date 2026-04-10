@@ -21,10 +21,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass, field, asdict
+from urllib.parse import urlsplit, parse_qs
 
 from playwright.async_api import Page, BrowserContext
 
 from src.utils import (
+    emit_diagnostic_log,
     logger,
     REWARDS_URL,
     close_other_tabs,
@@ -35,6 +37,8 @@ from src.humanizer import Humanizer
 # ─── Task State Persistence ────────────────────────────────────────────────
 
 STATE_FILE = Path("data/task_state.json")
+TASK_CACHE_WINDOW = timedelta(hours=12)
+STRICT_COMPLETION_CATEGORIES = {"daily_set", "more_promo"}
 
 
 def _load_state() -> dict:
@@ -57,6 +61,138 @@ def _save_state(state: dict) -> None:
         )
     except Exception as e:
         logger.debug(f"Could not save task state: {e}")
+
+
+def _requires_strict_completion(category: str) -> bool:
+    """Return True when local optimistic cache/verification should be ignored."""
+    return category in STRICT_COMPLETION_CATEGORIES
+
+
+def _should_skip_task_via_cache(
+    task,
+    visited_at_str: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Allow verified-completion cache skips within the cache window."""
+    now = now or datetime.now()
+    try:
+        visited_at = datetime.fromisoformat(visited_at_str)
+    except ValueError:
+        return False
+    return now - visited_at < TASK_CACHE_WINDOW
+
+
+def _should_cache_task_completion(task, verified_complete: bool) -> bool:
+    """Only admit verified task completions into local cache."""
+    return bool(verified_complete and getattr(task, "id", ""))
+
+
+def _build_earn_card_cache_key(href: str = "", selector: str = "") -> str:
+    """Build a stable cache key without collapsing distinct Bing search cards."""
+    href = (href or "").strip()
+    selector = (selector or "").strip()
+    if not href:
+        return selector
+
+    try:
+        parsed = urlsplit(href)
+    except Exception:
+        return href[:240]
+
+    if "bing.com" in parsed.netloc.lower() and parsed.path.lower() == "/search":
+        query = parse_qs(parsed.query).get("q", [""])[0].strip()
+        if query:
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?q={query}"[:240]
+
+    return href[:240]
+
+
+def _should_skip_earn_card_via_cache(
+    cache_key: str,
+    visited_cards: dict,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Skip earn cards only when an exact recent cache entry exists."""
+    if not cache_key:
+        return False
+
+    visited_at_str = visited_cards.get(cache_key)
+    if not visited_at_str:
+        return False
+
+    now = now or datetime.now()
+    try:
+        visited_at = datetime.fromisoformat(visited_at_str)
+    except ValueError:
+        return False
+    return now - visited_at < TASK_CACHE_WINDOW
+
+
+def _should_cache_earn_card_visit(cache_key: str, proven_complete: bool) -> bool:
+    """Only admit earn-card visits into cache when a concrete action succeeded."""
+    return bool(cache_key and proven_complete)
+
+
+def _normalized_offer_text_for_matching(*parts: str) -> str:
+    """Normalize Rewards offer text for lightweight rule-based matching."""
+    raw = " ".join(part for part in parts if part)
+    lowered = raw.replace("\u200b", " ").replace("\xa0", " ").lower()
+    return " ".join(lowered.split())
+
+
+def get_deferred_offer_reason(task) -> str | None:
+    """Return a reason when a task is visible but not realistically completable in-session."""
+    task_category = getattr(task, "category", "")
+    offer_text = _normalized_offer_text_for_matching(
+        getattr(task, "title", ""),
+        getattr(task, "description", ""),
+    )
+
+    if "streak bonus" in offer_text:
+        return "streak_bonus_non_actionable"
+
+    if task_category != "more_promo":
+        return None
+
+    destination_url = str(getattr(task, "destination_url", "") or "").strip().lower()
+    offer_text = _normalized_offer_text_for_matching(
+        getattr(task, "title", ""),
+        getattr(task, "description", ""),
+    )
+
+    search_bar_offer = (
+        "searchbar" in destination_url
+        or any(token in offer_text for token in ("thanh tìm kiếm", "search bar", "search box"))
+    )
+    if search_bar_offer and any(
+        token in offer_text
+        for token in ("3 day", "3 days", "3 ngày", "three day")
+    ):
+        return "multi_day_search_bar"
+
+    if any(
+        token in offer_text
+        for token in (
+            "turn referrals into rewards",
+            "referrals",
+            "referral",
+            "share an invite",
+            "invite friends",
+            "friends search on bing",
+            "earn 7,500 points when friends search on bing",
+        )
+    ):
+        return "external_referral"
+
+    if "streak bonus" in offer_text:
+        return "streak_bonus_non_actionable"
+
+    if "upcoming events near me" in offer_text:
+        return "location_dependent_offer"
+
+    return None
 
 
 # ─── Task Data Classes ─────────────────────────────────────────────────────
@@ -107,8 +243,50 @@ class UniversalTaskScanner:
         self.settings = settings or {}
         self.challenge_handler = challenge_handler
         self._active_account_email = ""
-        self._daily_set_bulk_attempted = False
+        self._daily_set_bulk_attempted_titles: set[str] = set()
+        self._session_completed_categories: set[str] = set()
+        self._session_daily_set_titles: set[str] = set()
         self._log = on_log or (lambda level, msg: logger.info(msg))
+        self._macro_player = None
+        try:
+            from src.macro_player import MacroPlayer
+            self._macro_player = MacroPlayer()
+        except Exception as e:
+            logger.debug(f"MacroPlayer init skipped: {e}")
+        # Page-agent (browser-side LLM automation) — lazy init
+        self._page_agent = None
+        if self.settings.get("page_agent_enabled", False):
+            try:
+                from src.page_agent_flow import PageAgentFlow
+                self._page_agent = PageAgentFlow(self.settings)
+            except Exception as e:
+                logger.debug(f"PageAgentFlow init skipped: {e}")
+
+    def _diag(self, message: str, *, level: str = "info", scope: str = "tasks", **fields) -> None:
+        """Emit diagnostic logs for complex task-routing and verification decisions."""
+        emit_diagnostic_log(
+            self._log,
+            self.settings,
+            message,
+            level=level,
+            scope=scope,
+            **fields,
+        )
+
+    @staticmethod
+    def _task_diag_payload(task: RewardsTask) -> dict:
+        """Return a compact diagnostic payload for one Rewards task."""
+        return {
+            "id": task.id,
+            "title": task.title[:80],
+            "category": task.category,
+            "task_type": task.task_type,
+            "is_complete": task.is_complete,
+            "is_locked": task.is_locked,
+            "points": task.points,
+            "points_max": task.points_max,
+            "destination_url": task.destination_url[:160],
+        }
 
     # ─── Main Entry Point ──────────────────────────────────────────────
 
@@ -125,6 +303,7 @@ class UniversalTaskScanner:
             {
                 "total": int,
                 "completed": int,
+                "deferred": int,
                 "skipped_locked": int,
                 "skipped_done": int,
                 "failed": int,
@@ -134,12 +313,16 @@ class UniversalTaskScanner:
         skip_categories = skip_categories or []
         stats = {
             "total": 0, "completed": 0,
+            "deferred": 0,
             "skipped_locked": 0, "skipped_done": 0,
             "failed": 0, "tasks": [],
             "by_category": {},
+            "session_proofs": {},
         }
         self._active_account_email = account_email
-        self._daily_set_bulk_attempted = False
+        self._daily_set_bulk_attempted_titles.clear()
+        self._session_completed_categories.clear()
+        self._session_daily_set_titles.clear()
 
         # 1. Fetch all tasks from API
         self._log("info", "🔍 Scanning all Rewards tasks...")
@@ -147,14 +330,42 @@ class UniversalTaskScanner:
         tasks = await self._fetch_all_tasks(page)
         stats["total"] = len(tasks)
         self._log("info", f"Found {len(tasks)} total tasks")
+        self._diag(
+            "Fetched Rewards task inventory",
+            scope="task-scan",
+            account=account_email,
+            total=len(tasks),
+            categories={
+                category: sum(1 for task in tasks if task.category == category)
+                for category in sorted({task.category for task in tasks})
+            },
+        )
+        self._session_daily_set_titles.update(
+            (task.title or "").strip()
+            for task in tasks
+            if task.category == "daily_set" and (task.title or "").strip()
+        )
 
         # 1b. DOM Cross-Validation — override stale API completion status
         dom_completed_ids = await self._dom_verify_task_status(page, tasks)
         if dom_completed_ids:
             self._log("info", f"👁️ DOM detected {len(dom_completed_ids)} additional completed tasks")
+            self._diag(
+                "DOM cross-check found additional completed task ids",
+                scope="task-scan",
+                dom_completed_ids=sorted(dom_completed_ids),
+            )
             for task in tasks:
                 if not task.is_complete and task.id in dom_completed_ids:
                     task.is_complete = True
+
+        live_category_proofs = await self._apply_live_category_completion_proofs(page, tasks)
+        if live_category_proofs:
+            self._diag(
+                "Applied live category completion proofs before filtering",
+                scope="task-scan",
+                proofs=live_category_proofs,
+            )
 
         # 2. Load state for time-gated task tracking
         state = _load_state()
@@ -168,6 +379,7 @@ class UniversalTaskScanner:
                 {
                     "total": 0,
                     "completed": 0,
+                    "deferred": 0,
                     "skipped_done": 0,
                     "skipped_locked": 0,
                     "failed": 0,
@@ -176,6 +388,11 @@ class UniversalTaskScanner:
             category_stats["total"] += 1
 
             if task.category in skip_categories:
+                self._diag(
+                    "Skipping task because category is excluded",
+                    scope="task-filter",
+                    **self._task_diag_payload(task),
+                )
                 continue
 
             if task.is_complete:
@@ -187,6 +404,11 @@ class UniversalTaskScanner:
                 stats["skipped_locked"] += 1
                 category_stats["skipped_locked"] += 1
                 self._log("info", f"🔒 Locked: {task.title[:40]} (time-gated)")
+                self._diag(
+                    "Task is locked/time-gated",
+                    scope="task-filter",
+                    **self._task_diag_payload(task),
+                )
                 # Track for next run
                 account_state.setdefault("locked_tasks", {})[task.id] = {
                     "title": task.title,
@@ -198,17 +420,47 @@ class UniversalTaskScanner:
             visited_tasks = account_state.setdefault("visited_tasks", {})
             if task.id in visited_tasks:
                 visited_at_str = visited_tasks[task.id]
-                try:
-                    visited_at = datetime.fromisoformat(visited_at_str)
-                    if datetime.now() - visited_at < timedelta(hours=12):
-                        stats["skipped_done"] += 1
-                        category_stats["skipped_done"] += 1
-                        self._log("info", f"✅ Local Cache: Skipping recently completed task: {task.title[:30]}")
-                        continue
-                except ValueError:
-                    pass
+                if _should_skip_task_via_cache(task, visited_at_str):
+                    stats["skipped_done"] += 1
+                    category_stats["skipped_done"] += 1
+                    self._log("info", f"✅ Local Cache: Skipping recently completed task: {task.title[:30]}")
+                    self._diag(
+                        "Skipping task due to recent cache hit",
+                        scope="task-filter",
+                        visited_at=visited_at_str,
+                        **self._task_diag_payload(task),
+                    )
+                    continue
+
+            deferred_reason = get_deferred_offer_reason(task)
+            if deferred_reason:
+                stats["deferred"] += 1
+                category_stats["deferred"] += 1
+                stats["tasks"].append({
+                    "title": task.title[:40],
+                    "status": "deferred",
+                    "type": task.task_type,
+                    "reason": deferred_reason,
+                })
+                self._log(
+                    "info",
+                    f"⏭️ Deferred offer: {task.title[:40]} "
+                    f"({deferred_reason.replace('_', ' ')})",
+                )
+                self._diag(
+                    "Deferred keep-earning offer after classification",
+                    scope="task-filter",
+                    deferred_reason=deferred_reason,
+                    **self._task_diag_payload(task),
+                )
+                continue
 
             actionable.append(task)
+            self._diag(
+                "Task remains actionable after filtering",
+                scope="task-filter",
+                **self._task_diag_payload(task),
+            )
 
         # Save updated state
         state[account_email] = account_state
@@ -223,15 +475,38 @@ class UniversalTaskScanner:
         self._log("info",
                    f"📋 {len(actionable)} tasks to complete "
                    f"({stats['skipped_done']} done, {stats['skipped_locked']} locked)")
+        self._diag(
+            "Prepared actionable task queue",
+            scope="task-scan",
+            actionable_count=len(actionable),
+            stats=stats["by_category"],
+        )
 
         # 5. Execute tasks
         failed_tasks = []
         for i, task in enumerate(actionable):
             try:
+                if task.category in self._session_completed_categories:
+                    stats["skipped_done"] += 1
+                    stats["by_category"].setdefault(task.category, {}).setdefault("skipped_done", 0)
+                    stats["by_category"][task.category]["skipped_done"] += 1
+                    self._log(
+                        "info",
+                        f"[{i + 1}/{len(actionable)}] {task.category}: session proof already satisfied",
+                    )
+                    continue
+
                 await self._ensure_no_manual_challenge(page, task.title[:40] or "Rewards task")
                 self._log("info",
                            f"[{i + 1}/{len(actionable)}] {task.category}: "
                            f"{task.title[:40]}... ({task.task_type})")
+                self._diag(
+                    "Starting task execution",
+                    scope="task-run",
+                    queue_index=i + 1,
+                    queue_total=len(actionable),
+                    **self._task_diag_payload(task),
+                )
 
                 success = await self._execute_task(page, task)
                 if success:
@@ -247,11 +522,17 @@ class UniversalTaskScanner:
                         "type": task.task_type,
                     })
 
-                    # Register completed task into memory cache to outsmart lagging MS APIs
-                    state = _load_state()
-                    account_state = state.setdefault(account_email, {})
-                    account_state.setdefault("visited_tasks", {})[task.id] = datetime.now().isoformat()
-                    _save_state(state)
+                    if _should_cache_task_completion(task, success):
+                        # Register completed task into memory cache to outsmart lagging MS APIs
+                        state = _load_state()
+                        account_state = state.setdefault(account_email, {})
+                        account_state.setdefault("visited_tasks", {})[task.id] = datetime.now().isoformat()
+                        _save_state(state)
+                    self._diag(
+                        "Task completed and verified",
+                        scope="task-run",
+                        **self._task_diag_payload(task),
+                    )
                 else:
                     stats["failed"] += 1
                     stats["by_category"].setdefault(task.category, {}).setdefault("failed", 0)
@@ -262,6 +543,11 @@ class UniversalTaskScanner:
                         "status": "failed",
                         "type": task.task_type,
                     })
+                    self._diag(
+                        "Task failed verification or execution",
+                        scope="task-run",
+                        **self._task_diag_payload(task),
+                    )
 
                 # Clean up tabs
                 try:
@@ -273,6 +559,13 @@ class UniversalTaskScanner:
 
             except Exception as e:
                 logger.warning(f"Task failed: {task.title[:30]}: {e}")
+                self._diag(
+                    "Task raised exception during execution",
+                    level="error",
+                    scope="task-run",
+                    error=str(e),
+                    **self._task_diag_payload(task),
+                )
                 stats["failed"] += 1
                 failed_tasks.append(task)
                 stats["tasks"].append({
@@ -306,6 +599,13 @@ class UniversalTaskScanner:
                 break
                 
             self._log("info", f"🔄 Auto-retry (Round {retry_round + 1}/{retry_limit}): {len(failed_tasks)} failed tasks...")
+            self._diag(
+                "Starting automatic retry round",
+                scope="task-retry",
+                round=retry_round + 1,
+                retry_limit=retry_limit,
+                failed_task_ids=[task.id for task in failed_tasks],
+            )
             await asyncio.sleep(5)
             retry_tasks = await self._fetch_all_tasks(page)
             
@@ -315,12 +615,21 @@ class UniversalTaskScanner:
             for rt in retry_tasks:
                 if rt.is_complete or rt.is_locked:
                     continue
+                if rt.category in self._session_completed_categories:
+                    continue
+                if get_deferred_offer_reason(rt):
+                    continue
                 # Only retry tasks that failed before
                 if not any(ft.id == rt.id for ft in failed_tasks):
                     continue
                     
                 try:
                     self._log("info", f"  🔁 Retry: {rt.title[:40]}")
+                    self._diag(
+                        "Retrying previously failed task",
+                        scope="task-retry",
+                        **self._task_diag_payload(rt),
+                    )
                     success = await self._execute_task(page, rt)
                     if success:
                         success = await self._verify_task_completion(page, rt)
@@ -343,6 +652,12 @@ class UniversalTaskScanner:
                     
             if retried > 0:
                 self._log("info", f"  ✅ Retried successfully this round: {retried}")
+                self._diag(
+                    "Retry round produced recovered tasks",
+                    scope="task-retry",
+                    recovered=retried,
+                    still_failed=[task.id for task in still_failed],
+                )
                 
             failed_tasks = still_failed
 
@@ -367,6 +682,23 @@ class UniversalTaskScanner:
         self._log("info",
                    f"✅ Tasks: {stats['completed']}/{stats['total']} completed, "
                    f"{stats['skipped_locked']} locked, {stats['failed']} failed")
+        stats["session_proofs"] = {
+            "daily_set_complete": "daily_set" in self._session_completed_categories,
+            "daily_set_titles": sorted(self._session_daily_set_titles),
+        }
+        self._diag(
+            "Task scan completed",
+            scope="task-scan",
+            totals={
+                "total": stats["total"],
+                "completed": stats["completed"],
+                "deferred": stats["deferred"],
+                "skipped_done": stats["skipped_done"],
+                "skipped_locked": stats["skipped_locked"],
+                "failed": stats["failed"],
+            },
+            session_proofs=stats.get("session_proofs", {}),
+        )
 
         return stats
 
@@ -407,10 +739,23 @@ class UniversalTaskScanner:
 
     async def _verify_task_completion(self, page: Page, task: RewardsTask) -> bool:
         """Hybrid 3-layer verification: Memory Cache → DOM visual → API."""
+        strict_completion = _requires_strict_completion(task.category)
+        offer_text = self._normalized_offer_text(task)
+        self._diag(
+            "Beginning task verification",
+            scope="task-verify",
+            strict_completion=strict_completion,
+            **self._task_diag_payload(task),
+        )
 
         # Layer 1: URL/visit tasks — optimistic pass (they always count)
-        if task.task_type in ("urlreward", "visit"):
+        if task.task_type in ("urlreward", "visit") and not strict_completion:
             self._log("info", f"  ✅ Optimistically completed URL task (skipping strict API verify)")
+            self._diag(
+                "Verification short-circuited by optimistic URL policy",
+                scope="task-verify",
+                **self._task_diag_payload(task),
+            )
             return True
 
         # Layer 2: DOM visual cues — check if the page shows completion
@@ -418,18 +763,65 @@ class UniversalTaskScanner:
             dom_done = await self._dom_check_single_task_done(page, task)
             if dom_done:
                 self._log("info", f"  ✅ DOM visual confirms task completed")
+                self._diag(
+                    "Verification passed from DOM cues",
+                    scope="task-verify",
+                    **self._task_diag_payload(task),
+                )
                 return True
         except Exception as _e:
             logger.debug(f"DOM visual check suppressed: {_e}")
 
+        # Layer 2b: some Rewards cards only render completion cues on /earn or /dashboard.
+        try:
+            dom_done_elsewhere = await self._dom_check_task_done_across_rewards_pages(page, task)
+            if dom_done_elsewhere:
+                self._log("info", f"  ✅ Rewards page DOM confirms task completed")
+                self._diag(
+                    "Verification passed from candidate Rewards page DOM cues",
+                    scope="task-verify",
+                    **self._task_diag_payload(task),
+                )
+                return True
+        except Exception as _e:
+            logger.debug(f"Cross-page DOM visual check suppressed: {_e}")
+
         # Layer 3: API verification (slowest, may lag)
         initial_wait = 5 if task.category == "punch_card" else 2
         max_attempts = 2 if task.category == "punch_card" else 1
+        if strict_completion:
+            initial_wait = max(initial_wait, 3)
+            max_attempts = max(max_attempts, 2)
+        if task.category == "more_promo":
+            initial_wait = max(initial_wait, 7)
+            max_attempts = max(max_attempts, 4)
+            if any(
+                token in offer_text
+                for token in (
+                    "turn referrals into rewards",
+                    "referrals",
+                    "referral",
+                    "invite friends",
+                    "thanh tìm kiếm",
+                    "search box",
+                    "search bar",
+                    "search with bing",
+                )
+            ):
+                initial_wait = max(initial_wait, 8)
 
         for attempt in range(max_attempts):
             try:
                 await asyncio.sleep(initial_wait if attempt == 0 else 5)
                 refreshed_tasks = await self._fetch_all_tasks(page)
+                self._diag(
+                    "Fetched fresh task inventory for verification attempt",
+                    scope="task-verify",
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    inventory_size=len(refreshed_tasks),
+                    **self._task_diag_payload(task),
+                )
                 refreshed = next(
                     (
                         candidate for candidate in refreshed_tasks
@@ -442,9 +834,33 @@ class UniversalTaskScanner:
                 )
 
                 if refreshed is None:
+                    if strict_completion:
+                        self._log(
+                            "info",
+                            f"  ⚠️ Task disappeared before strict verification: {task.title[:40]}",
+                        )
+                        self._diag(
+                            "Strict verification failed because task disappeared",
+                            scope="task-verify",
+                            attempt=attempt + 1,
+                            **self._task_diag_payload(task),
+                        )
+                        return False
+                    self._diag(
+                        "Non-strict verification tolerated missing task after action",
+                        scope="task-verify",
+                        attempt=attempt + 1,
+                        **self._task_diag_payload(task),
+                    )
                     return True
 
                 if refreshed.is_complete:
+                    self._diag(
+                        "Verification passed via refreshed API state",
+                        scope="task-verify",
+                        attempt=attempt + 1,
+                        refreshed=self._task_diag_payload(refreshed),
+                    )
                     return True
 
                 if attempt < max_attempts - 1:
@@ -452,69 +868,182 @@ class UniversalTaskScanner:
                         "info",
                         f"  ⏳ Waiting for server to register completion... (retry {attempt + 1})",
                     )
+                    self._diag(
+                        "Verification still pending after refreshed API state",
+                        scope="task-verify",
+                        attempt=attempt + 1,
+                        refreshed=self._task_diag_payload(refreshed),
+                    )
                     continue
 
                 self._log(
                     "info",
                     f"  ⚠️ Task did not verify as complete: {task.title[:40]}",
                 )
+                self._diag(
+                    "Verification exhausted all retries without completion",
+                    scope="task-verify",
+                    refreshed=self._task_diag_payload(refreshed),
+                    **self._task_diag_payload(task),
+                )
                 return False
             except Exception as e:
                 logger.warning(f"Task verification failed for {task.title[:30]}: {e}")
+                self._diag(
+                    "Verification raised exception",
+                    level="error",
+                    scope="task-verify",
+                    error=str(e),
+                    **self._task_diag_payload(task),
+                )
                 return False
+        return False
+
+    async def _dom_check_task_done_across_rewards_pages(self, page: Page, task: RewardsTask) -> bool:
+        """Check candidate Rewards surfaces because strict tasks do not always render on the current page."""
+        checked_urls = {page.url}
+        for rewards_url in self._candidate_rewards_pages(task):
+            if not rewards_url or rewards_url in checked_urls:
+                continue
+            checked_urls.add(rewards_url)
+            try:
+                await page.goto(
+                    rewards_url,
+                    wait_until="domcontentloaded",
+                    timeout=35000,
+                )
+                await asyncio.sleep(2)
+                if task.category == "daily_set" and "/earn" not in rewards_url:
+                    await self._open_daily_set_panel(page)
+                    await asyncio.sleep(1)
+                if await self._dom_check_single_task_done(page, task):
+                    return True
+            except Exception:
+                continue
         return False
 
     async def _dom_check_single_task_done(self, page: Page, task: RewardsTask) -> bool:
         """Check if a single task shows visual completion cues on the current page."""
-        title_snippet = (task.title or "")[:30]
+        title_snippet = (task.title or "").strip()
         if not title_snippet:
             return False
+        description_snippet = (task.description or "").strip()
+        token_list = self._task_title_tokens(task)
         try:
             return await page.evaluate("""
-                (titleSnippet) => {
+                ({ titleSnippet, descriptionSnippet, tokenList }) => {
                     const normalize = s => (s || '').replace(/[\u200b\u00a0]/g, ' ').trim().toLowerCase();
                     const target = normalize(titleSnippet);
-                    if (!target) return false;
+                    const description = normalize(descriptionSnippet);
+                    const tokens = Array.isArray(tokenList) ? tokenList.map(normalize).filter(Boolean) : [];
+                    if (!target && !tokens.length) return false;
 
                     const cards = document.querySelectorAll(
                         'mee-card, [class*="card"], [data-bi-area], [class*="earn"]'
                     );
 
+                    let bestCard = null;
+                    let bestScore = 0;
                     for (const card of cards) {
                         const text = normalize(card.innerText || card.textContent || '');
-                        if (!text.includes(target)) continue;
+                        if (!text) continue;
 
-                        // Check visual completion cues
-                        if (text.includes('completed') || text.includes('✓') || text.includes('✔')) {
-                            return true;
+                        let score = 0;
+                        if (target && text.includes(target)) {
+                            score += 1000 + target.length;
                         }
-
-                        // Check for checkmark icons
-                        const icons = card.querySelectorAll(
-                            'svg, [class*="check"], [class*="complete"], [class*="done"], [aria-label*="complete"]'
-                        );
-                        if (icons.length > 0) {
-                            for (const ic of icons) {
-                                const cl = (ic.className || '').toLowerCase();
-                                const al = (ic.getAttribute('aria-label') || '').toLowerCase();
-                                if (cl.includes('check') || cl.includes('complete') || cl.includes('done')
-                                    || al.includes('check') || al.includes('complete')) {
-                                    return true;
-                                }
+                        if (description && text.includes(description)) {
+                            score += 600 + description.length;
+                        }
+                        let tokenHits = 0;
+                        for (const token of tokens) {
+                            if (token && text.includes(token)) {
+                                tokenHits += 1;
                             }
                         }
-
-                        // Check for muted/disabled styling
-                        const style = window.getComputedStyle(card);
-                        if (parseFloat(style.opacity) < 0.6) {
-                            return true;
+                        score += tokenHits * 80;
+                        if (!score || score <= bestScore) {
+                            continue;
                         }
+                        bestCard = card;
+                        bestScore = score;
+                    }
+
+                    if (!bestCard) {
+                        return false;
+                    }
+
+                    const bestText = normalize(bestCard.innerText || bestCard.textContent || '');
+                    if (bestText.includes('completed') || bestText.includes('✓') || bestText.includes('✔')) {
+                        return true;
+                    }
+
+                    const icons = bestCard.querySelectorAll(
+                        'svg, [class*="check"], [class*="complete"], [class*="done"], [aria-label*="complete"]'
+                    );
+                    if (icons.length > 0) {
+                        for (const ic of icons) {
+                            const cl = (ic.className || '').toLowerCase();
+                            const al = (ic.getAttribute('aria-label') || '').toLowerCase();
+                            if (cl.includes('check') || cl.includes('complete') || cl.includes('done')
+                                || al.includes('check') || al.includes('complete')) {
+                                return true;
+                            }
+                        }
+                    }
+
+                    const style = window.getComputedStyle(bestCard);
+                    if (parseFloat(style.opacity) < 0.6) {
+                        return true;
                     }
                     return false;
                 }
-            """, title_snippet)
+            """, {
+                "titleSnippet": title_snippet,
+                "descriptionSnippet": description_snippet,
+                "tokenList": token_list,
+            })
         except Exception:
             return False
+
+    async def _apply_live_category_completion_proofs(self, page: Page, tasks: list[RewardsTask]) -> dict[str, dict]:
+        """Use live Rewards overview to short-circuit categories already complete on-page."""
+        proofs: dict[str, dict] = {}
+        needs_daily_set_proof = any(
+            task.category == "daily_set" and not task.is_complete
+            for task in tasks
+        )
+        if not needs_daily_set_proof:
+            return proofs
+
+        try:
+            from src.streaks import TaskDetector
+
+            overview = await TaskDetector().get_all_tasks(page)
+        except Exception as e:
+            logger.debug(f"Live category proof check failed: {e}")
+            return proofs
+
+        daily_set = overview.get("daily_set", {})
+        daily_completed = int(daily_set.get("completed", 0) or 0)
+        daily_total = int(daily_set.get("total", 0) or 0)
+        if daily_total <= 0 or daily_completed < daily_total:
+            return proofs
+
+        for task in tasks:
+            if task.category == "daily_set":
+                task.is_complete = True
+        self._session_completed_categories.add("daily_set")
+        proofs["daily_set"] = {
+            "completed": daily_completed,
+            "total": daily_total,
+            "source": "live_rewards_overview",
+        }
+        self._log(
+            "info",
+            f"👁️ Live Rewards overview confirms Daily Set already complete ({daily_completed}/{daily_total})",
+        )
+        return proofs
 
     async def _dom_verify_task_status(self, page: Page, tasks: list) -> set:
         """Cross-validate API tasks against DOM visual cues on the earn page.
@@ -618,74 +1147,31 @@ class UniversalTaskScanner:
                                 wait_until="domcontentloaded", timeout=35000)
                 await asyncio.sleep(3)
 
-            # Fetch API data
-            api_data = await page.evaluate("""
-                async () => {
-                    try {
-                        const r = await fetch('/api/getuserinfo?type=1', {
-                            credentials: 'include',
-                            headers: {'Accept': 'application/json'}
-                        });
-                        return await r.json();
-                    } catch(e) { return null; }
-                }
-            """)
-
-            if not api_data:
-                logger.warning("Rewards API returned no data")
-                return tasks
-
-            dashboard = api_data.get("dashboard", {})
-
-            # ── Daily Set Promotions ──
-            daily_sets = dashboard.get("dailySetPromotions", {})
-            for item in select_active_daily_set_items(daily_sets):
-                task = self._parse_task(item, "daily_set")
+            # Fetch tasks via the pure DOM visual scraper
+            from src.dashboard_scraper import scan_dashboard_dom
+            dom_tasks = await scan_dashboard_dom(page)
+            
+            for dt in dom_tasks:
+                task = RewardsTask()
+                # We use the title as ID since it's the only unique identifier we extract from DOM
+                task.id = dt["title"] 
+                task.title = dt["title"]
+                task.description = dt["description"]
+                task.points = 0
+                task.points_max = dt["points"]
+                task.destination_url = dt["url"]
+                task.is_complete = False # Dashboard DOM only yields incomplete tasks
+                task.category = dt["category"] # "unknown" typically
+                task.task_type = "quiz" if dt["is_quiz"] else "unknown"
+                task.offer_id = "" # Deprecated via DOM layer
+                
+                # We stash the DOM index here so we can natively click it later without CSS selectors
+                task.raw_data = {"element_index": dt["element_index"]}
+                
                 tasks.append(task)
-
-            # ── More Promotions (Quests, Activities) ──
-            more_promos = dashboard.get("morePromotions", [])
-            for item in more_promos:
-                task = self._parse_task(item, "more_promo")
-                tasks.append(task)
-
-            # ── Punch Cards ──
-            punch_cards = dashboard.get("punchCards", [])
-            for pc in punch_cards:
-                parent_promo = pc.get("parentPromotion", {})
-                parent_id = parent_promo.get("offerId", "")
-                children = pc.get("childPromotions", [])
-
-                # Skip expired punch cards
-                parent_expiry = parent_promo.get("expirationDate", "")
-                if parent_expiry:
-                    try:
-                        from datetime import datetime as dt
-                        expiry_dt = dt.fromisoformat(
-                            parent_expiry.replace("Z", "+00:00")
-                        )
-                        if expiry_dt < dt.now(expiry_dt.tzinfo):
-                            logger.debug(
-                                f"Skipping expired punch card: "
-                                f"{parent_promo.get('title', '?')}"
-                            )
-                            continue
-                    except Exception:
-                        pass
-
-                # Skip if parent is already complete
-                if parent_promo.get("complete", False):
-                    continue
-
-                for idx, child in enumerate(children):
-                    task = self._parse_task(child, "punch_card")
-                    task.parent_id = parent_id
-                    task.child_index = idx
-                    task.raw_data["parent_promotion"] = parent_promo
-                    tasks.append(task)
-
+                
         except Exception as e:
-            logger.error(f"Failed to fetch tasks: {e}")
+            logger.error(f"Failed to fetch visual tasks from DOM: {e}")
 
         return tasks
 
@@ -790,8 +1276,12 @@ class UniversalTaskScanner:
                     break
 
             if not clicked:
-                if task.category == "daily_set" and not self._daily_set_bulk_attempted:
-                    self._daily_set_bulk_attempted = True
+                daily_set_attempt_key = self._normalized_task_title_key(task.title or task.id or "")
+                if (
+                    task.category == "daily_set"
+                    and daily_set_attempt_key not in self._daily_set_bulk_attempted_titles
+                ):
+                    self._daily_set_bulk_attempted_titles.add(daily_set_attempt_key)
                     try:
                         from src.daily_set import DailySetCompleter
 
@@ -801,8 +1291,18 @@ class UniversalTaskScanner:
                             settings=self.settings,
                             ai_agent=self.ai_agent,
                         )
-                        daily_stats = await daily_set.complete_daily_set(page)
-                        if daily_stats.get("completed", 0) > 0:
+                        daily_stats = await daily_set.complete_daily_set(
+                            page,
+                            expected_title=task.title,
+                        )
+                        if daily_stats.get("category_proven", False):
+                            self._session_completed_categories.add("daily_set")
+                            if (task.title or "").strip():
+                                self._session_daily_set_titles.add(task.title.strip())
+                            for proof_title in daily_stats.get("proof_titles", []):
+                                if (proof_title or "").strip():
+                                    self._session_daily_set_titles.add(proof_title.strip())
+                        if daily_stats.get("target_proven", False) or daily_stats.get("category_proven", False):
                             try:
                                 await page.goto(
                                     REWARDS_URL,
@@ -818,7 +1318,7 @@ class UniversalTaskScanner:
 
                 if task.category == "daily_set":
                     self._log("info", "  ⚠️ Daily Set task still not found on Rewards panel")
-                    return True
+                    return False
 
                 if self.ai_agent and self.ai_agent.enabled:
                     try:
@@ -877,24 +1377,63 @@ class UniversalTaskScanner:
             )
             promo_type = task.raw_data.get("promotionType", "")
             attr_type = task.raw_data.get("attributes", {}).get("type", "")
+            promo_handled = False
 
-            if promo_type == "quiz" or task.task_type == "quiz":
+            if task.category == "more_promo":
+                promo_handled = await self._complete_known_more_promo(working_page, task)
+
+            if promo_handled:
+                pass
+            elif promo_type == "quiz" or task.task_type == "quiz":
                 # Quiz: try to solve
                 await self._complete_quiz(working_page, task)
             elif "poll" in (task.title or "").lower() or task.task_type == "poll":
                 # Poll: click a random option
                 await self._complete_poll(working_page, task)
-            elif task.task_type == "unknown" and self.ai_agent and self.ai_agent.enabled:
-                self._log("info", "  🤖 Trying AI fallback on unknown activity")
-                ai_result = await self.ai_agent.complete_task_on_page(
-                    working_page,
-                    "Complete this Microsoft Rewards activity. "
-                    f"Title: {task.title}. "
-                    f"Description: {task.description}. "
-                    "Use the current page context to finish the task or reach a completed state.",
-                )
-                if not ai_result.get("success"):
-                    self._log("info", "  ⚠️ AI could not finish unknown activity, falling back to visit flow")
+            elif task.task_type == "unknown":
+                
+                # Check for existing self-learned Macro first
+                macro_ok = False
+                if self._macro_player.has_macro(task.title):
+                    if await self._macro_player.execute_macro(working_page, task.title):
+                        self._log("info", "  ⚡ Task completed via AI Macro (bypassing LLM)")
+                        await asyncio.sleep(2)
+                        macro_ok = True
+                        
+                # Try page-agent (browser-side LLM with Rewards knowledge)
+                pa_ok = macro_ok
+                if not macro_ok and self._page_agent:
+                    self._log("info", "  🌐 Trying page-agent on unknown activity")
+                    try:
+                        pa_result = await self._page_agent.run_single_task(
+                            working_page,
+                            f"Complete this Microsoft Rewards activity: "
+                            f"{task.title}. {task.description}",
+                            timeout=120.0,
+                        )
+                        pa_ok = pa_result.get("success", False)
+                        
+                        # Save the self-learned macro if solved!
+                        if pa_ok and pa_result.get("macro_trace"):
+                            self._log("info", "  🪄 Extracting AI reflections to build Macro")
+                            self._macro_player.save_macro(task.title, pa_result.get("macro_trace"))
+                    except Exception as e:
+                        logger.debug(f"Page-agent fallback failed: {e}")
+
+                # Then try Python-side AI agent
+                if not pa_ok and self.ai_agent and self.ai_agent.enabled:
+                    self._log("info", "  🤖 Trying AI fallback on unknown activity")
+                    ai_result = await self.ai_agent.complete_task_on_page(
+                        working_page,
+                        "Complete this Microsoft Rewards activity. "
+                        f"Title: {task.title}. "
+                        f"Description: {task.description}. "
+                        "Use the current page context to finish the task or reach a completed state.",
+                    )
+                    if not ai_result.get("success"):
+                        self._log("info", "  ⚠️ AI could not finish unknown activity, falling back to visit flow")
+                        await self._complete_visit(working_page, task)
+                elif not pa_ok:
                     await self._complete_visit(working_page, task)
             else:
                 # URL reward / visit: just visit and interact
@@ -926,13 +1465,16 @@ class UniversalTaskScanner:
         pages: list[str] = []
 
         if task.category in {"daily_set", "streak"}:
-            pages.append(REWARDS_URL)
-            # Also try /earn — Daily Set items render reliably there
             if task.category == "daily_set":
-                pages.append("https://rewards.bing.com/")
+                pages.append(f"{REWARDS_URL}/earn")
+            pages.append(f"{REWARDS_URL}/dashboard")
+            pages.append(REWARDS_URL)
 
         if task.category in {"more_promo", "punch_card"}:
-            pages.append("https://rewards.bing.com/")
+            if task.category == "more_promo":
+                pages.append(f"{REWARDS_URL}/earn")
+                pages.append(f"{REWARDS_URL}/dashboard")
+            pages.append(REWARDS_URL)
 
         parent_promo = task.raw_data.get("parent_promotion", {})
         parent_offer = parent_promo.get("offerId") or task.parent_id
@@ -1010,13 +1552,24 @@ class UniversalTaskScanner:
         return [value for value in variants if value]
 
     @staticmethod
-    def _task_title_tokens(task: RewardsTask) -> list[str]:
-        """Return meaningful title tokens for fuzzy card matching."""
-        raw = (task.title or "").replace("\u200b", " ").replace("\xa0", " ")
+    def _normalized_task_title_key(value: str) -> str:
+        """Normalize a task title for per-run Daily Set retry bookkeeping."""
+        normalized = "".join(
+            ch.lower() if ch.isalnum() or ch.isspace() else " "
+            for ch in (value or "").replace("\u200b", " ").replace("\xa0", " ")
+        )
+        return " ".join(normalized.split())
+
+    @staticmethod
+    def _tokenize_match_text(*values: str) -> list[str]:
+        """Return meaningful tokens from task title/description for fuzzy card matching."""
+        raw = " ".join(value for value in values if value).replace("\u200b", " ").replace("\xa0", " ")
         normalized = "".join(ch.lower() if ch.isalnum() or ch.isspace() else " " for ch in raw)
         stop_words = {
             "click", "complete", "to", "the", "and", "for", "with",
-            "near", "your", "this", "that", "you", "are",
+            "near", "your", "this", "that", "you", "are", "these",
+            "into", "from", "more", "points", "point", "earn",
+            "reward", "rewards", "daily", "set",
         }
         tokens = []
         for token in normalized.split():
@@ -1024,7 +1577,12 @@ class UniversalTaskScanner:
                 continue
             if token not in tokens:
                 tokens.append(token)
-        return tokens[:8]
+        return tokens[:10]
+
+    @classmethod
+    def _task_title_tokens(cls, task: RewardsTask) -> list[str]:
+        """Return title+description tokens so duplicate offer titles remain distinguishable."""
+        return cls._tokenize_match_text(task.title or "", task.description or "")
 
     async def _click_task_on_current_page(self, page: Page, task: RewardsTask) -> bool:
         """Try to click the current task on the already-open Rewards page."""
@@ -1032,10 +1590,21 @@ class UniversalTaskScanner:
         primary_title = title_variants[0] if title_variants else task.title
         self._log("info", f"  🔍 Looking for: '{primary_title}' on {page.url}")
 
+        # Fast-path: use exact DOM index captured during the visual scan phase
+        elem_idx = task.raw_data.get("element_index")
+        if elem_idx is not None:
+            self._log("info", f"  🖱️ Using native visual selector index {elem_idx} for task '{primary_title}'")
+            import src.dashboard_scraper as scraper
+            clicked = await scraper.click_task_by_index(page, elem_idx)
+            if clicked:
+                self._log("info", "  ✅ Clicked task card visually via absolute target")
+                await asyncio.sleep(3)
+                return True
+
         locators = []
 
-        # Only open Daily Set panel on the main dashboard, not on /earn
-        if task.category == "daily_set" and "rewards.bing.com/" not in page.url:
+        # Only open Daily Set panel on dashboard-like pages, not on /earn
+        if task.category == "daily_set" and "/earn" not in page.url:
             await self._open_daily_set_panel(page)
 
         if task.destination_url:
@@ -1141,6 +1710,7 @@ class UniversalTaskScanner:
                         .trim()
                         .toLowerCase();
                     const clickableSelector = "a,button,[role='button'],[role='link'],[data-rac],.cursor-pointer";
+                    const cardSelector = "mee-card,[class*='card'],[data-bi-area],[class*='earn'],[class*='promo']";
 
                     for (const old of document.querySelectorAll("[data-codex-target='true']")) {
                         old.removeAttribute("data-codex-target");
@@ -1179,7 +1749,7 @@ class UniversalTaskScanner:
 
                         for (const variant of variants) {
                             if (variant && text.includes(variant)) {
-                                score = Math.max(score, 1000 + variant.length);
+                                score += 1000 + variant.length;
                             }
                         }
 
@@ -1193,7 +1763,7 @@ class UniversalTaskScanner:
 
                             const minHits = Math.min(3, tokenList.length);
                             if (tokenHits >= minHits) {
-                                score = Math.max(score, tokenHits * 100 + text.length);
+                                score += tokenHits * 100 + Math.min(text.length, 200);
                             }
                         }
 
@@ -1201,7 +1771,18 @@ class UniversalTaskScanner:
                             continue;
                         }
 
-                        let candidate = node.closest(clickableSelector) || node;
+                        const cardRoot = node.closest(cardSelector);
+                        const cardText = normalize(cardRoot ? (cardRoot.innerText || cardRoot.textContent || "") : "");
+                        if (cardText.includes("completed")) {
+                            score -= 40;
+                        }
+
+                        let candidate =
+                            node.closest(clickableSelector)
+                            || (cardRoot ? cardRoot.querySelector(clickableSelector) : null)
+                            || node.querySelector(clickableSelector)
+                            || cardRoot
+                            || node;
                         if (!candidate.id) {
                             candidate.id = `codex-target-${Math.random().toString(36).slice(2, 10)}`;
                         }
@@ -1252,6 +1833,221 @@ class UniversalTaskScanner:
             )
         except Exception:
             return None
+
+    @staticmethod
+    def _normalized_offer_text(task: RewardsTask) -> str:
+        """Flatten title/description into a lowercase token string for offer matching."""
+        raw = " ".join(
+            part
+            for part in [task.title or "", task.description or ""]
+            if part
+        )
+        normalized = "".join(
+            ch.lower() if ch.isalnum() or ch.isspace() else " "
+            for ch in raw.replace("\u200b", " ").replace("\xa0", " ")
+        )
+        return " ".join(normalized.split())
+
+    async def _complete_known_more_promo(self, page: Page, task: RewardsTask) -> bool:
+        """Apply targeted interactions for known Keep Earning offers that need more than a visit."""
+        if task.category != "more_promo":
+            return False
+
+        offer_text = self._normalized_offer_text(task)
+        if any(
+            token in offer_text
+            for token in ("thanh tìm kiếm", "search box", "search bar", "search with bing")
+        ):
+            self._diag(
+                "Matched keep-earning search incentive handler",
+                scope="promo-handler",
+                handler="search_incentive",
+                **self._task_diag_payload(task),
+            )
+            return await self._complete_search_incentive_offer(page, task)
+
+        if any(
+            token in offer_text
+            for token in ("turn referrals into rewards", "referrals", "referral", "invite friends")
+        ):
+            self._diag(
+                "Matched keep-earning referral handler",
+                scope="promo-handler",
+                handler="referral",
+                **self._task_diag_payload(task),
+            )
+            return await self._complete_referral_offer(page, task)
+
+        self._diag(
+            "No targeted keep-earning handler matched",
+            scope="promo-handler",
+            **self._task_diag_payload(task),
+        )
+        return False
+
+    async def _complete_search_incentive_offer(self, page: Page, task: RewardsTask) -> bool:
+        """Submit one real Bing search when a promo explicitly references searching."""
+        selectors = [
+            "#sb_form_q",
+            "input[name='q']",
+            "input[type='search']",
+            "textarea[name='q']",
+        ]
+        query = "Microsoft Rewards bonus search"
+        candidate_urls = []
+        current_url = (page.url or "").lower()
+        if "bing.com" not in current_url and task.destination_url:
+            candidate_urls.append(task.destination_url)
+        if "bing.com" not in current_url or not task.destination_url:
+            candidate_urls.append("https://www.bing.com/")
+
+        self._diag(
+            "Attempting keep-earning search incentive flow",
+            scope="promo-search",
+            current_url=current_url,
+            candidate_urls=candidate_urls,
+            selectors=selectors,
+            **self._task_diag_payload(task),
+        )
+
+        for candidate_url in candidate_urls:
+            try:
+                await page.goto(candidate_url, wait_until="domcontentloaded", timeout=35000)
+                await asyncio.sleep(3)
+            except Exception:
+                self._diag(
+                    "Candidate URL navigation failed during promo search flow",
+                    scope="promo-search",
+                    candidate_url=candidate_url,
+                    **self._task_diag_payload(task),
+                )
+                continue
+
+            for selector in selectors:
+                try:
+                    box = page.locator(selector).first
+                    if await box.count() == 0 or not await box.is_visible(timeout=2500):
+                        continue
+                    await box.click(timeout=3000)
+                    await box.fill(query)
+                    await asyncio.sleep(1)
+                    await page.keyboard.press("Enter")
+                    await asyncio.sleep(5)
+                    await self.humanizer.simulate_reading(page, random.uniform(3, 5))
+                    self._log("info", "  🔎 Submitted live Bing search for promo activation")
+                    self._diag(
+                        "Submitted live Bing search for promo activation",
+                        scope="promo-search",
+                        candidate_url=candidate_url,
+                        selector=selector,
+                        query=query,
+                        **self._task_diag_payload(task),
+                    )
+                    return True
+                except Exception:
+                    self._diag(
+                        "Selector attempt failed during promo search flow",
+                        scope="promo-search",
+                        candidate_url=candidate_url,
+                        selector=selector,
+                        **self._task_diag_payload(task),
+                    )
+                    continue
+
+        for selector in selectors:
+            try:
+                box = page.locator(selector).first
+                if await box.count() == 0 or not await box.is_visible(timeout=2500):
+                    continue
+                await box.click(timeout=3000)
+                await box.fill(query)
+                await asyncio.sleep(1)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(5)
+                await self.humanizer.simulate_reading(page, random.uniform(3, 5))
+                self._log("info", "  🔎 Submitted live Bing search for promo activation")
+                self._diag(
+                    "Submitted promo activation search on current page",
+                    scope="promo-search",
+                    selector=selector,
+                    query=query,
+                    **self._task_diag_payload(task),
+                )
+                return True
+            except Exception:
+                self._diag(
+                    "Fallback selector attempt failed on current page",
+                    scope="promo-search",
+                    selector=selector,
+                    **self._task_diag_payload(task),
+                )
+                continue
+
+        self._diag(
+            "Promo search incentive flow could not find usable search box",
+            scope="promo-search",
+            **self._task_diag_payload(task),
+        )
+        return False
+
+    async def _complete_referral_offer(self, page: Page, task: RewardsTask) -> bool:
+        """Trigger a visible referral CTA when Microsoft exposes one on-page."""
+        ctas = [
+            ("button", "Invite"),
+            ("button", "Share"),
+            ("button", "Copy"),
+            ("a", "Invite"),
+            ("a", "Share"),
+            ("a", "Copy"),
+        ]
+
+        self._diag(
+            "Attempting keep-earning referral CTA flow",
+            scope="promo-referral",
+            ctas=ctas,
+            current_url=(page.url or ""),
+            **self._task_diag_payload(task),
+        )
+
+        for role, text in ctas:
+            try:
+                locator = page.locator(role, has_text=text).first
+                if await locator.count() == 0 or not await locator.is_visible(timeout=2000):
+                    self._diag(
+                        "Referral CTA not visible for candidate",
+                        scope="promo-referral",
+                        role=role,
+                        text=text,
+                        **self._task_diag_payload(task),
+                    )
+                    continue
+                await locator.click(timeout=5000)
+                await asyncio.sleep(4)
+                self._log("info", f"  📣 Triggered referral CTA: {text}")
+                self._diag(
+                    "Triggered referral CTA successfully",
+                    scope="promo-referral",
+                    role=role,
+                    text=text,
+                    **self._task_diag_payload(task),
+                )
+                return True
+            except Exception:
+                self._diag(
+                    "Referral CTA attempt raised exception",
+                    scope="promo-referral",
+                    role=role,
+                    text=text,
+                    **self._task_diag_payload(task),
+                )
+                continue
+
+        self._diag(
+            "Referral flow finished without finding a usable CTA",
+            scope="promo-referral",
+            **self._task_diag_payload(task),
+        )
+        return False
 
     async def _complete_visit(self, page: Page, task: RewardsTask) -> None:
         """Complete a visit-type task: scroll, read, interact."""
@@ -1389,7 +2185,24 @@ class UniversalTaskScanner:
             except Exception as e:
                 logger.debug(f"QuizSolver failed: {e}")
 
-            # Fallback: AI agent
+            # Fallback: page-agent (browser-side LLM with quiz knowledge)
+            if self._page_agent:
+                try:
+                    pa_result = await self._page_agent.run_single_task(
+                        page,
+                        f"Complete this quiz. Answer all questions correctly. "
+                        f"Title: {task.title}. "
+                        f"Look for quiz answer options (#rqAnswerOption0, #rqAnswerOption1, etc.) "
+                        f"and click the correct ones. Check iscorrectoption attribute for answers.",
+                        timeout=120.0,
+                    )
+                    if pa_result.get("success"):
+                        self._log("info", "  🌐 Quiz solved by page-agent")
+                        return
+                except Exception as e:
+                    logger.debug(f"Page-agent quiz fallback failed: {e}")
+
+            # Fallback: Python-side AI agent
             if self.ai_agent and self.ai_agent.enabled:
                 try:
                     result = await self.ai_agent.complete_task_on_page(
@@ -1485,16 +2298,11 @@ class UniversalTaskScanner:
             selector = c.get("selector", "")
             if not href and not selector:
                 continue
-                
-            cache_key = (href.split("?")[0][:120]) if href else selector
-            if cache_key in visited_cards:
-                try:
-                    visited_at = datetime.fromisoformat(visited_cards[cache_key])
-                    if datetime.now() - visited_at < timedelta(hours=12):
-                        self._log("info", f"  ✅ Cache: Skipping recently visited card: {c.get('text', '')[:30]}")
-                        continue
-                except ValueError:
-                    pass
+
+            cache_key = _build_earn_card_cache_key(href, selector)
+            if _should_skip_earn_card_via_cache(cache_key, visited_cards):
+                self._log("info", f"  ✅ Cache: Skipping recently visited card: {c.get('text', '')[:30]}")
+                continue
             fresh_cards.append(c)
         cards = fresh_cards
 
@@ -1513,12 +2321,16 @@ class UniversalTaskScanner:
 
             try:
                 active_page = page
+                navigation_succeeded = False
+                search_submitted = False
                 if href:
                     await page.goto(href, wait_until="domcontentloaded", timeout=25000)
+                    navigation_succeeded = True
                 else:
                     pages_before = len(page.context.pages)
                     await page.click(selector, timeout=10000)
                     await asyncio.sleep(3)
+                    navigation_succeeded = True
                     pages_after = page.context.pages
                     if len(pages_after) > pages_before:
                         # Grab the newly opened page
@@ -1531,9 +2343,11 @@ class UniversalTaskScanner:
                 await asyncio.sleep(random.uniform(3, 6))
 
                 # If this task explicitly asks to "Search on Bing" (e.g., "Search on Bing for your favorite movie")
+                needs_search = False
                 try:
                     text_lower = title.lower()
-                    if "search" in text_lower or "tìm" in text_lower or "explore" in text_lower:
+                    needs_search = "search" in text_lower or "tìm" in text_lower or "explore" in text_lower
+                    if needs_search:
                         input_box = active_page.locator("input[type='search'], textarea[type='search'], input[name='q'], textarea[name='q']").first
                         if await input_box.is_visible(timeout=3000):
                             self._log("info", "    ⌨️ Detected 'Search' requirement, context-aware query loading...")
@@ -1565,6 +2379,7 @@ class UniversalTaskScanner:
                                 
                             await input_box.fill(search_term)
                             await input_box.press("Enter")
+                            search_submitted = True
                             await asyncio.sleep(random.uniform(5, 8))
                 except Exception as e:
                     pass
@@ -1589,11 +2404,16 @@ class UniversalTaskScanner:
                 completed += 1
 
                 # Register visited card into memory cache
-                cache_key = (href.split("?")[0][:120]) if href else selector
-                state = _load_state()
-                account_state = state.setdefault(self._active_account_email, {})
-                account_state.setdefault("visited_cards", {})[cache_key] = datetime.now().isoformat()
-                _save_state(state)
+                cache_key = _build_earn_card_cache_key(href, selector)
+                card_proven = _should_cache_earn_card_visit(
+                    cache_key,
+                    navigation_succeeded and (search_submitted or not needs_search or "bing.com/search" in (href or "").lower()),
+                )
+                if card_proven:
+                    state = _load_state()
+                    account_state = state.setdefault(self._active_account_email, {})
+                    account_state.setdefault("visited_cards", {})[cache_key] = datetime.now().isoformat()
+                    _save_state(state)
             except Exception as e:
                 self._log("info", f"  ⚠️ Card failed: {e}")
 
@@ -1623,14 +2443,15 @@ class UniversalTaskScanner:
                 "You are analyzing the Microsoft Rewards Earn page.\n"
                 "I need you to find ALL uncompleted task cards that I can click to earn points.\n"
                 "Look for sections like:\n"
+                "  - 'Keep earning' (cards with +5, +10, +15 points, e.g. 'Perks of standing', 'Complete this puzzle', 'Do you know the answer?')\n"
                 "  - 'Explore on Bing' (cards with +10 points, 'Search on Bing for ...')\n"
                 "  - 'Trending now', 'Discover', or any other card section\n"
                 "  - Any card with a point badge (+5, +10, +15, +20, +50) that is NOT yet completed\n"
-                "  - Cards that say 'Completed' or have a checkmark should be SKIPPED\n"
+                "  - Cards that say 'Completed' or have a checkmark (✓) should be SKIPPED\n"
                 "  - Cards that appear faded/greyed out or have reduced opacity are COMPLETED — SKIP them\n\n"
-                "For each card found, extract the URL (href) from the link.\n\n"
-                "Respond with a JSON array of objects, each with 'text' and 'href'.\n"
-                "Example: [{\"text\": \"Learn song lyrics\", \"href\": \"https://www.bing.com/search?q=...\"}, ...]\n"
+                "For each card found, extract the URL (href) from the link. If the card has no href but has a clickable element, use a CSS selector.\n\n"
+                "Respond with a JSON array of objects, each with 'text' and 'href' (or 'selector' if no href).\n"
+                "Example: [{\"text\": \"Perks of standing\", \"href\": \"https://rewards.bing.com/...\"}]\n"
                 "If no cards found, respond with an empty array: []\n\n"
                 "IMPORTANT: Only return the JSON array, nothing else.\n\n"
                 f"{snapshot}"
@@ -1682,10 +2503,11 @@ class UniversalTaskScanner:
             # Validate
             valid = []
             for c in cards:
-                if isinstance(c, dict) and c.get("href"):
+                if isinstance(c, dict) and (c.get("href") or c.get("selector")):
                     valid.append({
                         "text": str(c.get("text", ""))[:120],
-                        "href": str(c["href"]),
+                        "href": str(c.get("href", "")),
+                        "selector": str(c.get("selector", "")),
                     })
 
             self._log("info", f"  🧠 AI found {len(valid)} task cards" + (" (with vision)" if screenshot_b64 else ""))
@@ -1734,7 +2556,8 @@ class UniversalTaskScanner:
                 const knownIds = [
                     'exploreonbing', 'trendingnow', 'discover',
                     'explore-on-bing', 'trending-now', 'discover-on-bing',
-                    'moreactivities', 'more-activities', 'quests'
+                    'moreactivities', 'more-activities', 'quests',
+                    'keepearning', 'keep-earning', 'morepromotions', 'more-promotions'
                 ];
                 for (const sectionId of knownIds) {
                     const section = document.getElementById(sectionId);
@@ -1763,7 +2586,8 @@ class UniversalTaskScanner:
                 const headingKeywords = [
                     'explore on bing', 'trending now', 'discover on bing',
                     'quests', 'more activities', 'featured', 'earn more',
-                    'bonus', 'weekly', 'seasonal', 'special'
+                    'bonus', 'weekly', 'seasonal', 'special',
+                    'keep earning', 'more promotions', 'other activities'
                 ];
                 const headingEls = document.querySelectorAll('h1, h2, h3, h4, h5, span[class*="title"], span[class*="heading"]');
                 for (const el of headingEls) {
@@ -1806,7 +2630,7 @@ class UniversalTaskScanner:
                 for (const container of cardContainers) {
                     const text = container.textContent || '';
                     // Must contain a point badge pattern (+5, +10, +15, etc.)
-                    if (!/\\+\\d+/.test(text)) continue;
+                    if (!/\+\d+/.test(text)) continue;
                     if (isCompleted(text)) continue;
 
                     container.querySelectorAll('a[href], mee-card').forEach(cb => {
@@ -1834,7 +2658,7 @@ class UniversalTaskScanner:
                             || cb.closest('[data-bi-area]')
                             || cb.parentElement;
                         const text = container ? (container.textContent || '') : '';
-                        if (/\\+\\d+/.test(text) && !isCompleted(text)) {
+                        if (/\+\d+/.test(text) && !isCompleted(text)) {
                             const href = cb.href || cb.getAttribute('href') || '';
                             if (href) {
                                 addCard(cb, container);

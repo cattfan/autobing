@@ -78,6 +78,11 @@ class ManualCaptchaHandler:
         if page.is_closed():
             return None
 
+        # Only check for captchas on Microsoft domains to avoid false positives
+        url = page.url.lower()
+        if "bing.com" not in url and "live.com" not in url:
+            return None
+
         try:
             for selector, label in self.SELECTOR_MARKERS:
                 locator = page.locator(selector)

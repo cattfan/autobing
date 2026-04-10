@@ -137,6 +137,7 @@ def save_settings(settings: dict) -> None:
 def get_default_settings() -> dict:
     """Return default settings."""
     return {
+        "diagnostic_logging": True,
         "headless": True,
         "browser_type": "chromium",
         "desktop_searches": 34,
@@ -189,6 +190,86 @@ def get_default_settings() -> dict:
         "ai_model": "meta-llama/llama-3.3-70b-instruct:free",
         "master_password_hash": "",
     }
+
+
+def diagnostic_logging_enabled(settings: Optional[dict] = None) -> bool:
+    """Return True when verbose diagnostic logs should be emitted."""
+    if settings is None:
+        return True
+    return bool(settings.get("diagnostic_logging", True))
+
+
+def mask_email(value: str) -> str:
+    """Return a masked account identifier safe for logs."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "@" not in text:
+        return f"{text[:5]}***"
+    local, domain = text.split("@", 1)
+    return f"{local[:5]}***@{domain}"
+
+
+def summarize_search_status(status: Optional[dict]) -> str:
+    """Return a compact one-line summary of Rewards search counters."""
+    status = status or {}
+    return (
+        f"pc={int(status.get('pc_current', 0))}/{int(status.get('pc_max', 0))}, "
+        f"mobile={int(status.get('mobile_current', 0))}/{int(status.get('mobile_max', 0))}, "
+        f"edge={int(status.get('edge_current', 0))}/{int(status.get('edge_max', 0))}, "
+        f"total={int(status.get('total_points', 0))}"
+    )
+
+
+def _diagnostic_value(value: Any) -> str:
+    """Serialize a diagnostic field into a compact, log-friendly string."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (dict, list, tuple, set)):
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def emit_diagnostic_log(
+    log_target,
+    settings: Optional[dict],
+    message: str,
+    *,
+    level: str = "info",
+    scope: str = "",
+    **fields: Any,
+) -> None:
+    """Emit a structured diagnostic log line when verbose logging is enabled."""
+    if not diagnostic_logging_enabled(settings):
+        return
+
+    prefix = "[diag]"
+    if scope:
+        prefix += f"[{scope}]"
+    payload = f"{prefix} {message}"
+    if fields:
+        serialized = " | ".join(
+            f"{key}={_diagnostic_value(value)}"
+            for key, value in fields.items()
+        )
+        payload = f"{payload} | {serialized}"
+
+    if callable(log_target):
+        try:
+            log_target(level, payload)
+            return
+        except TypeError:
+            pass
+
+    resolved_logger = log_target or logger
+    log_method = getattr(resolved_logger, level, None)
+    if callable(log_method):
+        log_method(payload)
+    else:
+        logger.info(payload)
 
 
 def is_sensitive_setting(name: str) -> bool:
@@ -536,6 +617,13 @@ MOBILE_VIEWPORTS = [
     {"width": 384, "height": 854},   # Xiaomi 14
 ]
 
+ANDROID_MOBILE_VIEWPORTS = [
+    MOBILE_VIEWPORTS[0],
+    MOBILE_VIEWPORTS[1],
+    MOBILE_VIEWPORTS[2],
+    MOBILE_VIEWPORTS[5],
+]
+
 
 def get_random_user_agent(mode: str = "desktop") -> str:
     """Get a random user agent string for the given mode."""
@@ -551,6 +639,21 @@ def get_random_viewport(mode: str = "desktop") -> dict:
     if mode == "mobile":
         return random.choice(MOBILE_VIEWPORTS)
     return random.choice(VIEWPORTS)
+
+
+def get_random_mobile_rewards_user_agent() -> str:
+    """Return an Android Edge mobile UA for Rewards mobile-search runs.
+
+    Rewards mobile crediting in this codebase uses Android-specific search forms
+    (`EDGEAR`/`EDGSPA`). Keep the runtime fingerprint aligned with that surface.
+    """
+    android_uas = [ua for ua in MOBILE_USER_AGENTS if "EdgA/" in ua]
+    return random.choice(android_uas or MOBILE_USER_AGENTS)
+
+
+def get_random_mobile_rewards_viewport() -> dict:
+    """Return an Android-like viewport for Rewards mobile-search runs."""
+    return random.choice(ANDROID_MOBILE_VIEWPORTS or MOBILE_VIEWPORTS)
 
 
 # ─── Timestamps ───────────────────────────────────────────────────────────────

@@ -255,11 +255,15 @@ class Searcher:
                 seen_queries.add(dedupe_key)
 
                 # Choose search method
-                # Both mobile + desktop: random mix of searchbox + url_direct
-                method = random.choices(
-                    ["searchbox", "url_direct"],
-                    weights=[55, 45],
-                )[0]
+                # Mobile searches should stay on the URL-direct lane so Bing sees
+                # the mobile-specific query form parameters consistently.
+                if mode == "mobile":
+                    method = "url_direct"
+                else:
+                    method = random.choices(
+                        ["searchbox", "url_direct"],
+                        weights=[55, 45],
+                    )[0]
 
                 if method == "url_direct":
                     success = await self._search_via_url(page, query, i + 1, count)
@@ -770,113 +774,183 @@ class Searcher:
             await asyncio.sleep(break_duration)
 
     async def get_search_points_status(self, page: Page) -> dict:
-        """Read search points via in-page fetch (same as Rewards page JS does)."""
+        """Read search points via in-page fetch across multiple Rewards surfaces."""
         try:
-            # Always navigate explicitly to rewards.bing.com for a clean context
-            max_nav_retries = 3
-            for nav_attempt in range(max_nav_retries):
-                try:
-                    await page.goto(
-                        "https://rewards.bing.com/",
-                        wait_until="domcontentloaded", timeout=20000,
-                    )
-                    await asyncio.sleep(3)
-                    # Verify we're on the right page
-                    if "rewards.bing.com" in page.url:
-                        break
-                except Exception as nav_err:
-                    logger.debug(
-                        f"Rewards nav attempt {nav_attempt + 1}/{max_nav_retries} failed: {nav_err}"
-                    )
-                    if nav_attempt < max_nav_retries - 1:
-                        await asyncio.sleep(2)
-                    else:
+            rewards_surfaces: list[str] = []
+            current_url = str(getattr(page, "url", "") or "")
+            if "rewards.bing.com" in current_url:
+                rewards_surfaces.append(current_url)
+            rewards_surfaces.extend([
+                "https://rewards.bing.com/dashboard",
+                "https://rewards.bing.com/earn",
+                "https://rewards.bing.com/",
+                "https://rewards.bing.com/about",
+            ])
+
+            merged_status = self._empty_status() | {"total_points": 0}
+            seen_urls: set[str] = set()
+
+            for rewards_url in rewards_surfaces:
+                if not rewards_url or rewards_url in seen_urls:
+                    continue
+                seen_urls.add(rewards_url)
+
+                max_nav_retries = 3
+                for nav_attempt in range(max_nav_retries):
+                    try:
+                        if page.url != rewards_url:
+                            await page.goto(
+                                rewards_url,
+                                wait_until="domcontentloaded",
+                                timeout=20000,
+                            )
+                            await asyncio.sleep(2)
+                        if "rewards.bing.com" in page.url:
+                            break
+                    except Exception as nav_err:
+                        logger.debug(
+                            f"Rewards nav attempt {nav_attempt + 1}/{max_nav_retries} failed: {nav_err}"
+                        )
+                        if nav_attempt < max_nav_retries - 1:
+                            await asyncio.sleep(2)
+                        else:
+                            raise
+
+                data = None
+                for attempt in range(3):
+                    try:
+                        data = await page.evaluate("""
+                            async () => {
+                                try {
+                                    const r = await fetch('/api/getuserinfo?type=1', {
+                                        credentials: 'include',
+                                        headers: {'Accept': 'application/json'}
+                                    });
+                                    return await r.json();
+                                } catch(e) { return null; }
+                            }
+                        """)
+                        if data:
+                            break
+                    except Exception as exc:
+                        if attempt < 2 and (
+                            "Execution context was destroyed" in str(exc)
+                            or "navigat" in str(exc).lower()
+                        ):
+                            logger.debug(
+                                f"API fetch attempt {attempt + 1}/3 failed: {exc}, retrying..."
+                            )
+                            try:
+                                await page.wait_for_load_state(
+                                    "domcontentloaded",
+                                    timeout=8000,
+                                )
+                            except Exception:
+                                pass
+                            await asyncio.sleep(2)
+                            continue
                         raise
 
-            data = None
-            for attempt in range(3):
-                try:
-                    # Fetch API from within the page context (like the page's own JS)
-                    data = await page.evaluate("""
-                        async () => {
-                            try {
-                                const r = await fetch('/api/getuserinfo?type=1', {
-                                    credentials: 'include',
-                                    headers: {'Accept': 'application/json'}
-                                });
-                                return await r.json();
-                            } catch(e) { return null; }
-                        }
-                    """)
-                    if data:
+                if not data:
+                    logger.debug(f"In-page API fetch returned null on {rewards_url}")
+                    continue
+
+                surface_status = self._status_from_rewards_payload(data)
+                merged_status = self._merge_search_status(merged_status, surface_status)
+
+                if self._has_resolved_search_counter(merged_status):
+                    # Keep probing other surfaces only if a track is still unresolved.
+                    if (
+                        merged_status.get("pc_max", 0) > 0
+                        and merged_status.get("mobile_max", 0) > 0
+                    ) or rewards_url.endswith("/about"):
                         break
-                except Exception as exc:
-                    if attempt < 2 and (
-                        "Execution context was destroyed" in str(exc)
-                        or "navigat" in str(exc).lower()
-                    ):
-                        logger.debug(
-                            f"API fetch attempt {attempt + 1}/3 failed: {exc}, retrying..."
-                        )
-                        try:
-                            await page.wait_for_load_state(
-                                "domcontentloaded",
-                                timeout=8000,
-                            )
-                        except Exception:
-                            pass
-                        await asyncio.sleep(2)
-                        continue
-                    raise
 
-            if not data:
-                logger.warning("In-page API fetch returned null")
-                return self._empty_status()
-
-            dashboard = data.get("dashboard", {})
-            user_status = dashboard.get("userStatus", {})
-
-            status = {
-                "pc_current": 0, "pc_max": 0,
-                "mobile_current": 0, "mobile_max": 0,
-                "edge_current": 0, "edge_max": 0,
-            }
-
-            counters = user_status.get("counters", {})
-
-            # RAW counter dump (debug level to avoid log spam)
-            counter_keys = list(counters.keys())
-            logger.debug(f"RAW counter keys: {counter_keys}")
-            for ck in counter_keys:
-                cv = counters[ck]
-                if isinstance(cv, list) and cv:
-                    cv = cv[0]
-                if isinstance(cv, dict):
-                    logger.debug(f"  counter[{ck}] = {cv.get('pointProgress',0)}/{cv.get('pointProgressMax',0)}")
-
-            status["pc_current"], status["pc_max"] = self._extract_counter_progress(
-                counters,
-                exact_keys=("pcSearch", "desktopSearch"),
-                required_tokens=("search", "pc"),
-            )
-            status["mobile_current"], status["mobile_max"] = self._extract_counter_progress(
-                counters,
-                exact_keys=("mobileSearch",),
-                required_tokens=("search", "mobile"),
-            )
-            status["edge_current"], status["edge_max"] = self._extract_counter_progress(
-                counters,
-                exact_keys=("edgeSearch", "edgeBonusSearch", "edgeSearchBonus"),
-                required_tokens=("search", "edge"),
-            )
-
-            logger.info(f"Search points: {status}")
-            return status
+            logger.info(f"Search points: {merged_status}")
+            return merged_status
 
         except Exception as e:
             logger.warning(f"Points status check failed: {e}")
 
         return self._empty_status()
+
+    @classmethod
+    def _status_from_rewards_payload(cls, data: dict) -> dict:
+        """Extract search counters from a Rewards API payload."""
+        dashboard = data.get("dashboard", {})
+        user_status = dashboard.get("userStatus", {})
+        counters = user_status.get("counters", {})
+
+        counter_keys = list(counters.keys())
+        logger.debug(f"RAW counter keys: {counter_keys}")
+        for ck in counter_keys:
+            cv = counters[ck]
+            if isinstance(cv, list) and cv:
+                cv = cv[0]
+            if isinstance(cv, dict):
+                logger.debug(f"  counter[{ck}] = {cv.get('pointProgress', 0)}/{cv.get('pointProgressMax', 0)}")
+
+        status = {
+            "pc_current": 0,
+            "pc_max": 0,
+            "mobile_current": 0,
+            "mobile_max": 0,
+            "edge_current": 0,
+            "edge_max": 0,
+            "total_points": user_status.get("availablePoints", 0),
+        }
+        status["pc_current"], status["pc_max"] = cls._extract_counter_progress(
+            counters,
+            exact_keys=("pcSearch", "desktopSearch"),
+            required_tokens=("search", "pc"),
+        )
+        status["mobile_current"], status["mobile_max"] = cls._extract_counter_progress(
+            counters,
+            exact_keys=("mobileSearch",),
+            required_tokens=("search", "mobile"),
+        )
+        status["edge_current"], status["edge_max"] = cls._extract_counter_progress(
+            counters,
+            exact_keys=("edgeSearch", "edgeBonusSearch", "edgeSearchBonus"),
+            required_tokens=("search", "edge"),
+        )
+        return status
+
+    @staticmethod
+    def _merge_search_status(base_status: dict, candidate_status: dict) -> dict:
+        """Merge two search status snapshots, keeping the strongest evidence per track."""
+        merged = dict(base_status or {})
+        for current_key, max_key in (
+            ("pc_current", "pc_max"),
+            ("mobile_current", "mobile_max"),
+            ("edge_current", "edge_max"),
+        ):
+            base_pair = (
+                int(merged.get(current_key, 0) or 0),
+                int(merged.get(max_key, 0) or 0),
+            )
+            candidate_pair = (
+                int(candidate_status.get(current_key, 0) or 0),
+                int(candidate_status.get(max_key, 0) or 0),
+            )
+            if candidate_pair[1] > base_pair[1] or (
+                candidate_pair[1] == base_pair[1]
+                and candidate_pair[0] > base_pair[0]
+            ):
+                merged[current_key], merged[max_key] = candidate_pair
+        merged["total_points"] = max(
+            int(merged.get("total_points", 0) or 0),
+            int(candidate_status.get("total_points", 0) or 0),
+        )
+        return merged
+
+    @staticmethod
+    def _has_resolved_search_counter(status: dict) -> bool:
+        """Return True when at least one search track exposes a non-zero maximum."""
+        return any(
+            int(status.get(key, 0) or 0) > 0
+            for key in ("pc_max", "mobile_max", "edge_max")
+        )
 
     @staticmethod
     def _extract_counter_progress(

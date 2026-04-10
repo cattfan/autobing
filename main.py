@@ -33,8 +33,11 @@ from src.utils import (
     CONFIG_DIR,
     PROFILES_DIR,
     close_other_tabs,
+    emit_diagnostic_log,
     get_proxy_for_session,
     is_sensitive_setting,
+    mask_email,
+    summarize_search_status,
 )
 from src.crypto import (
     load_encrypted_accounts,
@@ -44,10 +47,10 @@ from src.crypto import (
     hash_password,
     prompt_master_password,
 )
-from src.browser import BrowserManager
+from src.browser import BrowserManager, load_storage_state_cookies
 from src.login import LoginManager
 from src.searcher import Searcher
-from src.universal_task import UniversalTaskScanner
+from src.universal_task import UniversalTaskScanner, get_deferred_offer_reason
 from src.google_sheets import GoogleSheetsLogger
 from src.quiz import QuizSolver
 from src.points import PointsTracker
@@ -59,6 +62,8 @@ from src.ai_agent import AIAgent
 from src.streaks import EdgeBrowsingStreak, TaskDetector
 from src.edge_streak_native import NativeEdgeStreak
 from src.manual_captcha import ManualCaptchaHandler
+from src.runtime_identity import describe_search_remaining_items
+from src.page_agent_flow import PageAgentFlow
 
 
 def _configure_stdio() -> None:
@@ -138,6 +143,7 @@ def show_menu() -> str:
     menu.add_row("9", "Setup Auto Schedule")
     menu.add_row("10", "Test Notifications")
     menu.add_row("11", "Start Web Dashboard")
+    menu.add_row("12", "Run Page-Agent Flow")
     menu.add_row("0", "Exit")
 
     console.print(menu)
@@ -268,6 +274,561 @@ def _search_count_setting(settings: dict, mode: str) -> int:
     return int(settings.get(key, 30))
 
 
+def _remaining_search_count(current_points: int, max_points: int) -> int:
+    """Convert a point deficit into the minimum search count needed to fill it."""
+    if max_points <= 0 or current_points >= max_points:
+        return 0
+    return (max_points - current_points + 2) // 3
+
+
+def _normalize_reward_title(value: str) -> str:
+    """Normalize Rewards task titles for reconciliation across locale/UI variants."""
+    normalized = "".join(
+        ch.lower() if ch.isalnum() or ch.isspace() else " "
+        for ch in (value or "").replace("\u200b", " ").replace("\xa0", " ")
+    )
+    return " ".join(normalized.split())
+
+
+def _needs_mobile_credit_recheck(status: dict, settings: dict) -> bool:
+    """Detect ambiguous mobile 0/0 reads that should be retried before gating work."""
+    mobile_searches = _search_count_setting(settings, "mobile")
+    current, maximum = _mode_credit(status, "mobile")
+    return mobile_searches > 0 and current == 0 and maximum == 0
+
+
+def _merge_search_status_sources(primary_status: dict, fallback_status: dict) -> dict:
+    """Merge search counters from two readers, preferring the strongest non-zero evidence."""
+    merged = dict(primary_status or {})
+    fallback_status = fallback_status or {}
+    for current_key, max_key in (
+        ("pc_current", "pc_max"),
+        ("mobile_current", "mobile_max"),
+        ("edge_current", "edge_max"),
+    ):
+        primary_pair = (
+            int(merged.get(current_key, 0) or 0),
+            int(merged.get(max_key, 0) or 0),
+        )
+        fallback_pair = (
+            int(fallback_status.get(current_key, 0) or 0),
+            int(fallback_status.get(max_key, 0) or 0),
+        )
+        if fallback_pair[1] > primary_pair[1] or (
+            fallback_pair[1] == primary_pair[1] and fallback_pair[0] > primary_pair[0]
+        ):
+            merged[current_key], merged[max_key] = fallback_pair
+    merged["total_points"] = max(
+        int(merged.get("total_points", 0) or 0),
+        int(fallback_status.get("total_points", 0) or 0),
+    )
+    return merged
+
+
+async def _read_search_status_with_mobile_recheck(
+    searcher: Searcher,
+    page,
+    settings: dict,
+) -> dict:
+    """Re-read Rewards counters when mobile credits come back as an ambiguous 0/0."""
+    status = await searcher.get_search_points_status(page)
+    if _needs_mobile_credit_recheck(status, settings):
+        try:
+            task_status = await TaskDetector.get_all_tasks(page)
+            status = _merge_search_status_sources(
+                status,
+                {
+                    **task_status.get("searches", {}),
+                    "total_points": task_status.get("total_points", 0),
+                },
+            )
+        except Exception as e:
+            logger.debug(f"TaskDetector search-status fallback skipped: {e}")
+    emit_diagnostic_log(
+        logger,
+        settings,
+        "Initial search-credit read",
+        scope="search-status",
+        status=summarize_search_status(status),
+        page_url=getattr(page, "url", ""),
+    )
+    if not _needs_mobile_credit_recheck(status, settings):
+        return status
+
+    retries = max(1, int(settings.get("mobile_credit_recheck_attempts", 2)))
+    delay_seconds = max(1.0, float(settings.get("mobile_credit_recheck_delay_seconds", 3)))
+
+    logger.info(
+        "Mobile credits returned 0/0; rechecking before deciding whether to skip searches."
+    )
+    for attempt in range(retries):
+        await asyncio.sleep(delay_seconds)
+        refreshed = await searcher.get_search_points_status(page)
+        if _needs_mobile_credit_recheck(refreshed, settings):
+            try:
+                task_status = await TaskDetector.get_all_tasks(page)
+                refreshed = _merge_search_status_sources(
+                    refreshed,
+                    {
+                        **task_status.get("searches", {}),
+                        "total_points": task_status.get("total_points", 0),
+                    },
+                )
+            except Exception as e:
+                logger.debug(f"TaskDetector search-status fallback skipped on retry: {e}")
+        status = refreshed
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Mobile credit recheck attempt finished",
+            scope="search-status",
+            attempt=attempt + 1,
+            retries=retries,
+            status=summarize_search_status(status),
+        )
+        if not _needs_mobile_credit_recheck(status, settings):
+            logger.info(
+                f"Mobile credit recheck resolved on attempt {attempt + 1}: "
+                f"{status.get('mobile_current', 0)}/{status.get('mobile_max', 0)}"
+            )
+            break
+
+    return status
+
+
+async def _probe_search_status_in_mode(
+    settings: dict,
+    account: dict,
+    session_proxy: dict | None,
+    login_mgr: LoginManager,
+    searcher: Searcher,
+    storage_state_path,
+    *,
+    mode: str,
+) -> dict:
+    """Read Rewards counters from a dedicated browser mode/runtime."""
+    runtime_settings = dict(settings)
+    runtime_settings["use_stealth"] = False
+    runtime_settings["headless"] = True
+    browser_mgr = BrowserManager(runtime_settings)
+    browser_mgr.set_account(account["email"])
+    ctx = None
+    masked_email = mask_email(account.get("email", ""))
+
+    try:
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Opening dedicated probe runtime",
+            scope="search-probe",
+            account=masked_email,
+            mode=mode,
+            has_storage_state=storage_state_path.exists(),
+            proxy=bool(session_proxy),
+        )
+        await browser_mgr.start()
+        ctx = await browser_mgr.create_context(
+            mode=mode,
+            account_email=account["email"] if mode == "desktop" else f"{account['email']}_{mode}_probe",
+            proxy=session_proxy,
+            storage_state=str(storage_state_path) if storage_state_path.exists() else None,
+            use_persistent_profile=False,
+        )
+        page = await browser_mgr.new_page(ctx)
+
+        if not await login_mgr.is_logged_in(page):
+            emit_diagnostic_log(
+                logger,
+                settings,
+                "Probe runtime needs fresh login",
+                scope="search-probe",
+                account=masked_email,
+                mode=mode,
+            )
+            page = await login_mgr.login(
+                page,
+                account["email"],
+                account["password"],
+                account.get("totp_secret"),
+            )
+
+        ctx = page.context
+        if mode == "mobile":
+            try:
+                await browser_mgr.toggle_mobile_emulation(page, enable=True)
+                await asyncio.sleep(1)
+                emit_diagnostic_log(
+                    logger,
+                    settings,
+                    "Mobile emulation enabled for probe",
+                    scope="search-probe",
+                    account=masked_email,
+                )
+            except Exception as e:
+                logger.warning(f"Mobile probe emulation activation failed: {e}")
+        status = await _read_search_status_with_mobile_recheck(
+            searcher,
+            page,
+            settings,
+        )
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Probe runtime returned search status",
+            scope="search-probe",
+            account=masked_email,
+            mode=mode,
+            status=summarize_search_status(status),
+        )
+        await _persist_storage_state(ctx, storage_state_path)
+        return status
+    finally:
+        try:
+            if ctx is not None:
+                await browser_mgr.close_context(ctx)
+        except Exception:
+            pass
+        try:
+            await browser_mgr.close()
+        except Exception:
+            pass
+
+
+async def _resolve_mobile_search_requirement(
+    settings: dict,
+    account: dict,
+    session_proxy: dict | None,
+    login_mgr: LoginManager,
+    searcher: Searcher,
+    storage_state_path,
+    baseline_status: dict,
+) -> dict:
+    """Resolve ambiguous mobile 0/0 credits before deciding to skip mobile searches."""
+    if not _needs_mobile_credit_recheck(baseline_status, settings):
+        return baseline_status
+
+    emit_diagnostic_log(
+        logger,
+        settings,
+        "Resolving ambiguous mobile credits",
+        scope="mobile-resolution",
+        account=mask_email(account.get("email", "")),
+        baseline=summarize_search_status(baseline_status),
+    )
+    logger.info("Mobile credits still ambiguous after desktop read; probing mobile runtime.")
+    try:
+        probed_status = await _probe_search_status_in_mode(
+            settings,
+            account,
+            session_proxy,
+            login_mgr,
+            searcher,
+            storage_state_path,
+            mode="mobile",
+        )
+    except Exception as e:
+        logger.warning(f"Mobile runtime probe failed: {e}")
+        return baseline_status
+
+    if _needs_mobile_credit_recheck(probed_status, settings):
+        logger.warning(
+            "Mobile runtime probe still returned 0/0; treating mobile credits as unknown and not auto-skipping."
+        )
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Mobile probe remained ambiguous",
+            scope="mobile-resolution",
+            account=mask_email(account.get("email", "")),
+            probed=summarize_search_status(probed_status),
+        )
+        return baseline_status
+
+    merged_status = dict(baseline_status)
+    merged_status["mobile_current"] = probed_status.get("mobile_current", 0)
+    merged_status["mobile_max"] = probed_status.get("mobile_max", 0)
+    if probed_status.get("total_points", 0) > 0:
+        merged_status["total_points"] = probed_status.get("total_points", 0)
+
+    logger.info(
+        f"Mobile runtime probe resolved credits: "
+        f"{merged_status.get('mobile_current', 0)}/{merged_status.get('mobile_max', 0)}"
+    )
+    emit_diagnostic_log(
+        logger,
+        settings,
+        "Mobile credits resolved after probe merge",
+        scope="mobile-resolution",
+        account=mask_email(account.get("email", "")),
+        merged=summarize_search_status(merged_status),
+    )
+    return merged_status
+
+
+async def _run_mobile_search_pass(
+    settings: dict,
+    account: dict,
+    session_proxy: dict | None,
+    login_mgr: LoginManager,
+    searcher: Searcher,
+    storage_state_path,
+    *,
+    count: int,
+    title: str = "Mobile Searches",
+) -> dict:
+    """Run one bounded mobile-search pass in a dedicated mobile context."""
+    if count <= 0:
+        return {"completed": 0, "total": 0}
+
+    mobile_runtime_settings = dict(settings)
+    mobile_runtime_settings["use_stealth"] = False
+    browser_mgr = BrowserManager(mobile_runtime_settings)
+    browser_mgr.set_account(account["email"])
+    masked_email = mask_email(account.get("email", ""))
+    ctx_mobile = None
+    page_mobile = None
+    patchright_pw = None
+    patchright_browser = None
+    runtime_family = "managed_edge"
+
+    try:
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Starting dedicated mobile search pass",
+            scope="mobile-pass",
+            account=masked_email,
+            count=count,
+            has_storage_state=storage_state_path.exists(),
+            proxy=bool(session_proxy),
+        )
+        if bool(settings.get("mobile_patchright_enabled", True)):
+            try:
+                patchright_pw, patchright_browser, ctx_mobile, page_mobile = await browser_mgr.create_mobile_patchright(
+                    load_storage_state_cookies(storage_state_path)
+                )
+                runtime_family = "patchright_mobile"
+                logger.info("Mobile search pass using patchright mobile runtime")
+            except Exception as e:
+                logger.warning(f"Patchright mobile startup failed, falling back to emulation: {e}")
+
+        if page_mobile is None:
+            await browser_mgr.start()
+            ctx_mobile = await browser_mgr.create_context(
+                mode="mobile",
+                account_email=account["email"] + "_mobile",
+                proxy=session_proxy,
+                storage_state=str(storage_state_path) if storage_state_path.exists() else None,
+                use_persistent_profile=False,
+            )
+            page_mobile = await browser_mgr.new_page(ctx_mobile)
+            try:
+                await browser_mgr.toggle_mobile_emulation(page_mobile, enable=True)
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.warning(f"Mobile emulation activation failed: {e}")
+        else:
+            logger.info("Mobile search pass started with patchright-backed Edge mobile runtime")
+            try:
+                await browser_mgr.toggle_mobile_emulation(page_mobile, enable=True)
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.warning(f"Patchright mobile CDP overlay failed: {e}")
+
+        logged_in = await login_mgr.is_logged_in(page_mobile)
+        if not logged_in:
+            page_mobile = await login_mgr.login(
+                page_mobile,
+                account["email"],
+                account["password"],
+                account.get("totp_secret"),
+            )
+        ctx_mobile = page_mobile.context
+        await _persist_storage_state(ctx_mobile, storage_state_path)
+        await page_mobile.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+        if hasattr(browser_mgr, "capture_runtime_signature"):
+            runtime_signature = await browser_mgr.capture_runtime_signature(page_mobile)
+            emit_diagnostic_log(
+                logger,
+                settings,
+                "Mobile runtime signature before search pass",
+                scope="mobile-runtime",
+                account=masked_email,
+                runtime_family=runtime_family,
+                signature=runtime_signature,
+            )
+
+        status_before = await _read_search_status_with_mobile_recheck(
+            searcher,
+            page_mobile,
+            settings,
+        )
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Collected mobile credits before search pass",
+            scope="mobile-pass",
+            account=masked_email,
+            before=summarize_search_status(status_before),
+        )
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=30),
+            TaskProgressColumn(),
+            console=console,
+        ) as progress:
+            console.print(f"\n[bold][ {title} ][/bold]")
+            task_m = progress.add_task("Mobile searches", total=count)
+
+            def on_mobile_progress(current, total, query):
+                progress.update(task_m, completed=current)
+
+            searcher.on_progress = on_mobile_progress
+            mobile_stats = await searcher.run_searches(
+                page_mobile, count, "mobile"
+            )
+
+        _raise_if_search_stopped("Mobile", mobile_stats)
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Mobile search loop finished",
+            scope="mobile-pass",
+            account=masked_email,
+            completed=mobile_stats.get("completed", 0),
+            failed=mobile_stats.get("failed", 0),
+            requested=count,
+            fatal_error=mobile_stats.get("fatal_error", ""),
+        )
+        await _persist_storage_state(ctx_mobile, storage_state_path)
+        status_after = await _wait_for_mobile_credit_update(
+            searcher,
+            page_mobile,
+            settings,
+            baseline_status=status_before,
+        )
+        credit_delta = _mobile_credit_delta(status_before, status_after)
+        if credit_delta > 0:
+            logger.info(
+                f"Mobile search pass credited {credit_delta} points "
+                f"({status_after.get('mobile_current', 0)}/{status_after.get('mobile_max', 0)})"
+            )
+        else:
+            logger.warning(
+                "Mobile search pass completed without observed credit change "
+                f"({status_before.get('mobile_current', 0)}/{status_before.get('mobile_max', 0)} -> "
+                f"{status_after.get('mobile_current', 0)}/{status_after.get('mobile_max', 0)})"
+            )
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Finished mobile search pass verification",
+            scope="mobile-pass",
+            account=masked_email,
+            before=summarize_search_status(status_before),
+            after=summarize_search_status(status_after),
+            credit_delta=credit_delta,
+        )
+        return {
+            "completed": mobile_stats["completed"],
+            "total": count,
+            "credit_proven": credit_delta > 0,
+            "status_before": status_before,
+            "status_after": status_after,
+            "runtime_family": runtime_family,
+        }
+    finally:
+        try:
+            if ctx_mobile is not None:
+                await _persist_storage_state(ctx_mobile, storage_state_path)
+        except Exception:
+            pass
+        if patchright_browser is not None:
+            try:
+                await patchright_browser.close()
+            except Exception:
+                pass
+        if patchright_pw is not None:
+            try:
+                await patchright_pw.stop()
+            except Exception:
+                pass
+        try:
+            await browser_mgr.close()
+        except Exception:
+            pass
+
+
+def _mobile_credit_delta(before_status: dict, after_status: dict) -> int:
+    """Return the observed change in mobile Rewards credits between two reads."""
+    return max(
+        0,
+        int(after_status.get("mobile_current", 0))
+        - int(before_status.get("mobile_current", 0)),
+    )
+
+
+async def _wait_for_mobile_credit_update(
+    searcher: Searcher,
+    page,
+    settings: dict,
+    *,
+    baseline_status: dict,
+) -> dict:
+    """Poll mobile credits after a search pass so we know whether the pass was actually credited."""
+    attempts = max(1, int(settings.get("mobile_credit_postcheck_attempts", 3)))
+    delay_seconds = max(2.0, float(settings.get("mobile_credit_postcheck_delay_seconds", 6)))
+    latest_status = baseline_status
+
+    for attempt in range(attempts):
+        await asyncio.sleep(delay_seconds)
+        latest_status = await _read_search_status_with_mobile_recheck(
+            searcher,
+            page,
+            settings,
+        )
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Polled mobile credits after search pass",
+            scope="mobile-postcheck",
+            attempt=attempt + 1,
+            attempts=attempts,
+            baseline=summarize_search_status(baseline_status),
+            latest=summarize_search_status(latest_status),
+        )
+        if _mobile_credit_delta(baseline_status, latest_status) > 0:
+            logger.info(
+                f"Mobile credits advanced after pass on attempt {attempt + 1}: "
+                f"{latest_status.get('mobile_current', 0)}/{latest_status.get('mobile_max', 0)}"
+            )
+            return latest_status
+
+    return latest_status
+
+
+def _describe_deferred_items(snapshot: dict) -> list[str]:
+    """Flatten deferred non-actionable Rewards offers for user-facing summaries."""
+    deferred_tasks = snapshot.get("deferred_tasks", [])
+    descriptions: list[str] = []
+    for item in deferred_tasks[:5]:
+        title = str(item.get("title", "") or "").strip()
+        reason = str(item.get("reason", "") or "").strip()
+        if not title:
+            continue
+        if reason == "multi_day_search_bar":
+            descriptions.append(f"Deferred: {title[:60]} (multi-day search-bar offer)")
+        elif reason == "external_referral":
+            descriptions.append(f"Deferred: {title[:60]} (requires friend referral activity)")
+        else:
+            descriptions.append(f"Deferred: {title[:60]}")
+    if len(deferred_tasks) > 5:
+        descriptions.append(f"{len(deferred_tasks) - 5} more deferred offer(s)")
+    return descriptions
+
+
 def _category_progress(task_stats: dict, category: str) -> dict:
     """Return total completed/total count for one task category."""
     category_stats = task_stats.get("by_category", {}).get(category, {})
@@ -278,6 +839,56 @@ def _category_progress(task_stats: dict, category: str) -> dict:
         "completed": completed_now + skipped_done,
         "total": total,
     }
+
+
+def _reconcile_verification_with_session_proof(
+    snapshot: dict,
+    session_proofs: dict | None = None,
+) -> dict:
+    """Apply run-local proofs when final Rewards APIs lag behind observed completion."""
+    if not session_proofs:
+        return snapshot
+
+    if not session_proofs.get("daily_set_complete", False):
+        return snapshot
+
+    task_overview = snapshot.setdefault("task_overview", {})
+    daily_overview = task_overview.setdefault("daily_set", {})
+    daily_total = int(daily_overview.get("total", 0))
+    if daily_total > 0:
+        daily_overview["completed"] = daily_total
+
+    category_status = snapshot.setdefault("category_status", {})
+    daily_category = category_status.setdefault(
+        "daily_set",
+        {"completed": 0, "total": daily_total},
+    )
+    daily_category_total = int(daily_category.get("total", 0))
+    if daily_category_total > 0:
+        daily_category["completed"] = daily_category_total
+
+    pending_by_category = snapshot.setdefault("pending_by_category", {})
+    stale_daily_titles = [
+        _normalize_reward_title(title)
+        for title in pending_by_category.get("daily_set", [])
+        if title
+    ]
+    proof_titles = [
+        _normalize_reward_title(title)
+        for title in session_proofs.get("daily_set_titles", [])
+        if title
+    ]
+    stale_title_set = set(stale_daily_titles or proof_titles)
+
+    if stale_title_set:
+        snapshot["pending_tasks"] = [
+            title
+            for title in snapshot.get("pending_tasks", [])
+            if _normalize_reward_title(title) not in stale_title_set
+        ]
+    pending_by_category["daily_set"] = []
+
+    return snapshot
 
 
 async def _collect_final_verification(
@@ -293,15 +904,26 @@ async def _collect_final_verification(
     browser_mgr = BrowserManager(settings)
     browser_mgr.set_account(account["email"])
     ctx = None
+    masked_email = mask_email(account.get("email", ""))
 
     snapshot = {
         "search_status": {},
         "task_overview": {},
         "category_status": {},
         "pending_tasks": [],
+        "pending_by_category": {},
+        "deferred_tasks": [],
     }
 
     try:
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Starting final verification snapshot",
+            scope="final-verification",
+            account=masked_email,
+            has_storage_state=storage_state_path.exists(),
+        )
         await browser_mgr.start()
         ctx = await browser_mgr.create_context(
             mode="desktop",
@@ -320,8 +942,19 @@ async def _collect_final_verification(
                 account.get("totp_secret"),
             )
 
-        snapshot["search_status"] = await searcher.get_search_points_status(page)
+        snapshot["search_status"] = await _read_search_status_with_mobile_recheck(
+            searcher,
+            page,
+            settings,
+        )
         snapshot["task_overview"] = await TaskDetector().get_all_tasks(page)
+        snapshot["search_status"] = _merge_search_status_sources(
+            snapshot["search_status"],
+            {
+                **snapshot["task_overview"].get("searches", {}),
+                "total_points": snapshot["task_overview"].get("total_points", 0),
+            },
+        )
 
         scanner = UniversalTaskScanner(
             humanizer=humanizer,
@@ -344,10 +977,32 @@ async def _collect_final_verification(
             if reward_task.is_locked:
                 continue
 
+            deferred_reason = get_deferred_offer_reason(reward_task)
+            if deferred_reason:
+                snapshot["deferred_tasks"].append({
+                    "title": (reward_task.title or reward_task.id or category).strip(),
+                    "reason": deferred_reason,
+                    "category": category,
+                })
+                continue
+
             title = (reward_task.title or reward_task.id or category).strip()
             if title and title not in seen_titles:
                 seen_titles.add(title)
                 snapshot["pending_tasks"].append(title)
+                snapshot["pending_by_category"].setdefault(category, []).append(title)
+
+        emit_diagnostic_log(
+            logger,
+            settings,
+            "Final verification snapshot collected",
+            scope="final-verification",
+            account=masked_email,
+            search_status=summarize_search_status(snapshot["search_status"]),
+            categories=snapshot.get("category_status", {}),
+            pending_count=len(snapshot.get("pending_tasks", [])),
+            deferred_count=len(snapshot.get("deferred_tasks", [])),
+        )
 
         await _persist_storage_state(ctx, storage_state_path)
     finally:
@@ -366,24 +1021,8 @@ async def _collect_final_verification(
 
 def _describe_remaining_items(snapshot: dict) -> list[str]:
     """Flatten the final verification payload into human-readable remaining work."""
-    remaining = []
-    search_status = snapshot.get("search_status", {})
+    remaining = describe_search_remaining_items(snapshot)
     task_overview = snapshot.get("task_overview", {})
-
-    pc_current = search_status.get("pc_current", 0)
-    pc_max = search_status.get("pc_max", 0)
-    if pc_max > 0 and pc_current < pc_max:
-        remaining.append(f"Desktop {pc_current}/{pc_max}")
-
-    mobile_current = search_status.get("mobile_current", 0)
-    mobile_max = search_status.get("mobile_max", 0)
-    if mobile_max > 0 and mobile_current < mobile_max:
-        remaining.append(f"Mobile {mobile_current}/{mobile_max}")
-
-    edge_current = search_status.get("edge_current", 0)
-    edge_max = search_status.get("edge_max", 0)
-    if edge_max > 0 and edge_current < edge_max:
-        remaining.append(f"Edge Search {edge_current}/{edge_max}")
 
     daily_set = task_overview.get("daily_set", {})
     daily_done = daily_set.get("completed", 0)
@@ -392,29 +1031,20 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
         remaining.append(f"Daily Set {daily_done}/{daily_total}")
 
     bing_app = task_overview.get("streaks", {}).get("bing_app", {})
-    if not bing_app.get("done", False):
+    if bing_app.get("exists", False) and not bing_app.get("done", False):
         remaining.append(f"Mobile App Check-in {bing_app.get('current', 0)}/1")
 
     edge_streak = task_overview.get("streaks", {}).get("edge", {})
     edge_minutes = edge_streak.get("minutes", 0)
     edge_target = edge_streak.get("target", 30)
-    if edge_target > 0 and not edge_streak.get("done", False):
+    if edge_streak.get("exists", False) and edge_target > 0 and not edge_streak.get("done", False):
         remaining.append(f"Edge Minutes {edge_minutes}/{edge_target}")
 
     pending_tasks = snapshot.get("pending_tasks", [])
-    
-    # Filter out notoriously slow-updating tasks (Quests, URL visits)
-    filtered_tasks = []
-    ignored_keywords = ["click to complete", "click here", "explore on bing", "tulip", "ipl", "cherry blossoms", "league"]
-    for title in pending_tasks:
-        lower_ttl = title.lower()
-        if not any(k in lower_ttl for k in ignored_keywords):
-            filtered_tasks.append(title)
-            
-    for title in filtered_tasks[:5]:
+    for title in pending_tasks[:5]:
         remaining.append(f"Task: {title[:60]}")
-    if len(filtered_tasks) > 5:
-        remaining.append(f"{len(filtered_tasks) - 5} more task(s)")
+    if len(pending_tasks) > 5:
+        remaining.append(f"{len(pending_tasks) - 5} more task(s)")
 
     return remaining
 
@@ -475,7 +1105,11 @@ async def _refresh_account_summary(
             )
 
         ctx = page.context
-        final_status = await searcher.get_search_points_status(page)
+        final_status = await _read_search_status_with_mobile_recheck(
+            searcher,
+            page,
+            settings,
+        )
         final_points = await points_tracker.read_points(page)
         if storage_state_path is not None:
             await _persist_storage_state(ctx, storage_state_path)
@@ -530,6 +1164,7 @@ async def run_all_tasks(
 
     for idx, account in enumerate(accounts):
         email = account["email"]
+        masked_email = mask_email(email)
         searcher.set_account_context(email)
         session_proxy = get_proxy_for_session(account)
         storage_state_path = _storage_state_path(email)
@@ -550,8 +1185,22 @@ async def run_all_tasks(
         pc_done = pc_max = mob_done = mob_max = edge_done = edge_max = 0
         remaining_items: list[str] = []
         account_complete = True
+        session_proofs: dict = {}
 
         try:
+            emit_diagnostic_log(
+                logger,
+                settings,
+                "Starting account run",
+                scope="account",
+                account=masked_email,
+                index=idx + 1,
+                total_accounts=len(accounts),
+                has_proxy=bool(session_proxy),
+                has_storage_state=storage_state_path.exists(),
+                ai_enabled=bool(settings.get("ai_enabled", False)),
+                diagnostic_logging=bool(settings.get("diagnostic_logging", True)),
+            )
             await browser_mgr.start()
 
             # ─── Desktop Context (main session) ────────────────────────
@@ -597,7 +1246,20 @@ async def run_all_tasks(
                 # ── Check search credits via API ──
                 await close_other_tabs(page)
                 console.print("[dim]Checking search credits...[/dim]")
-                search_status = await searcher.get_search_points_status(page)
+                search_status = await _read_search_status_with_mobile_recheck(
+                    searcher,
+                    page,
+                    settings,
+                )
+                search_status = await _resolve_mobile_search_requirement(
+                    settings,
+                    account,
+                    session_proxy,
+                    login_mgr,
+                    searcher,
+                    storage_state_path,
+                    search_status,
+                )
                 pc_done = search_status.get("pc_current", 0)
                 pc_max = search_status.get("pc_max", 0)
                 mob_done = search_status.get("mobile_current", 0)
@@ -605,6 +1267,14 @@ async def run_all_tasks(
                 edge_done = search_status.get("edge_current", 0)
                 edge_max = search_status.get("edge_max", 0)
                 final_search_status = dict(search_status)
+                emit_diagnostic_log(
+                    logger,
+                    settings,
+                    "Read initial Rewards counters",
+                    scope="account",
+                    account=masked_email,
+                    search_status=summarize_search_status(search_status),
+                )
 
                 console.print(
                     f"[dim]  PC: {pc_done}/{pc_max}  |  "
@@ -622,6 +1292,15 @@ async def run_all_tasks(
                 remaining_desktop = (remaining_pc + 2) // 3 if remaining_pc > 0 else 0
 
                 if remaining_desktop > 0:
+                    emit_diagnostic_log(
+                        logger,
+                        settings,
+                        "Planning desktop search pass",
+                        scope="desktop-search",
+                        account=masked_email,
+                        remaining_points=remaining_pc,
+                        search_count=remaining_desktop,
+                    )
                     task_id = progress.add_task("Desktop searches", total=remaining_desktop)
 
                     def on_desktop_progress(current, total, query):
@@ -631,76 +1310,107 @@ async def run_all_tasks(
                     desktop_stats = await searcher.run_searches(page, remaining_desktop, "desktop")
                     _raise_if_search_stopped("Desktop", desktop_stats)
                     all_searches["desktop"] = {"completed": desktop_stats["completed"], "total": remaining_desktop}
+                    emit_diagnostic_log(
+                        logger,
+                        settings,
+                        "Desktop search pass finished",
+                        scope="desktop-search",
+                        account=masked_email,
+                        completed=desktop_stats.get("completed", 0),
+                        failed=desktop_stats.get("failed", 0),
+                        requested=remaining_desktop,
+                    )
                 else:
                     console.print(f"[green][SKIP] Desktop searches already complete ({pc_done}/{pc_max})[/green]")
                     all_searches["desktop"] = {"completed": 0, "total": 0}
 
                 # ── Universal Tasks (Daily Set + Punch Cards + Promotions) ──
                 console.print("\n[bold][ All Tasks: Daily Set + Punch Cards + Promotions ][/bold]")
-                task_stats = await universal_tasks.scan_and_complete(page, account_email=email)
-                daily_stats = _category_progress(task_stats, "daily_set")
-                punch_stats = _category_progress(task_stats, "punch_card")
-                promo_stats = _category_progress(task_stats, "more_promo")
+                if settings.get("page_agent_enabled", False):
+                    pa_flow = PageAgentFlow(settings)
+                    await pa_flow.inject(page)
+                    # Run defined flows
+                    daily_result = await pa_flow.run_flow(page, "bing_daily_set")
+                    console.print(f"[green]Page-agent Daily Set: {daily_result}[/green]")
+
+                    punch_result = await pa_flow.run_flow(page, "bing_punch_card")
+                    console.print(f"[green]Page-agent Punch Card: {punch_result}[/green]")
+
+                    # Assuming a generic promotion flow; adjust as needed
+                    promo_result = await pa_flow.run_flow(page, "bing_promotions") if "bing_promotions" in pa_flow.list_flows() else {"completed": 0, "total": 0}
+                    console.print(f"[green]Page-agent Promotions: {promo_result}[/green]")
+
+                    daily_stats = {"completed": daily_result.get("completed", 0), "total": daily_result.get("total_steps", 0)}
+                    punch_stats = {"completed": punch_result.get("completed", 0), "total": punch_result.get("total_steps", 0)}
+                    promo_stats = {"completed": promo_result.get("completed", 0), "total": promo_result.get("total_steps", 0)}
+                    session_proofs = {}
+                    # Log for consistency
+                    emit_diagnostic_log(
+                        logger,
+                        settings,
+                        "Page-agent flows completed",
+                        scope="tasks",
+                        account=masked_email,
+                        daily=daily_stats,
+                        punch=punch_stats,
+                        promo=promo_stats,
+                    )
+                else:
+                    task_stats = await universal_tasks.scan_and_complete(page, account_email=email)
+                    daily_stats = _category_progress(task_stats, "daily_set")
+                    punch_stats = _category_progress(task_stats, "punch_card")
+                    promo_stats = _category_progress(task_stats, "more_promo")
+                    session_proofs = dict(task_stats.get("session_proofs", {}))
+                    emit_diagnostic_log(
+                        logger,
+                        settings,
+                        "Universal task scan finished",
+                        scope="tasks",
+                        account=masked_email,
+                        completed=task_stats.get("completed", 0),
+                        failed=task_stats.get("failed", 0),
+                        deferred=task_stats.get("deferred", 0),
+                        skipped_done=task_stats.get("skipped_done", 0),
+                        skipped_locked=task_stats.get("skipped_locked", 0),
+                        by_category=task_stats.get("by_category", {}),
+                    )
                 await close_other_tabs(page)
                 await _persist_storage_state(ctx, storage_state_path)
                 await browser_mgr.close_context(ctx)
 
             # ─── Mobile Searches (skip if already done) ───────────────
+            mobile_status_ambiguous = _needs_mobile_credit_recheck(search_status, settings)
             remaining_mob = max(0, mob_max - mob_done)
-            remaining_mobile = (remaining_mob + 2) // 3 if remaining_mob > 0 else 0
+            if mobile_status_ambiguous:
+                remaining_mobile = _search_count_setting(settings, "mobile")
+                logger.info(
+                    f"Mobile credits remain ambiguous after probe; running configured mobile search batch ({remaining_mobile}) instead of auto-skipping."
+                )
+            else:
+                remaining_mobile = (remaining_mob + 2) // 3 if remaining_mob > 0 else 0
+            emit_diagnostic_log(
+                logger,
+                settings,
+                "Resolved mobile search plan",
+                scope="mobile-plan",
+                account=masked_email,
+                ambiguous=mobile_status_ambiguous,
+                remaining_points=remaining_mob,
+                planned_searches=remaining_mobile,
+                baseline=summarize_search_status(search_status),
+            )
 
             if remaining_mobile > 0:
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(bar_width=30),
-                    TaskProgressColumn(),
-                    console=console,
-                ) as progress:
-
-                    console.print("\n[bold][ Mobile Searches ][/bold]")
-                    mobile_runtime_settings = dict(settings)
-                    mobile_runtime_settings["use_stealth"] = False
-                    browser_mgr2 = BrowserManager(mobile_runtime_settings)
-                    browser_mgr2.set_account(email)
-                    await browser_mgr2.start()
-                    ctx_mobile = await browser_mgr2.create_context(
-                        mode="mobile",
-                        account_email=email + "_mobile",
-                        proxy=session_proxy,
-                        storage_state=str(storage_state_path) if storage_state_path.exists() else None,
-                        use_persistent_profile=False,
-                    )
-                    page_mobile = await browser_mgr2.new_page(ctx_mobile)
-
-                    logged_in = await login_mgr.is_logged_in(page_mobile)
-                    if not logged_in:
-                        page_mobile = await login_mgr.login(
-                            page_mobile,
-                            email,
-                            account["password"],
-                            account.get("totp_secret"),
-                        )
-                    ctx_mobile = page_mobile.context
-                    await _persist_storage_state(ctx_mobile, storage_state_path)
-
-                    task_m = progress.add_task("Mobile searches", total=remaining_mobile)
-
-                    def on_mobile_progress(current, total, query):
-                        progress.update(task_m, completed=current)
-
-                    searcher.on_progress = on_mobile_progress
-                    mobile_stats = await searcher.run_searches(
-                        page_mobile, remaining_mobile, "mobile"
-                    )
-                    _raise_if_search_stopped("Mobile", mobile_stats)
-                    all_searches["mobile"] = {
-                        "completed": mobile_stats["completed"],
-                        "total": remaining_mobile,
-                    }
-
-                    await _persist_storage_state(ctx_mobile, storage_state_path)
-                    await browser_mgr2.close()
+                all_searches["mobile"] = await _run_mobile_search_pass(
+                    settings,
+                    account,
+                    session_proxy,
+                    login_mgr,
+                    searcher,
+                    storage_state_path,
+                    count=remaining_mobile,
+                    title="Mobile Searches",
+                )
             else:
                 console.print(f"\n[green][SKIP] Mobile searches already complete ({mob_done}/{mob_max})[/green]")
                 all_searches["mobile"] = {"completed": 0, "total": 0}
@@ -873,6 +1583,10 @@ async def run_all_tasks(
                     humanizer,
                     storage_state_path,
                 )
+                verification = _reconcile_verification_with_session_proof(
+                    verification,
+                    session_proofs,
+                )
                 if verification.get("search_status"):
                     final_search_status = verification["search_status"]
 
@@ -895,7 +1609,116 @@ async def run_all_tasks(
                         "total": int(verified_categories["more_promo"].get("total", 0)),
                     }
 
+                mobile_gap = max(
+                    0,
+                    int(final_search_status.get("mobile_max", 0))
+                    - int(final_search_status.get("mobile_current", 0)),
+                )
+                should_retry_mobile = (
+                    mobile_gap > 0
+                    and int(settings.get("mobile_search_recovery_passes", 1)) > 0
+                    and not bool(all_searches["mobile"].get("recovery_attempted", False))
+                )
+
+                if should_retry_mobile:
+                    recovery_count = (mobile_gap + 2) // 3
+                    logger.info(
+                        f"Mobile credits still short after verification ({final_search_status.get('mobile_current', 0)}/{final_search_status.get('mobile_max', 0)}); running one bounded recovery pass."
+                    )
+                    emit_diagnostic_log(
+                        logger,
+                        settings,
+                        "Starting bounded mobile recovery pass",
+                        scope="mobile-recovery",
+                        account=masked_email,
+                        mobile_gap=mobile_gap,
+                        recovery_count=recovery_count,
+                        verification_status=summarize_search_status(final_search_status),
+                    )
+                    recovery_stats = await _run_mobile_search_pass(
+                        settings,
+                        account,
+                        session_proxy,
+                        login_mgr,
+                        searcher,
+                        storage_state_path,
+                        count=recovery_count,
+                        title="Mobile Search Recovery",
+                    )
+                    recovery_stats["recovery_attempted"] = True
+                    all_searches["mobile"] = {
+                        "completed": all_searches["mobile"].get("completed", 0)
+                        + recovery_stats.get("completed", 0),
+                        "total": all_searches["mobile"].get("total", 0)
+                        + recovery_stats.get("total", 0),
+                        "recovery_attempted": True,
+                    }
+
+                    final_search_status, final_points_info = await _refresh_account_summary(
+                        verify_settings,
+                        account,
+                        session_proxy,
+                        login_mgr,
+                        searcher,
+                        points_tracker,
+                        fallback_status=final_search_status,
+                        fallback_points={
+                            "total_points": total_points,
+                            "streak": streak,
+                        },
+                        storage_state_path=storage_state_path,
+                    )
+                    total_points = final_points_info.get("total_points", total_points)
+                    streak = final_points_info.get("streak", streak)
+
+                    verification = await _collect_final_verification(
+                        verify_settings,
+                        account,
+                        session_proxy,
+                        login_mgr,
+                        searcher,
+                        humanizer,
+                        storage_state_path,
+                    )
+                    verification = _reconcile_verification_with_session_proof(
+                        verification,
+                        session_proofs,
+                    )
+                    if verification.get("search_status"):
+                        final_search_status = verification["search_status"]
+                    remaining_items = _describe_remaining_items(verification)
+                    mobile_gap = max(
+                        0,
+                        int(final_search_status.get("mobile_max", 0))
+                        - int(final_search_status.get("mobile_current", 0)),
+                    )
+                    if mobile_gap > 0:
+                        logger.warning(
+                            f"Mobile recovery pass finished with remaining deficit: {final_search_status.get('mobile_current', 0)}/{final_search_status.get('mobile_max', 0)}"
+                        )
+                    emit_diagnostic_log(
+                        logger,
+                        settings,
+                        "Completed bounded mobile recovery pass",
+                        scope="mobile-recovery",
+                        account=masked_email,
+                        recovery_stats=recovery_stats,
+                        verification_status=summarize_search_status(final_search_status),
+                        mobile_gap=mobile_gap,
+                    )
+
                 remaining_items = _describe_remaining_items(verification)
+                deferred_items = _describe_deferred_items(verification)
+                emit_diagnostic_log(
+                    logger,
+                    settings,
+                    "Final account verification evaluated",
+                    scope="account",
+                    account=masked_email,
+                    verification_status=summarize_search_status(verification.get("search_status", {})),
+                    remaining_items=remaining_items,
+                    deferred_items=deferred_items,
+                )
                 account_complete = len(remaining_items) == 0
                 if account_complete:
                     console.print("[green][OK] Rewards state fully verified[/green]")
@@ -905,10 +1728,24 @@ async def run_all_tasks(
                         "[yellow]  Remaining items:[/yellow] "
                         + ", ".join(remaining_items[:8])
                     )
+                if deferred_items:
+                    console.print(
+                        "[cyan]  Deferred offers:[/cyan] "
+                        + ", ".join(deferred_items[:5])
+                    )
             except Exception as e:
                 account_complete = False
                 overall_complete = False
                 remaining_items = [f"Verification error: {e}"]
+                emit_diagnostic_log(
+                    logger,
+                    settings,
+                    "Final verification raised exception",
+                    level="error",
+                    scope="account",
+                    account=masked_email,
+                    error=str(e),
+                )
                 console.print(f"[yellow][WARN] Final verification error: {e}[/yellow]")
 
             points_tracker.log_daily(
@@ -965,6 +1802,21 @@ async def run_all_tasks(
                 verified_complete=account_complete,
                 remaining_items=remaining_items,
             )
+            emit_diagnostic_log(
+                logger,
+                settings,
+                "Account summary recorded",
+                scope="account",
+                account=masked_email,
+                total_points=total_points,
+                earned_today=earned_today,
+                streak=streak,
+                searches=all_searches,
+                daily=daily_stats,
+                punch=punch_stats,
+                promo=promo_stats,
+                verified_complete=account_complete,
+            )
             
             # Google Sheets Webhook
             webhook_url = settings.get("google_sheets_webhook_url", "")
@@ -991,6 +1843,15 @@ async def run_all_tasks(
             overall_complete = False
             console.print(f"[bold red]Error: {e}[/bold red]")
             logger.error(f"Account {email} error: {e}")
+            emit_diagnostic_log(
+                logger,
+                settings,
+                "Account run raised exception",
+                level="error",
+                scope="account",
+                account=masked_email,
+                error=str(e),
+            )
             notifier.send_error(email, str(e))
             try:
                 await browser_mgr.close()
@@ -1104,7 +1965,21 @@ async def run_searches_only(settings, accounts, password):
                 await _persist_storage_state(ctx, storage_state_path)
 
                 # Check credits first — skip if already full
-                status = await searcher.get_search_points_status(page)
+                status = await _read_search_status_with_mobile_recheck(
+                    searcher,
+                    page,
+                    settings,
+                )
+                if mode == "mobile":
+                    status = await _resolve_mobile_search_requirement(
+                        settings,
+                        account,
+                        session_proxy,
+                        login_mgr,
+                        searcher,
+                        storage_state_path,
+                        status,
+                    )
                 cur, mx = _mode_credit(status, mode)
 
                 if mx > 0 and cur >= mx:
@@ -1330,6 +2205,40 @@ async def main():
         await run_all_tasks(settings, accounts, password)
         return
 
+    # Parse --flow argument
+    flow_name = None
+    if "--flow" in sys.argv:
+        try:
+            idx = sys.argv.index("--flow")
+            flow_name = sys.argv[idx + 1]
+            console.print(f"[cyan]Running flow: {flow_name}[/cyan]")
+            settings = load_settings()
+            password = prompt_master_password(settings["master_password_hash"])
+            accounts = load_encrypted_accounts(password)
+            for acc in accounts:
+                session_proxy = get_proxy_for_session(acc)
+                bm = BrowserManager(settings)
+                bm.set_account(acc["email"])
+                await bm.start()
+                ctx = await bm.create_context(
+                    mode="desktop",
+                    account_email=acc["email"],
+                    proxy=session_proxy,
+                )
+                page = await bm.new_page(ctx)
+                login_mgr = LoginManager(Humanizer())
+                if not await login_mgr.is_logged_in(page):
+                    page = await login_mgr.login(page, acc["email"], acc["password"], acc.get("totp_secret"))
+                pa_flow = PageAgentFlow(settings)
+                await pa_flow.inject(page)
+                result = await pa_flow.run_flow(page, flow_name)
+                console.print(f"[green]Flow result for {acc['email']}: {result}[/green]")
+                await bm.close()
+            return
+        except Exception as e:
+            console.print(f"[red]Error running flow: {e}[/red]")
+            return
+
     # ─── CLI Mode (explicit --cli flag) ────────────────────────
     if "--cli" in sys.argv:
         # Interactive menu
@@ -1505,6 +2414,26 @@ async def _handle_cli_choice(choice: str, settings: dict) -> None:
         start_dashboard(port, host)
         console.print(f"[green]Dashboard: http://{display_host}:{port}[/green]")
         Prompt.ask("Press Enter to continue")
+    elif choice == "12":
+        flow_name = Prompt.ask("Enter flow name (e.g., bing_daily_set)")
+        for acc in accounts:
+            session_proxy = get_proxy_for_session(acc)
+            bm = BrowserManager(settings)
+            bm.set_account(acc["email"])
+            await bm.start()
+            ctx = await bm.create_context(
+                mode="desktop",
+                account_email=acc["email"],
+                proxy=session_proxy,
+            )
+            page = await bm.new_page(ctx)
+            if not await login_mgr.is_logged_in(page):
+                page = await login_mgr.login(page, acc["email"], acc["password"], acc.get("totp_secret"))
+            pa_flow = PageAgentFlow(settings)
+            await pa_flow.inject(page)
+            result = await pa_flow.run_flow(page, flow_name)
+            console.print(f"[green]Flow {flow_name} for {acc['email']}: {result}[/green]")
+            await bm.close()
 
 
 # ─── Graceful Shutdown ───────────────────────────────────────────────
