@@ -85,6 +85,27 @@ class TaskDetector:
         }
 
     @staticmethod
+    def _parse_daily_set_completed_cards(page_text: str) -> tuple[int, int] | None:
+        """Infer Daily Set completion from visible dashboard cards when summary counters lag."""
+        if not page_text:
+            return None
+
+        section_match = re.search(
+            r"Daily\s+set(.*?)(?:Your\s+activity|Featured\s+redemptions|Achievements|Follow\s+Rewards)",
+            page_text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not section_match:
+            return None
+
+        section_text = section_match.group(1)
+        completed = len(re.findall(r"\bCompleted\b", section_text, re.IGNORECASE))
+        if completed <= 0:
+            return None
+
+        return completed, completed
+
+    @staticmethod
     async def get_all_tasks(page: Page) -> dict:
         """
         Fetch complete task status from Rewards API.
@@ -244,6 +265,16 @@ class TaskDetector:
                     daily_set_progress = card_progress.get("daily_set")
                     if daily_set_progress:
                         current, total = daily_set_progress
+                        result["daily_set"]["completed"] = max(
+                            result["daily_set"]["completed"], current
+                        )
+                        result["daily_set"]["total"] = max(
+                            result["daily_set"]["total"], total
+                        )
+
+                    daily_set_cards_progress = TaskDetector._parse_daily_set_completed_cards(page_text)
+                    if daily_set_cards_progress:
+                        current, total = daily_set_cards_progress
                         result["daily_set"]["completed"] = max(
                             result["daily_set"]["completed"], current
                         )

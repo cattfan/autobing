@@ -247,7 +247,6 @@ class UniversalTaskScanner:
         self.daily_set_execution_proofs: dict[str, dict] = {}
         self._session_completed_categories: set[str] = set()
         self._session_daily_set_titles: set[str] = set()
-        self.daily_set_execution_proofs: dict[str, dict] = {}
         self._log = on_log or (lambda level, msg: logger.info(msg))
         self._macro_player = None
         try:
@@ -326,7 +325,6 @@ class UniversalTaskScanner:
         self.daily_set_execution_proofs.clear()
         self._session_completed_categories.clear()
         self._session_daily_set_titles.clear()
-        self.daily_set_execution_proofs.clear()
 
         # 1. Fetch all tasks from API
         self._log("info", "🔍 Scanning all Rewards tasks...")
@@ -881,6 +879,39 @@ class UniversalTaskScanner:
                 )
 
                 if refreshed is None:
+                    if task.category == "daily_set":
+                        proof = self._get_daily_set_execution_proof(task)
+                        title_still_present = any(
+                            candidate.category == task.category
+                            and self._normalized_task_title_key(candidate.title or "")
+                            == self._normalized_task_title_key(task.title or "")
+                            for candidate in refreshed_tasks
+                        )
+                        if (
+                            proof
+                            and proof.get("state") in {"attempted_only", "panel_control_failed"}
+                            and not title_still_present
+                        ):
+                            disappearance_proof = self._store_daily_set_execution_proof(
+                                task,
+                                {
+                                    "state": "target_proven",
+                                    "target_proven": True,
+                                    "proof_titles": [task.title] if (task.title or "").strip() else [],
+                                    "progress_completed": max(int(proof.get("progress_completed", 0) or 0), 1),
+                                    "progress_total": int(proof.get("progress_total", 0) or 0),
+                                    "source": "daily_set_inventory_disappearance",
+                                },
+                                source="daily_set_inventory_disappearance",
+                            )
+                            self._diag(
+                                "Daily Set verification accepted inventory disappearance after execution",
+                                scope="task-verify",
+                                attempt=attempt + 1,
+                                proof=disappearance_proof,
+                                **self._task_diag_payload(task),
+                            )
+                            return True
                     if strict_completion:
                         self._log(
                             "info",
@@ -1656,14 +1687,6 @@ class UniversalTaskScanner:
         self.daily_set_execution_proofs["daily_set"] = dict(record)
         return record
 
-    def _get_daily_set_execution_proof(self, task: RewardsTask) -> dict | None:
-        """Resolve the best available Daily Set proof for a task from the run-local carrier."""
-        candidate_keys = [task.id, self._normalized_task_title_key(task.title), "daily_set"]
-        for key in candidate_keys:
-            if key and key in self.daily_set_execution_proofs:
-                return self.daily_set_execution_proofs[key]
-        return None
-
     @staticmethod
     def _resolve_daily_set_proof_state(result: dict | None) -> str:
         """Normalize Daily Set executor outcomes into the shared proof state machine."""
@@ -1680,31 +1703,9 @@ class UniversalTaskScanner:
         return "attempted_only"
 
     def _record_daily_set_execution_proof(self, task: RewardsTask, result: dict | None) -> dict:
-        """Store Daily Set execution proof under task, title, and category lookup keys."""
-        proof_state = self._resolve_daily_set_proof_state(result)
-        proof = {
-            "state": proof_state,
-            "proof_titles": [
-                str(title).strip()
-                for title in (result or {}).get("proof_titles", [])
-                if str(title).strip()
-            ],
-            "progress_completed": int((result or {}).get("progress_completed", 0) or 0),
-            "progress_total": int((result or {}).get("progress_total", 0) or 0),
-            "source": str((result or {}).get("source", "daily_set_completer")),
-        }
-
-        keys: list[str] = []
-        if task.id:
-            keys.append(task.id)
-        title_key = self._normalized_task_title_key(task.title or "")
-        if title_key:
-            keys.append(title_key)
-        keys.append("daily_set")
-
-        for key in keys:
-            self.daily_set_execution_proofs[key] = dict(proof)
-
+        """Compatibility wrapper for tests and older call sites."""
+        proof = self._store_daily_set_execution_proof(task, result)
+        proof_state = proof.get("state", "")
         if proof_state == "category_proven":
             self._session_completed_categories.add("daily_set")
             if (task.title or "").strip():
@@ -1772,7 +1773,7 @@ class UniversalTaskScanner:
 
         # Fast-path: use exact DOM index captured during the visual scan phase
         elem_idx = task.raw_data.get("element_index")
-        if elem_idx is not None:
+        if elem_idx is not None and task.category != "daily_set":
             self._log("info", f"  🖱️ Using native visual selector index {elem_idx} for task '{primary_title}'")
             import src.dashboard_scraper as scraper
             clicked = await scraper.click_task_by_index(page, elem_idx)

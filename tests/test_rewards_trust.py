@@ -17,6 +17,7 @@ from src.daily_set import DailySetCompleter
 from src.dashboard_scraper import scan_dashboard_dom
 from src.humanizer import Humanizer
 from src.searcher import Searcher
+from src.streaks import TaskDetector
 from src.utils import (
     diagnostic_logging_enabled,
     get_random_mobile_rewards_user_agent,
@@ -303,6 +304,56 @@ class RewardsTrustTests(unittest.TestCase):
 
 
 class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_task_detector_uses_completed_daily_set_cards_when_summary_lags(self):
+        class FakeBodyLocator:
+            async def inner_text(self, timeout=None):
+                return (
+                    "Dashboard\n"
+                    "Daily set\n"
+                    "Earn more\n"
+                    "Upcoming sporting events\n10\nCompleted\n"
+                    "Going to Saskatoon\n10\nCompleted\n"
+                    "Rose-Red City?\n10\nCompleted\n"
+                    "Your activity\n"
+                    "Daily Set\nActivity: 0/3\n"
+                )
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/dashboard"
+
+            async def goto(self, url, **kwargs):
+                self.url = url
+
+            async def evaluate(self, script):
+                return {
+                    "dashboard": {
+                        "userStatus": {
+                            "availablePoints": 10406,
+                            "levelInfo": {"activeLevel": "newLevel3"},
+                            "counters": {},
+                        },
+                        "dailySetPromotions": {
+                            "2026-04-10": [
+                                {"complete": False, "pointProgress": 0, "pointProgressMax": 1},
+                                {"complete": False, "pointProgress": 0, "pointProgressMax": 1},
+                                {"complete": False, "pointProgress": 0, "pointProgressMax": 1},
+                            ]
+                        },
+                        "morePromotions": [],
+                    }
+                }
+
+            def locator(self, selector):
+                assert selector == "body"
+                return FakeBodyLocator()
+
+        with patch("src.streaks.asyncio.sleep", new=AsyncMock()):
+            result = await TaskDetector.get_all_tasks(FakePage())
+
+        self.assertEqual(result["daily_set"]["completed"], 3)
+        self.assertEqual(result["daily_set"]["total"], 3)
+
     async def test_daily_set_execute_routes_to_completer_first_and_records_target_proof(self):
         scanner = UniversalTaskScanner(Humanizer())
         scanner._ensure_no_manual_challenge = AsyncMock()
@@ -591,6 +642,66 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(verified)
         scanner._fetch_all_tasks.assert_not_awaited()
 
+    async def test_daily_set_verification_accepts_disappearance_after_attempted_execution(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._log = lambda *_args, **_kwargs: None
+        scanner._dom_check_single_task_done = AsyncMock(return_value=False)
+        scanner._dom_check_task_done_across_rewards_pages = AsyncMock(return_value=False)
+        scanner.daily_set_execution_proofs["daily-1"] = {
+            "state": "panel_control_failed",
+            "proof_titles": [],
+            "progress_completed": 0,
+            "progress_total": 3,
+            "source": "test",
+        }
+        scanner._fetch_all_tasks = AsyncMock(return_value=[
+            RewardsTask(id="daily-2", title="Other daily item", category="daily_set", task_type="visit"),
+        ])
+        task = RewardsTask(
+            id="daily-1",
+            title="Parrot intelligence",
+            category="daily_set",
+            task_type="visit",
+        )
+
+        with patch("src.universal_task.asyncio.sleep", new=AsyncMock()):
+            verified = await scanner._verify_task_completion(None, task)
+
+        self.assertTrue(verified)
+        self.assertEqual(scanner.daily_set_execution_proofs["daily-1"]["state"], "target_proven")
+        self.assertEqual(
+            scanner.daily_set_execution_proofs["daily-1"]["source"],
+            "daily_set_inventory_disappearance",
+        )
+
+    async def test_daily_set_disappearance_does_not_pass_when_same_title_still_present(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._log = lambda *_args, **_kwargs: None
+        scanner._dom_check_single_task_done = AsyncMock(return_value=False)
+        scanner._dom_check_task_done_across_rewards_pages = AsyncMock(return_value=False)
+        scanner.daily_set_execution_proofs["daily-1"] = {
+            "state": "attempted_only",
+            "proof_titles": [],
+            "progress_completed": 0,
+            "progress_total": 3,
+            "source": "test",
+        }
+        scanner._fetch_all_tasks = AsyncMock(return_value=[
+            RewardsTask(id="other-id", title="Parrot intelligence", category="daily_set", task_type="visit"),
+        ])
+        task = RewardsTask(
+            id="daily-1",
+            title="Parrot intelligence",
+            category="daily_set",
+            task_type="visit",
+        )
+
+        with patch("src.universal_task.asyncio.sleep", new=AsyncMock()):
+            verified = await scanner._verify_task_completion(None, task)
+
+        self.assertFalse(verified)
+        self.assertEqual(scanner.daily_set_execution_proofs["daily-1"]["state"], "attempted_only")
+
     async def test_daily_set_generic_fallback_only_runs_for_attempted_only_and_panel_failures(self):
         task = RewardsTask(id="daily-1", title="Parrot intelligence", category="daily_set", task_type="visit")
 
@@ -637,6 +748,48 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(await proven_scanner._execute_task(FakePage(), task))
         proven_scanner._click_task_on_current_page.assert_not_awaited()
+
+    async def test_daily_set_click_ignores_visual_index_fast_path(self):
+        scanner = UniversalTaskScanner(Humanizer())
+
+        class FakeLocator:
+            async def count(self):
+                return 0
+
+            async def is_visible(self, timeout=None):
+                return False
+
+            async def scroll_into_view_if_needed(self, timeout=None):
+                return None
+
+            async def click(self, timeout=None):
+                return None
+
+            @property
+            def first(self):
+                return self
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+
+            def locator(self, *args, **kwargs):
+                return FakeLocator()
+
+        task = RewardsTask(
+            id="daily-1",
+            title="Rose-Red City?",
+            category="daily_set",
+            task_type="quiz",
+            raw_data={"element_index": 27},
+        )
+
+        with patch("src.dashboard_scraper.click_task_by_index", new=AsyncMock(return_value=True)) as click_by_index, \
+             patch.object(scanner, "_mark_dom_text_candidate", new=AsyncMock(return_value=None)):
+            clicked = await scanner._click_task_on_current_page(FakePage(), task)
+
+        self.assertFalse(clicked)
+        click_by_index.assert_not_awaited()
 
     async def test_daily_set_bulk_fallback_retries_for_each_unproven_title(self):
         scanner = UniversalTaskScanner(Humanizer())
