@@ -403,15 +403,20 @@ class DailySetCompleter:
             "completed": 0,
             "total": 0,
             "tasks": [],
+            "state": "attempted_only",
             "attempted": False,
             "target_status": "not_proven",
             "target_proven": False,
             "category_proven": False,
             "attempted_only": False,
+            "panel_control_failed": False,
             "proof_titles": [],
             "progress_completed": 0,
             "progress_total": 0,
+            "state": "panel_control_failed",
+            "source": "daily_set_completer",
         }
+        panel_control_failed = False
 
         try:
             # ═══ Click-based approach using correct Rewards page DOM ═══
@@ -441,6 +446,7 @@ class DailySetCompleter:
 
             if not streak_card_clicked:
                 logger.warning("Could not find Daily Set Streak card on #daily-sets")
+                stats["panel_control_failed"] = True
                 raise RuntimeError("daily_set_panel_not_found")
 
             # Step 2: Wait for modal/flyout to open
@@ -573,11 +579,17 @@ class DailySetCompleter:
         stats["category_proven"] = bool(progress_proof.get("category_proven", False)) or (
             stats["progress_total"] > 0 and stats["progress_completed"] >= stats["progress_total"]
         )
-        stats["attempted_only"] = (
-            stats["attempted"]
-            and not stats["target_proven"]
-            and not stats["category_proven"]
-        )
+        if stats["category_proven"]:
+            stats["state"] = "category_proven"
+        elif stats["target_proven"]:
+            stats["state"] = "target_proven"
+        elif stats["attempted"]:
+            stats["state"] = "attempted_only"
+        else:
+            stats["state"] = "panel_control_failed"
+            stats["panel_control_failed"] = True
+        stats["attempted_only"] = stats["state"] == "attempted_only"
+        stats["panel_control_failed"] = stats["state"] == "panel_control_failed"
         logger.info(f"Daily Set: {stats['completed']}/{stats['total']} completed")
         return stats
 

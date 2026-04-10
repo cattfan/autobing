@@ -244,8 +244,10 @@ class UniversalTaskScanner:
         self.challenge_handler = challenge_handler
         self._active_account_email = ""
         self._daily_set_bulk_attempted_titles: set[str] = set()
+        self.daily_set_execution_proofs: dict[str, dict] = {}
         self._session_completed_categories: set[str] = set()
         self._session_daily_set_titles: set[str] = set()
+        self.daily_set_execution_proofs: dict[str, dict] = {}
         self._log = on_log or (lambda level, msg: logger.info(msg))
         self._macro_player = None
         try:
@@ -321,8 +323,10 @@ class UniversalTaskScanner:
         }
         self._active_account_email = account_email
         self._daily_set_bulk_attempted_titles.clear()
+        self.daily_set_execution_proofs.clear()
         self._session_completed_categories.clear()
         self._session_daily_set_titles.clear()
+        self.daily_set_execution_proofs.clear()
 
         # 1. Fetch all tasks from API
         self._log("info", "🔍 Scanning all Rewards tasks...")
@@ -748,6 +752,33 @@ class UniversalTaskScanner:
             **self._task_diag_payload(task),
         )
 
+        if task.category == "daily_set":
+            execution_proof = self._get_daily_set_execution_proof(task)
+            if execution_proof:
+                proof_state = execution_proof.get("state", "")
+                if proof_state == "category_proven":
+                    self._session_completed_categories.add("daily_set")
+                    if (task.title or "").strip():
+                        self._session_daily_set_titles.add(task.title.strip())
+                    for proof_title in execution_proof.get("proof_titles", []):
+                        if (proof_title or "").strip():
+                            self._session_daily_set_titles.add(proof_title.strip())
+                    self._diag(
+                        "Daily Set verification satisfied from execution proof carrier",
+                        scope="task-verify",
+                        proof=execution_proof,
+                        **self._task_diag_payload(task),
+                    )
+                    return True
+                if proof_state == "target_proven":
+                    self._diag(
+                        "Daily Set verification satisfied from task-level execution proof",
+                        scope="task-verify",
+                        proof=execution_proof,
+                        **self._task_diag_payload(task),
+                    )
+                    return True
+
         # Layer 1: URL/visit tasks — optimistic pass (they always count)
         if task.task_type in ("urlreward", "visit") and not strict_completion:
             self._log("info", f"  ✅ Optimistically completed URL task (skipping strict API verify)")
@@ -785,6 +816,22 @@ class UniversalTaskScanner:
                 return True
         except Exception as _e:
             logger.debug(f"Cross-page DOM visual check suppressed: {_e}")
+
+        if task.category == "daily_set":
+            daily_set_proof = self._get_daily_set_execution_proof(task)
+            if daily_set_proof:
+                proof_state = daily_set_proof.get("state", "")
+                self._diag(
+                    "Verification consulted Daily Set execution proof before API polling",
+                    scope="task-verify",
+                    proof_state=proof_state,
+                    proof_source=daily_set_proof.get("source", ""),
+                    **self._task_diag_payload(task),
+                )
+                if proof_state in {"target_proven", "category_proven"}:
+                    if proof_state == "category_proven":
+                        self._session_completed_categories.add("daily_set")
+                    return True
 
         # Layer 3: API verification (slowest, may lag)
         initial_wait = 5 if task.category == "punch_card" else 2
@@ -1254,9 +1301,52 @@ class UniversalTaskScanner:
         directly does NOT count.
         """
         try:
+            daily_set_fallback_allowed = False
             clicked = False
             pages_before = len(page.context.pages)
             await self._ensure_no_manual_challenge(page, task.title[:40] or "Rewards task")
+
+            if task.category == "daily_set":
+                from src.daily_set import DailySetCompleter
+
+                self._log("info", "  🎯 Trying Daily Set executor first")
+                daily_set = DailySetCompleter(
+                    self.humanizer,
+                    settings=self.settings,
+                    ai_agent=self.ai_agent,
+                )
+                daily_stats = await daily_set.complete_daily_set(
+                    page,
+                    expected_title=task.title,
+                )
+                proof = self._store_daily_set_execution_proof(
+                    task,
+                    daily_stats,
+                    source="daily_set_completer",
+                )
+                if proof.get("state") == "category_proven":
+                    self._session_completed_categories.add("daily_set")
+                    if (task.title or "").strip():
+                        self._session_daily_set_titles.add(task.title.strip())
+                    for proof_title in proof.get("proof_titles", []):
+                        if (proof_title or "").strip():
+                            self._session_daily_set_titles.add(proof_title.strip())
+                if proof.get("state") in {"target_proven", "category_proven"}:
+                    try:
+                        await page.goto(
+                            REWARDS_URL,
+                            wait_until="domcontentloaded",
+                            timeout=35000,
+                        )
+                        await asyncio.sleep(2)
+                    except Exception:
+                        pass
+                    return True
+                if proof.get("state") in {"attempted_only", "panel_control_failed"}:
+                    self._log("info", f"  ↪️ Daily Set executor yielded {proof.get('state')}, allowing bounded generic fallback")
+                else:
+                    self._log("info", "  ⚠️ Daily Set executor did not establish proof")
+                    return False
 
             # 1. Search the page(s) where the current Rewards UI renders this task.
             for rewards_url in self._candidate_rewards_pages(task):
@@ -1276,48 +1366,11 @@ class UniversalTaskScanner:
                     break
 
             if not clicked:
-                daily_set_attempt_key = self._normalized_task_title_key(task.title or task.id or "")
-                if (
-                    task.category == "daily_set"
-                    and daily_set_attempt_key not in self._daily_set_bulk_attempted_titles
-                ):
-                    self._daily_set_bulk_attempted_titles.add(daily_set_attempt_key)
-                    try:
-                        from src.daily_set import DailySetCompleter
-
-                        self._log("info", "  🎯 Trying Daily Set bulk fallback")
-                        daily_set = DailySetCompleter(
-                            self.humanizer,
-                            settings=self.settings,
-                            ai_agent=self.ai_agent,
-                        )
-                        daily_stats = await daily_set.complete_daily_set(
-                            page,
-                            expected_title=task.title,
-                        )
-                        if daily_stats.get("category_proven", False):
-                            self._session_completed_categories.add("daily_set")
-                            if (task.title or "").strip():
-                                self._session_daily_set_titles.add(task.title.strip())
-                            for proof_title in daily_stats.get("proof_titles", []):
-                                if (proof_title or "").strip():
-                                    self._session_daily_set_titles.add(proof_title.strip())
-                        if daily_stats.get("target_proven", False) or daily_stats.get("category_proven", False):
-                            try:
-                                await page.goto(
-                                    REWARDS_URL,
-                                    wait_until="domcontentloaded",
-                                    timeout=35000,
-                                )
-                                await asyncio.sleep(2)
-                            except Exception:
-                                pass
-                            return True
-                    except Exception as e:
-                        logger.debug(f"Daily Set bulk fallback failed: {e}")
-
                 if task.category == "daily_set":
-                    self._log("info", "  ⚠️ Daily Set task still not found on Rewards panel")
+                    if daily_set_fallback_allowed:
+                        self._log("info", "  ⚠️ Daily Set generic fallback could not locate the current task")
+                    else:
+                        self._log("info", "  ⚠️ Daily Set proof not established; generic fallback not allowed")
                     return False
 
                 if self.ai_agent and self.ai_agent.enabled:
@@ -1559,6 +1612,133 @@ class UniversalTaskScanner:
             for ch in (value or "").replace("\u200b", " ").replace("\xa0", " ")
         )
         return " ".join(normalized.split())
+
+    def _store_daily_set_execution_proof(
+        self,
+        task: RewardsTask,
+        proof_result: dict | None,
+        *,
+        source: str = "daily_set_completer",
+    ) -> dict:
+        """Persist run-local Daily Set proof using task id, normalized title, and category keys."""
+        proof_result = proof_result or {}
+        state = str(proof_result.get("state") or "").strip()
+        if not state:
+            if proof_result.get("category_proven", False):
+                state = "category_proven"
+            elif proof_result.get("target_proven", False):
+                state = "target_proven"
+            elif proof_result.get("panel_control_failed", False):
+                state = "panel_control_failed"
+            elif proof_result.get("attempted_only", False) or proof_result.get("attempted", False):
+                state = "attempted_only"
+            else:
+                state = "panel_control_failed"
+
+        proof_titles = [
+            title.strip()
+            for title in proof_result.get("proof_titles", [])
+            if (title or "").strip()
+        ]
+        record = {
+            "state": state,
+            "proof_titles": proof_titles,
+            "progress_completed": int(proof_result.get("progress_completed", 0) or 0),
+            "progress_total": int(proof_result.get("progress_total", 0) or 0),
+            "source": str(proof_result.get("source") or source),
+        }
+
+        if task.id:
+            self.daily_set_execution_proofs[task.id] = dict(record)
+        normalized_title = self._normalized_task_title_key(task.title)
+        if normalized_title:
+            self.daily_set_execution_proofs[normalized_title] = dict(record)
+        self.daily_set_execution_proofs["daily_set"] = dict(record)
+        return record
+
+    def _get_daily_set_execution_proof(self, task: RewardsTask) -> dict | None:
+        """Resolve the best available Daily Set proof for a task from the run-local carrier."""
+        candidate_keys = [task.id, self._normalized_task_title_key(task.title), "daily_set"]
+        for key in candidate_keys:
+            if key and key in self.daily_set_execution_proofs:
+                return self.daily_set_execution_proofs[key]
+        return None
+
+    @staticmethod
+    def _resolve_daily_set_proof_state(result: dict | None) -> str:
+        """Normalize Daily Set executor outcomes into the shared proof state machine."""
+        result = result or {}
+        state = str(result.get("state", "") or "").strip().lower()
+        if state:
+            return state
+        if result.get("category_proven", False):
+            return "category_proven"
+        if result.get("target_proven", False):
+            return "target_proven"
+        if result.get("panel_control_failed", False):
+            return "panel_control_failed"
+        return "attempted_only"
+
+    def _record_daily_set_execution_proof(self, task: RewardsTask, result: dict | None) -> dict:
+        """Store Daily Set execution proof under task, title, and category lookup keys."""
+        proof_state = self._resolve_daily_set_proof_state(result)
+        proof = {
+            "state": proof_state,
+            "proof_titles": [
+                str(title).strip()
+                for title in (result or {}).get("proof_titles", [])
+                if str(title).strip()
+            ],
+            "progress_completed": int((result or {}).get("progress_completed", 0) or 0),
+            "progress_total": int((result or {}).get("progress_total", 0) or 0),
+            "source": str((result or {}).get("source", "daily_set_completer")),
+        }
+
+        keys: list[str] = []
+        if task.id:
+            keys.append(task.id)
+        title_key = self._normalized_task_title_key(task.title or "")
+        if title_key:
+            keys.append(title_key)
+        keys.append("daily_set")
+
+        for key in keys:
+            self.daily_set_execution_proofs[key] = dict(proof)
+
+        if proof_state == "category_proven":
+            self._session_completed_categories.add("daily_set")
+            if (task.title or "").strip():
+                self._session_daily_set_titles.add(task.title.strip())
+            for proof_title in proof["proof_titles"]:
+                self._session_daily_set_titles.add(proof_title)
+
+        return proof
+
+    def _get_daily_set_execution_proof(self, task: RewardsTask) -> dict | None:
+        """Look up Daily Set proof, preferring category-level proof when it exists."""
+        if task.category != "daily_set":
+            return None
+
+        proofs: list[dict] = []
+        keys: list[str] = []
+        if task.id:
+            keys.append(task.id)
+        title_key = self._normalized_task_title_key(task.title or "")
+        if title_key:
+            keys.append(title_key)
+        keys.append("daily_set")
+
+        for key in keys:
+            proof = self.daily_set_execution_proofs.get(key)
+            if not proof:
+                continue
+            if key == "daily_set" and proof.get("state") != "category_proven":
+                continue
+            if proof.get("state") == "category_proven":
+                return proof
+            proofs.append(proof)
+
+        return proofs[0] if proofs else None
 
     @staticmethod
     def _tokenize_match_text(*values: str) -> list[str]:

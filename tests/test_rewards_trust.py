@@ -303,6 +303,178 @@ class RewardsTrustTests(unittest.TestCase):
 
 
 class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_daily_set_execute_routes_to_completer_first_and_records_target_proof(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._ensure_no_manual_challenge = AsyncMock()
+        scanner._click_task_on_current_page = AsyncMock(return_value=True)
+        scanner._complete_visit = AsyncMock()
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = SimpleNamespace(pages=[self])
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+
+        page = FakePage()
+        task = RewardsTask(
+            id="daily-1",
+            title="Parrot intelligence",
+            category="daily_set",
+            task_type="visit",
+        )
+
+        with patch("src.daily_set.DailySetCompleter.complete_daily_set", new=AsyncMock(return_value={
+            "attempted": True,
+            "target_proven": True,
+            "category_proven": False,
+            "attempted_only": False,
+            "panel_control_failed": False,
+            "proof_titles": ["Parrot intelligence"],
+            "progress_completed": 1,
+            "progress_total": 3,
+            "state": "target_proven",
+        })), patch("src.universal_task.asyncio.sleep", new=AsyncMock()):
+            result = await scanner._execute_task(page, task)
+
+        self.assertTrue(result)
+        scanner._click_task_on_current_page.assert_not_awaited()
+        self.assertEqual(scanner.daily_set_execution_proofs["daily-1"]["state"], "target_proven")
+        self.assertNotIn("daily_set", scanner._session_completed_categories)
+
+    async def test_daily_set_execute_allows_generic_fallback_only_after_attempted_only(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._ensure_no_manual_challenge = AsyncMock()
+        scanner._click_task_on_current_page = AsyncMock(return_value=True)
+        scanner._complete_visit = AsyncMock()
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = SimpleNamespace(pages=[self])
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+
+        page = FakePage()
+        task = RewardsTask(
+            id="daily-2",
+            title="Gaudi's Masterpiece?",
+            category="daily_set",
+            task_type="visit",
+        )
+
+        with patch("src.daily_set.DailySetCompleter.complete_daily_set", new=AsyncMock(return_value={
+            "attempted": True,
+            "target_proven": False,
+            "category_proven": False,
+            "attempted_only": True,
+            "panel_control_failed": False,
+            "proof_titles": [],
+            "progress_completed": 1,
+            "progress_total": 3,
+            "state": "attempted_only",
+        })), patch("src.universal_task.asyncio.sleep", new=AsyncMock()):
+            result = await scanner._execute_task(page, task)
+
+        self.assertTrue(result)
+        scanner._click_task_on_current_page.assert_awaited()
+        self.assertEqual(scanner.daily_set_execution_proofs["daily-2"]["state"], "attempted_only")
+
+    async def test_daily_set_execute_allows_generic_fallback_after_panel_control_failure(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._ensure_no_manual_challenge = AsyncMock()
+        scanner._click_task_on_current_page = AsyncMock(return_value=True)
+        scanner._complete_visit = AsyncMock()
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = SimpleNamespace(pages=[self])
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+
+        page = FakePage()
+        task = RewardsTask(
+            id="daily-3",
+            title="Do you know the answer?",
+            category="daily_set",
+            task_type="visit",
+        )
+
+        with patch("src.daily_set.DailySetCompleter.complete_daily_set", new=AsyncMock(return_value={
+            "attempted": False,
+            "target_proven": False,
+            "category_proven": False,
+            "attempted_only": False,
+            "panel_control_failed": True,
+            "proof_titles": [],
+            "progress_completed": 0,
+            "progress_total": 3,
+            "state": "panel_control_failed",
+        })), patch("src.universal_task.asyncio.sleep", new=AsyncMock()):
+            result = await scanner._execute_task(page, task)
+
+        self.assertTrue(result)
+        scanner._click_task_on_current_page.assert_awaited()
+        self.assertEqual(scanner.daily_set_execution_proofs["daily-3"]["state"], "panel_control_failed")
+
+    async def test_daily_set_category_proof_verifies_other_items_before_api_polling(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._log = lambda *_args, **_kwargs: None
+        scanner._dom_check_single_task_done = AsyncMock(return_value=False)
+        scanner._fetch_all_tasks = AsyncMock(return_value=[])
+
+        first = RewardsTask(id="daily-1", title="Parrot intelligence", category="daily_set", task_type="visit")
+        second = RewardsTask(id="daily-2", title="Gaudi's Masterpiece?", category="daily_set", task_type="visit")
+        scanner._store_daily_set_execution_proof(
+            first,
+            {
+                "state": "category_proven",
+                "proof_titles": ["Parrot intelligence", "Gaudi's Masterpiece?"],
+                "progress_completed": 3,
+                "progress_total": 3,
+            },
+        )
+
+        verified = await scanner._verify_task_completion(None, second)
+
+        self.assertTrue(verified)
+        self.assertIn("daily_set", scanner._session_completed_categories)
+        self.assertIn("Gaudi's Masterpiece?", scanner._session_daily_set_titles)
+        scanner._dom_check_single_task_done.assert_not_awaited()
+        scanner._fetch_all_tasks.assert_not_awaited()
+
+    async def test_daily_set_target_proof_verifies_current_item_before_api_polling(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._log = lambda *_args, **_kwargs: None
+        scanner._dom_check_single_task_done = AsyncMock(return_value=False)
+        scanner._fetch_all_tasks = AsyncMock(return_value=[])
+        task = RewardsTask(
+            id="daily-1",
+            title="Parrot intelligence",
+            category="daily_set",
+            task_type="visit",
+        )
+        scanner._store_daily_set_execution_proof(
+            task,
+            {
+                "state": "target_proven",
+                "proof_titles": ["Parrot intelligence"],
+                "progress_completed": 1,
+                "progress_total": 3,
+            },
+        )
+
+        verified = await scanner._verify_task_completion(None, task)
+
+        self.assertTrue(verified)
+        self.assertNotIn("daily_set", scanner._session_completed_categories)
+        scanner._dom_check_single_task_done.assert_not_awaited()
+        scanner._fetch_all_tasks.assert_not_awaited()
+
     async def test_dashboard_scraper_classifies_keep_earning_cards_as_more_promo(self):
         raw_card = {
             "href": "https://rewards.bing.com/earn",
@@ -338,6 +510,133 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
             tasks = await scan_dashboard_dom(page)
 
         self.assertEqual(tasks[0]["category"], "more_promo")
+
+    async def test_daily_set_executor_runs_before_generic_click_path(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._click_task_on_current_page = AsyncMock(return_value=True)
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = SimpleNamespace(pages=[self])
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+
+        task = RewardsTask(id="daily-1", title="Parrot intelligence", category="daily_set", task_type="visit")
+
+        with patch(
+            "src.daily_set.DailySetCompleter.complete_daily_set",
+            new=AsyncMock(
+                return_value={
+                    "state": "target_proven",
+                    "target_proven": True,
+                    "category_proven": False,
+                    "proof_titles": ["Parrot intelligence"],
+                    "progress_completed": 1,
+                    "progress_total": 3,
+                }
+            ),
+        ) as daily_set_executor:
+            self.assertTrue(await scanner._execute_task(FakePage(), task))
+
+        daily_set_executor.assert_awaited_once()
+        scanner._click_task_on_current_page.assert_not_awaited()
+
+    async def test_daily_set_execution_proof_is_written_for_task_title_and_category_keys(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        task = RewardsTask(id="daily-1", title="Gaudi's Masterpiece?", category="daily_set", task_type="visit")
+
+        proof = scanner._record_daily_set_execution_proof(
+            task,
+            {
+                "state": "target_proven",
+                "target_proven": True,
+                "proof_titles": ["Gaudi's Masterpiece?"],
+                "progress_completed": 1,
+                "progress_total": 3,
+            },
+        )
+
+        self.assertEqual(proof["state"], "target_proven")
+        self.assertEqual(scanner.daily_set_execution_proofs["daily-1"]["state"], "target_proven")
+        self.assertEqual(
+            scanner.daily_set_execution_proofs["gaudi s masterpiece"]["proof_titles"],
+            ["Gaudi's Masterpiece?"],
+        )
+        self.assertEqual(scanner.daily_set_execution_proofs["daily_set"]["progress_total"], 3)
+
+    async def test_daily_set_verification_checks_execution_proof_before_api_polling(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._log = lambda *_args, **_kwargs: None
+        scanner._dom_check_single_task_done = AsyncMock(return_value=False)
+        scanner._dom_check_task_done_across_rewards_pages = AsyncMock(return_value=False)
+        scanner.daily_set_execution_proofs["daily-1"] = {
+            "state": "target_proven",
+            "proof_titles": ["Parrot intelligence"],
+            "progress_completed": 1,
+            "progress_total": 3,
+            "source": "test",
+        }
+        scanner._fetch_all_tasks = AsyncMock(side_effect=AssertionError("API polling should not run"))
+        task = RewardsTask(
+            id="daily-1",
+            title="Parrot intelligence",
+            category="daily_set",
+            task_type="visit",
+        )
+
+        verified = await scanner._verify_task_completion(None, task)
+
+        self.assertTrue(verified)
+        scanner._fetch_all_tasks.assert_not_awaited()
+
+    async def test_daily_set_generic_fallback_only_runs_for_attempted_only_and_panel_failures(self):
+        task = RewardsTask(id="daily-1", title="Parrot intelligence", category="daily_set", task_type="visit")
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = SimpleNamespace(pages=[self])
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+
+        attempted_scanner = UniversalTaskScanner(Humanizer())
+        attempted_scanner._click_task_on_current_page = AsyncMock(return_value=False)
+        with patch(
+            "src.daily_set.DailySetCompleter.complete_daily_set",
+            new=AsyncMock(
+                return_value={
+                    "state": "attempted_only",
+                    "attempted_only": True,
+                    "target_proven": False,
+                    "category_proven": False,
+                    "progress_completed": 0,
+                    "progress_total": 3,
+                }
+            ),
+        ):
+            self.assertFalse(await attempted_scanner._execute_task(FakePage(), task))
+        self.assertGreater(attempted_scanner._click_task_on_current_page.await_count, 0)
+
+        proven_scanner = UniversalTaskScanner(Humanizer())
+        proven_scanner._click_task_on_current_page = AsyncMock(return_value=False)
+        with patch(
+            "src.daily_set.DailySetCompleter.complete_daily_set",
+            new=AsyncMock(
+                return_value={
+                    "state": "target_proven",
+                    "attempted_only": False,
+                    "target_proven": True,
+                    "category_proven": False,
+                    "progress_completed": 1,
+                    "progress_total": 3,
+                }
+            ),
+        ):
+            self.assertTrue(await proven_scanner._execute_task(FakePage(), task))
+        proven_scanner._click_task_on_current_page.assert_not_awaited()
 
     async def test_daily_set_bulk_fallback_retries_for_each_unproven_title(self):
         scanner = UniversalTaskScanner(Humanizer())
