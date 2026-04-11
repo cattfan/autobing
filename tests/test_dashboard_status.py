@@ -4,12 +4,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from src.dashboard import (
+    _account_display_label,
+    _account_state_key,
+    _account_timeout_seconds,
     _build_profile_summary,
     _build_profile_views,
     _describe_remaining_items,
     _ensure_usable_desktop_search_page,
     _reconcile_verification_with_session_proof,
     _effective_max_threads,
+    _profile_lock_keys_for_account,
     _read_search_status_for_runtime_descriptor,
     _resolve_desktop_search_requirement,
     _select_mobile_runtime_strategy,
@@ -35,6 +39,50 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertFalse(fallback)
         self.assertEqual(reason, "gpm_mobile_profile")
 
+    def test_account_state_key_is_stable_and_unique_per_email(self):
+        a = _account_state_key("yunataauto4@outlook.com.vn")
+        b = _account_state_key("yunataauto5@outlook.com.vn")
+        self.assertNotEqual(a, b)
+        self.assertTrue(a.startswith("acct:"))
+
+    def test_account_display_label_keeps_accounts_distinguishable(self):
+        a = _account_display_label("yunataauto4@outlook.com.vn")
+        b = _account_display_label("yunataauto5@outlook.com.vn")
+        self.assertNotEqual(a, b)
+        self.assertIn("@outlook.com.vn", a)
+
+    def test_profile_lock_keys_include_desktop_and_mobile_gpm_ids(self):
+        keys = _profile_lock_keys_for_account(
+            {"gpm_integration_enabled": True},
+            {
+                "email": "user@example.com",
+                "gpm_profile_id": "desk-1",
+                "gpm_mobile_profile_id": "mob-1",
+            },
+        )
+
+        self.assertEqual(keys, ["gpm:desk-1", "gpm:mob-1"])
+
+    def test_profile_lock_keys_fall_back_to_native_email_when_no_gpm_ids(self):
+        keys = _profile_lock_keys_for_account(
+            {"gpm_integration_enabled": True},
+            {"email": "user@example.com"},
+        )
+
+        self.assertEqual(keys, ["native:user@example.com"])
+
+    def test_profile_lock_keys_deduplicate_same_profile_id_across_desktop_and_mobile(self):
+        keys = _profile_lock_keys_for_account(
+            {"gpm_integration_enabled": True},
+            {
+                "email": "user@example.com",
+                "gpm_profile_id": "shared-1",
+                "gpm_mobile_profile_id": "shared-1",
+            },
+        )
+
+        self.assertEqual(keys, ["gpm:shared-1"])
+
     def test_effective_max_threads_stays_configured_for_safe_headless_non_edge_mode(self):
         effective, reason = _effective_max_threads({
             "max_threads": 4,
@@ -54,8 +102,24 @@ class DashboardStatusTests(unittest.TestCase):
             "headless": False,
         })
 
-        self.assertEqual(effective, 10)
+        self.assertEqual(effective, 2)
+        self.assertIn("capped to 2", reason)
+
+    def test_effective_max_threads_keeps_smaller_gpm_parallelism(self):
+        effective, reason = _effective_max_threads({
+            "max_threads": 2,
+            "gpm_integration_enabled": True,
+            "native_edge_runtime_enabled": True,
+            "headless": False,
+        })
+
+        self.assertEqual(effective, 2)
         self.assertEqual(reason, "")
+
+    def test_account_timeout_seconds_adds_budget_for_later_batches(self):
+        self.assertEqual(_account_timeout_seconds(0, 2), 4500.0)
+        self.assertEqual(_account_timeout_seconds(1, 2), 4500.0)
+        self.assertEqual(_account_timeout_seconds(2, 2), 9000.0)
 
     def test_profile_views_include_recent_log_context(self):
         accounts_snapshot = {
@@ -219,7 +283,7 @@ class DashboardStatusTests(unittest.TestCase):
 
 
 class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
-    async def test_live_gpm_desktop_requirement_resolution_skips_secondary_probe(self):
+    async def test_live_gpm_desktop_requirement_resolution_falls_back_to_original_probe_when_dedicated_probe_stays_ambiguous(self):
         settings = {"desktop_searches": 30}
         baseline = {"pc_current": 0, "pc_max": 0}
         desktop_runtime = build_runtime_descriptor(
@@ -229,12 +293,14 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
             cdp_url="http://127.0.0.1:9555",
             live_for_account_run=True,
         )
-        probe = AsyncMock(return_value=(
+        original_probe = AsyncMock(return_value=(
             {"pc_current": 90, "pc_max": 90, "total_points": 9021},
             {"verified": True},
         ))
+        dedicated_probe = AsyncMock(return_value={"pc_current": 0, "pc_max": 0})
 
-        with patch("src.dashboard._read_search_status_for_runtime_descriptor", new=probe):
+        with patch("src.dashboard._probe_search_status_in_mode", new=dedicated_probe), \
+             patch("src.dashboard._read_search_status_for_runtime_descriptor", new=original_probe):
             resolved = await _resolve_desktop_search_requirement(
                 settings,
                 {"email": "test@example.com", "password": "pw"},
@@ -246,8 +312,44 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
                 desktop_runtime,
             )
 
-        self.assertEqual(resolved, baseline)
-        probe.assert_not_awaited()
+        self.assertEqual(resolved["pc_current"], 90)
+        self.assertEqual(resolved["pc_max"], 90)
+        dedicated_probe.assert_awaited_once()
+        original_probe.assert_awaited_once()
+
+    async def test_live_gpm_desktop_requirement_uses_dedicated_probe_when_available(self):
+        settings = {"desktop_searches": 30}
+        baseline = {"pc_current": 0, "pc_max": 0}
+        desktop_runtime = build_runtime_descriptor(
+            "gpm_desktop",
+            "desk-1",
+            "desktop",
+            cdp_url="http://127.0.0.1:9555",
+            live_for_account_run=True,
+        )
+        dedicated_probe = AsyncMock(return_value={
+            "pc_current": 84,
+            "pc_max": 90,
+            "edge_current": 0,
+            "edge_max": 0,
+            "total_points": 9021,
+        })
+
+        with patch("src.dashboard._probe_search_status_in_mode", new=dedicated_probe):
+            resolved = await _resolve_desktop_search_requirement(
+                settings,
+                {"email": "test@example.com", "password": "pw"},
+                None,
+                AsyncMock(),
+                AsyncMock(),
+                Path("state.json"),
+                baseline,
+                desktop_runtime,
+            )
+
+        self.assertEqual(resolved["pc_current"], 84)
+        self.assertEqual(resolved["pc_max"], 90)
+        dedicated_probe.assert_awaited_once()
 
     async def test_desktop_requirement_resolution_skips_when_probe_finds_full_credits(self):
         settings = {"desktop_searches": 30}

@@ -8,9 +8,11 @@ import json
 import random
 import threading
 import asyncio
+from contextlib import AsyncExitStack
 import socket
 import time
 import logging
+from hashlib import md5
 from datetime import datetime
 from pathlib import Path
 
@@ -200,6 +202,26 @@ def _normalize_account_status(status: str) -> str:
     return "idle"
 
 
+def _account_state_key(email: str) -> str:
+    """Return a stable per-account key for dashboard state/log maps."""
+    text = str(email or "").strip()
+    if not text or "@" not in text:
+        return text
+    return f"acct:{md5(text.lower().encode('utf-8')).hexdigest()[:10]}"
+
+
+def _account_display_label(email: str) -> str:
+    """Return a masked-but-distinguishable label for UI surfaces."""
+    text = str(email or "").strip()
+    if "@" not in text:
+        return text
+    local, domain = text.split("@", 1)
+    prefix = local[:5]
+    suffix = local[-2:] if len(local) > 7 else local[5:]
+    masked_local = prefix + "***" + suffix if suffix else prefix + "***"
+    return f"{masked_local}@{domain}"
+
+
 def _build_profile_views(accounts_snapshot: dict, account_logs_snapshot: dict) -> list[dict]:
     """Build a stable profile list for the dashboard without breaking the legacy accounts map."""
     profiles: list[dict] = []
@@ -275,9 +297,47 @@ def _mobile_credit_delta(before_status: dict, after_status: dict) -> int:
 
 
 def _effective_max_threads(settings: dict) -> tuple[int, str]:
-    """Return the configured dashboard account concurrency."""
+    """Return the configured dashboard account concurrency.
+
+    GPM browser profiles are materially heavier than local-only runs and the
+    desktop↔mobile handoff introduces profile lifecycle races. Cap effective
+    concurrency so multi-account runs stay reliable instead of chasing raw fanout.
+    """
     configured = max(1, int(settings.get("max_threads", 10) or 1))
+    if settings.get("gpm_integration_enabled", False):
+        effective = min(configured, 2)
+        if effective != configured:
+            return effective, "capped to 2 while GPM profile lifecycle handoffs are active"
     return configured, ""
+
+
+def _profile_lock_keys_for_account(settings: dict, account: dict) -> list[str]:
+    """Return every profile identity that must be serialized for one account."""
+    keys: list[str] = []
+    if settings.get("gpm_integration_enabled", False):
+        desktop = str(account.get("gpm_profile_id") or "").strip()
+        mobile = str(account.get("gpm_mobile_profile_id") or "").strip()
+        if desktop:
+            keys.append(f"gpm:{desktop}")
+        if mobile:
+            keys.append(f"gpm:{mobile}")
+    if not keys:
+        keys.append(f"native:{account.get('email', '')}")
+    return sorted(set(keys))
+
+
+def _account_timeout_seconds(idx: int, max_threads: int, *, base_timeout_seconds: float = 4500.0) -> float:
+    """Return a queue-aware timeout budget for one account run.
+
+    `_safe_process` wraps the full account coroutine, which includes waiting for
+    the global semaphore. When concurrency is capped below the selected account
+    count, later accounts can spend tens of minutes waiting before their actual
+    work starts. Add one base-timeout window per full batch ahead in the queue so
+    each account still gets the intended active-processing budget.
+    """
+    effective_threads = max(1, int(max_threads or 1))
+    batches_ahead = max(0, int(idx) // effective_threads)
+    return float(base_timeout_seconds) * (1 + batches_ahead)
 
 
 async def _wait_for_mobile_credit_update(searcher, page, settings: dict, *, baseline_status: dict) -> dict:
@@ -389,7 +449,7 @@ async def _read_search_status_for_runtime_descriptor(
             else:
                 if not source_id:
                     raise RuntimeError("missing_gpm_profile_id")
-                runtime_cdp_url = await _start_gpm_profile(
+                runtime_cdp_url = await _start_gpm_profile_serialized(
                     source_id,
                     settings.get("gpm_api_url", "http://127.0.0.1:9495").rstrip("/"),
                 )
@@ -482,7 +542,7 @@ async def _read_search_status_for_runtime_descriptor(
             pass
         if started_gpm_profile_id:
             try:
-                _stop_gpm_profile(
+                await _stop_gpm_profile_serialized(
                     started_gpm_profile_id,
                     settings.get("gpm_api_url", "http://127.0.0.1:9495").rstrip("/"),
                 )
@@ -567,6 +627,7 @@ async def _persist_storage_state(context, storage_state_path: Path | None) -> No
 
 # Cache GPM availability per run: None = not checked, True = online, False = offline
 _gpm_available_cache: dict[str, bool | None] = {}
+_gpm_lifecycle_lock = asyncio.Lock()
 
 
 async def _check_gpm_online(api_url: str) -> bool:
@@ -636,6 +697,16 @@ def _stop_gpm_profile(gpm_profile_id: str, api_url: str):
         urllib.request.urlopen(req, timeout=10)
     except Exception as _e:
         logger.debug(f"GPM stop suppressed: {_e}")
+
+
+async def _start_gpm_profile_serialized(gpm_profile_id: str, api_url: str) -> str:
+    async with _gpm_lifecycle_lock:
+        return await _start_gpm_profile(gpm_profile_id, api_url)
+
+
+async def _stop_gpm_profile_serialized(gpm_profile_id: str, api_url: str) -> None:
+    async with _gpm_lifecycle_lock:
+        _stop_gpm_profile(gpm_profile_id, api_url)
 
 
 async def _open_account_context(
@@ -1390,19 +1461,54 @@ async def _resolve_desktop_search_requirement(
     runtime_family = str((desktop_runtime or {}).get("family", "") or "")
     runtime_is_live = bool((desktop_runtime or {}).get("live_for_account_run", False))
     if runtime_family == "gpm_desktop" and runtime_is_live:
-        add_log(
-            "warning",
-            "🖥️ Desktop credits are ambiguous on the live GPM runtime; skipping secondary probe and using fallback search planning.",
-        )
         _diag_log(
             settings,
-            "Skipped secondary desktop probe for live GPM runtime",
+            "Desktop credits are ambiguous on the live GPM runtime; probing a dedicated desktop runtime before planning a full fallback batch.",
             scope="desktop-resolution",
             account=masked_email,
             baseline=summarize_search_status(baseline_status),
             runtime_family=runtime_family,
         )
-        return baseline_status
+        try:
+            probed_status = await _probe_search_status_in_mode(
+                settings,
+                account,
+                session_proxy,
+                login_mgr,
+                searcher,
+                storage_state_path,
+                mode="desktop",
+            )
+            if not _needs_desktop_credit_recheck(probed_status, settings):
+                merged = dict(baseline_status)
+                merged["pc_current"] = probed_status.get("pc_current", 0)
+                merged["pc_max"] = probed_status.get("pc_max", 0)
+                merged["edge_current"] = probed_status.get("edge_current", merged.get("edge_current", 0))
+                merged["edge_max"] = probed_status.get("edge_max", merged.get("edge_max", 0))
+                if probed_status.get("total_points", 0) > 0:
+                    merged["total_points"] = probed_status.get("total_points", 0)
+                add_log(
+                    "info",
+                    f"🖥️ Dedicated desktop probe resolved credits: "
+                    f"{merged.get('pc_current', 0)}/{merged.get('pc_max', 0)}",
+                )
+                _diag_log(
+                    settings,
+                    "Desktop credits resolved through dedicated desktop probe",
+                    scope="desktop-resolution",
+                    account=masked_email,
+                    merged=summarize_search_status(merged),
+                )
+                return merged
+        except Exception as e:
+            add_log("warning", f"🖥️ Dedicated desktop probe failed: {e}")
+            _diag_log(
+                settings,
+                "Dedicated desktop probe raised an exception",
+                scope="desktop-resolution",
+                account=masked_email,
+                error=str(e),
+            )
 
     _diag_log(
         settings,
@@ -1783,6 +1889,8 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
             reason=max_threads_reason,
         )
     semaphore = asyncio.Semaphore(max_threads)
+    gpm_enabled = settings.get("gpm_integration_enabled", False)
+    gpm_api_url = settings.get("gpm_api_url", "http://127.0.0.1:9495").rstrip("/")
     
     # Track locks per profile ID to prevent overlapping runs on the same browser instance
     _profile_locks = {}
@@ -1792,13 +1900,13 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
         
         email = account["email"]
         gpm_profile_id = account.get("gpm_profile_id")
-        
-        # Determine unique profile identifier for locking
-        profile_key = gpm_profile_id if (settings.get("gpm_integration_enabled") and gpm_profile_id) else f"native_{email}"
-        if profile_key not in _profile_locks:
-            _profile_locks[profile_key] = asyncio.Lock()
+        for key in _profile_lock_keys_for_account(settings, account):
+            if key not in _profile_locks:
+                _profile_locks[key] = asyncio.Lock()
 
-        async with semaphore, _profile_locks[profile_key]:
+        async with semaphore, AsyncExitStack() as account_lock_stack:
+            for key in _profile_lock_keys_for_account(settings, account):
+                await account_lock_stack.enter_async_context(_profile_locks[key])
             # Mỗi account có TrendsManager riêng để tránh _used_queries collision
             # khi nhiều accounts chạy đồng thời (shared set gây query trùng/bỏ sót)
             trends = TrendsManager()
@@ -1844,12 +1952,11 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                     await asyncio.sleep(delay)
                 else:
                     # Stagger concurrent accounts slightly
-                    await asyncio.sleep(idx * 2)
+                    stagger = idx * (10 if gpm_enabled else 2)
+                    await asyncio.sleep(stagger)
 
-            gpm_enabled = settings.get("gpm_integration_enabled", False)
-            gpm_api_url = settings.get("gpm_api_url", "http://127.0.0.1:9495").rstrip("/")
-
-            account_key = email[:5] + "***"
+            account_key = _account_state_key(email)
+            display_label = _account_display_label(email)
 
             # ── Per-account log file ──
             _acc_log_handler = None
@@ -1878,11 +1985,11 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                 account_key,
                 id=email,
                 email=email,
-                display_name=account_key,
+                display_name=display_label,
                 status="running",
                 task="Starting",
             )
-            add_log("info", f"│││ Account {idx + 1}/{len(accounts)}: {account_key} │││")
+            add_log("info", f"│││ Account {idx + 1}/{len(accounts)}: {display_label} │││")
             _diag_log(
                 settings,
                 "Starting account run",
@@ -1925,7 +2032,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             if not attach_runtime:
                                 add_log("info", f"Starting GPM Login profile {gpm_profile_id[:8]} for Edge session...")
                                 try:
-                                    cdp_url = await _start_gpm_profile(gpm_profile_id, gpm_api_url)
+                                    cdp_url = await _start_gpm_profile_serialized(gpm_profile_id, gpm_api_url)
                                     attach_runtime = True
                                     desktop_runtime = build_runtime_descriptor(
                                         "gpm_desktop",
@@ -2050,7 +2157,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                         if not attach_runtime:
                             add_log("info", f"Starting GPM Login profile {gpm_profile_id[:8]}...")
                             try:
-                                cdp_url = await _start_gpm_profile(gpm_profile_id, gpm_api_url)
+                                cdp_url = await _start_gpm_profile_serialized(gpm_profile_id, gpm_api_url)
                                 attach_runtime = True
                                 desktop_runtime = build_runtime_descriptor(
                                     "gpm_desktop",
@@ -2349,7 +2456,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             try:
                                 add_log("info", "Waiting 4s for PC browser profile data sync...")
                                 await asyncio.sleep(4)
-                                _stop_gpm_profile(gpm_profile_id, gpm_api_url)
+                                await _stop_gpm_profile_serialized(gpm_profile_id, gpm_api_url)
                                 add_log("info", f"Stopped PC GPM profile {gpm_profile_id[:8]}")
                                 attach_runtime, cdp_url, desktop_runtime = invalidate_runtime_attachment(
                                     attach_runtime,
@@ -2418,7 +2525,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                     except Exception as emu_err:
                                         add_log("warning", f"📱 Mobile emulation activation failed: {emu_err}")
                             else:
-                                mobile_cdp = await _start_gpm_profile(gpm_mobile_id, gpm_api_url)
+                                mobile_cdp = await _start_gpm_profile_serialized(gpm_mobile_id, gpm_api_url)
                                 add_log("info", f"📱 Mobile GPM profile started via {mobile_cdp}")
                                 mobile_runtime = build_runtime_descriptor(
                                     "gpm_mobile", gpm_mobile_id, "mobile",
@@ -2597,7 +2704,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                     try:
                                         add_log("info", "Waiting 4s for mobile browser profile data sync...")
                                         await asyncio.sleep(4)
-                                        _stop_gpm_profile(gpm_mobile_id, gpm_api_url)
+                                        await _stop_gpm_profile_serialized(gpm_mobile_id, gpm_api_url)
                                         add_log("info", f"📱 Stopped Mobile GPM profile {gpm_mobile_id[:8]}")
                                     except Exception:
                                         pass
@@ -2806,14 +2913,14 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                         # before GPM force-kills the process
                         add_log("info", "Waiting 4s for browser profile data sync...")
                         await asyncio.sleep(4)
-                        _stop_gpm_profile(gpm_profile_id, gpm_api_url)
+                        await _stop_gpm_profile_serialized(gpm_profile_id, gpm_api_url)
                         add_log("info", f"Stopped GPM Profile {gpm_profile_id[:8]}")
                     except Exception as stop_e:
                         add_log("debug", f"Failed to stop GPM Profile: {stop_e}")
                 gpm_mobile_id = account.get("gpm_mobile_profile_id")
                 if gpm_enabled and gpm_mobile_id:
                     try:
-                        _stop_gpm_profile(gpm_mobile_id, gpm_api_url)
+                        await _stop_gpm_profile_serialized(gpm_mobile_id, gpm_api_url)
                     except Exception:
                         pass
                 # Close per-account log handler
@@ -2826,20 +2933,26 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
 
     async def _safe_process(idx, acc):
         try:
-            # 75-minute timeout per account (to accommodate 35m streak + 20m searches + pauses)
-            await asyncio.wait_for(_process_single_account(idx, acc), timeout=4500.0)
+            timeout_seconds = _account_timeout_seconds(idx, max_threads)
+            add_log(
+                "info",
+                f"⏱️ Account slot timeout budget: {int(timeout_seconds // 60)} min",
+            )
+            await asyncio.wait_for(_process_single_account(idx, acc), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             email = acc.get("email", f"acc_{idx}")
-            account_key = email[:5] + "***" if "@" in email else email
+            account_key = _account_state_key(email) if "@" in email else email
+            display_label = _account_display_label(email) if "@" in email else email
+            timeout_minutes = int(timeout_seconds // 60)
             _update_account_state(
                 account_key,
                 id=email,
                 email=email,
-                display_name=account_key,
+                display_name=display_label,
                 status="error",
                 task="Timeout",
             )
-            add_log("error", f"❌ {email}: Quá thời gian 75 phút, tự ngắt.")
+            add_log("error", f"❌ {email}: Quá thời gian {timeout_minutes} phút, tự ngắt.")
         except asyncio.CancelledError:
             pass
         except Exception as e:
