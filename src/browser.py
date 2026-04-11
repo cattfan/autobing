@@ -135,6 +135,8 @@ def _build_mobile_runtime_profile(mobile_ua: str) -> dict:
 
     return {
         "is_ios": is_ios,
+        "user_agent": ua,
+        "app_version": ua.split("/", 1)[1] if "/" in ua else ua,
         "platform_name": platform_name,
         "navigator_platform": navigator_platform,
         "max_touch_points": max_touch_points,
@@ -155,6 +157,8 @@ def _build_mobile_runtime_init_script(profile: dict, *, screen_width: int, scree
     """Build a shared JS override used by both patchright and CDP mobile flows."""
     payload = {
         "navigatorPlatform": profile["navigator_platform"],
+        "userAgent": profile["user_agent"],
+        "appVersion": profile["app_version"],
         "platformName": profile["platform_name"],
         "maxTouchPoints": profile["max_touch_points"],
         "hardwareConcurrency": profile["hardware_concurrency"],
@@ -218,6 +222,8 @@ def _build_mobile_runtime_init_script(profile: dict, *, screen_width: int, scree
         }};
 
         define(navigator, 'platform', () => profile.navigatorPlatform);
+        define(navigator, 'userAgent', () => profile.userAgent);
+        define(navigator, 'appVersion', () => profile.appVersion);
         define(navigator, 'maxTouchPoints', () => profile.maxTouchPoints);
         define(navigator, 'hardwareConcurrency', () => profile.hardwareConcurrency);
         define(navigator, 'deviceMemory', () => profile.deviceMemory);

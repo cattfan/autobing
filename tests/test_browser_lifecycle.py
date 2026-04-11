@@ -2,7 +2,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from src.browser import BrowserManager, _build_mobile_runtime_profile
+from src.browser import (
+    BrowserManager,
+    _build_mobile_runtime_init_script,
+    _build_mobile_runtime_profile,
+)
 
 
 class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -27,6 +31,23 @@ class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(profile["model"], "SM-S928B")
+
+    def test_mobile_runtime_init_script_overrides_user_agent_on_current_page(self):
+        ua = (
+            "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36 EdgA/146.0.3856.109"
+        )
+        profile = _build_mobile_runtime_profile(ua)
+
+        script = _build_mobile_runtime_init_script(
+            profile,
+            screen_width=412,
+            screen_height=915,
+        )
+
+        self.assertIn("define(navigator, 'userAgent'", script)
+        self.assertIn("define(navigator, 'appVersion'", script)
+        self.assertIn(ua, script)
 
     async def test_disconnect_attached_browser_preserves_external_runtime(self):
         manager = BrowserManager({})
