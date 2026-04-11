@@ -21,18 +21,18 @@ def _infer_dashboard_category(section_heading: str, title: str, description: str
     href_lower = (href or "").strip().lower()
     haystack = " ".join([title_lower, desc_lower, href_lower]).lower()
 
-    if any(token in section for token in ("keep earning", "more activities", "more promotions")):
-        return "more_promo"
-    if "daily set" in section:
-        return "daily_set"
-    if any(token in href_lower for token in ("form=dset", "dsetqu", "dailyset", "daily-set")):
-        return "daily_set"
-    if any(token in title_lower for token in ("test your knowledge", "supersonic quiz", "this or that")):
-        return "daily_set"
-    if any(token in href_lower for token in ("referandearn", "rnoreward=1", "form=tgrew", "rewards.bing.com/earn")):
+    if any(token in href_lower for token in ("referandearn", "form=tgrew")):
         return "more_promo"
     if any(token in title_lower for token in ("turn referrals into rewards", "order history", "streak bonus")):
         return "more_promo"
+    if any(token in section for token in ("keep earning", "earn more", "more activities", "more promotions")):
+        return "more_promo"
+    if "daily set" in section:
+        return "daily_set"
+    if any(token in href_lower for token in ("dailyset", "daily-set")):
+        return "daily_set"
+    if any(token in title_lower for token in ("test your knowledge", "supersonic quiz", "this or that")):
+        return "daily_set"
     if "daily set" in haystack:
         return "daily_set"
     return "unknown"
@@ -82,8 +82,9 @@ async def scan_dashboard_dom(page: Page) -> List[DashboardTask]:
                 if (ancestorText && !sectionHeading) {
                     sectionHeading = ancestorText.trim();
                 }
-                if (ancestorLower.includes('keep earning') || ancestorLower.includes('more activities') || ancestorLower.includes('more promotions')) {
+                if (ancestorLower.includes('keep earning') || ancestorLower.includes('earn more') || ancestorLower.includes('more activities') || ancestorLower.includes('more promotions')) {
                     isInKeepEarningSection = true;
+                    sectionHeading = ancestorText.trim();
                     break;
                 }
                 ancestor = ancestor.parentElement;

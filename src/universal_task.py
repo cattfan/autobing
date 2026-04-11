@@ -153,14 +153,10 @@ def get_deferred_offer_reason(task) -> str | None:
     if "streak bonus" in offer_text:
         return "streak_bonus_non_actionable"
 
-    if task_category != "more_promo":
+    if task_category not in {"more_promo", "unknown"}:
         return None
 
     destination_url = str(getattr(task, "destination_url", "") or "").strip().lower()
-    offer_text = _normalized_offer_text_for_matching(
-        getattr(task, "title", ""),
-        getattr(task, "description", ""),
-    )
 
     search_bar_offer = (
         "searchbar" in destination_url
@@ -186,8 +182,8 @@ def get_deferred_offer_reason(task) -> str | None:
     ):
         return "external_referral"
 
-    if "streak bonus" in offer_text:
-        return "streak_bonus_non_actionable"
+    if task_category != "more_promo":
+        return None
 
     if "upcoming events near me" in offer_text:
         return "location_dependent_offer"

@@ -562,6 +562,42 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tasks[0]["category"], "more_promo")
 
+    async def test_dashboard_scraper_prioritizes_referral_url_over_stale_daily_set_heading(self):
+        raw_card = {
+            "href": "https://rewards.bing.com/referandearn/?form=ML2XHD&rnoreward=1",
+            "text": "Turn referrals into Rewards\nEarn points when friends search.\n+100",
+            "aria": "",
+            "title": "",
+            "index": 0,
+            "sectionHeading": "Daily set",
+        }
+        page = SimpleNamespace(
+            evaluate=AsyncMock(side_effect=lambda script: [raw_card] if "querySelectorAll" in script else None)
+        )
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            tasks = await scan_dashboard_dom(page)
+
+        self.assertEqual(tasks[0]["category"], "more_promo")
+
+    async def test_dashboard_scraper_classifies_earn_more_heading_as_more_promo(self):
+        raw_card = {
+            "href": "https://www.bing.com/search?q=Travel+to+Galway&FORM=tgrew4&filters=sid:%22abc%22&rnoreward=1",
+            "text": "Galway's Winter Festival Happiness\nExciting entertainment and mild weather\n+10",
+            "aria": "",
+            "title": "",
+            "index": 0,
+            "sectionHeading": "Earn more",
+        }
+        page = SimpleNamespace(
+            evaluate=AsyncMock(side_effect=lambda script: [raw_card] if "querySelectorAll" in script else None)
+        )
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            tasks = await scan_dashboard_dom(page)
+
+        self.assertEqual(tasks[0]["category"], "more_promo")
+
     async def test_daily_set_executor_runs_before_generic_click_path(self):
         scanner = UniversalTaskScanner(Humanizer())
         scanner._click_task_on_current_page = AsyncMock(return_value=True)
@@ -1136,6 +1172,42 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
             verified = await scanner._verify_task_completion(None, task)
 
         self.assertFalse(verified)
+
+    async def test_unknown_referral_offer_defers_via_semantic_fallback(self):
+        task = RewardsTask(
+            id="promo-referral",
+            title="Turn referrals into Rewards",
+            description="Earn points when friends search on Bing.",
+            category="unknown",
+            task_type="unknown",
+            destination_url="https://rewards.bing.com/referandearn/?form=ML2XHD&rnoreward=1",
+        )
+
+        self.assertEqual(get_deferred_offer_reason(task), "external_referral")
+
+    async def test_unknown_multi_day_search_bar_offer_defers_via_semantic_fallback(self):
+        task = RewardsTask(
+            id="promo-searchbar",
+            title="Nhận 100 điểm với thanh tìm kiếm",
+            description="Bật thanh tìm kiếm và tìm kiếm bằng thanh này trong 3 ngày để nhận 100 điểm",
+            category="unknown",
+            task_type="unknown",
+            destination_url="microsoft-edge://?ux=searchbar&pc=esb004",
+        )
+
+        self.assertEqual(get_deferred_offer_reason(task), "multi_day_search_bar")
+
+    async def test_nonmatched_unknown_offer_does_not_gain_defer_fallback(self):
+        task = RewardsTask(
+            id="promo-galway",
+            title="Galway's Winter Festival Happiness",
+            description="Exciting entertainment and mild weather",
+            category="unknown",
+            task_type="unknown",
+            destination_url="https://www.bing.com/search?q=Travel+to+Galway&FORM=tgrew4&filters=sid:%22abc%22&rnoreward=1",
+        )
+
+        self.assertIsNone(get_deferred_offer_reason(task))
 
     async def test_non_strict_verification_tolerates_missing_task_after_action(self):
         scanner = UniversalTaskScanner(Humanizer())
