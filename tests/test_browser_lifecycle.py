@@ -71,6 +71,36 @@ class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
         kill_managed_edge.assert_called_once()
         playwright.stop.assert_awaited_once()
 
+    async def test_toggle_mobile_emulation_reuses_existing_mobile_fingerprint(self):
+        manager = BrowserManager({})
+        sent = []
+
+        class FakeClient:
+            async def send(self, method, params):
+                sent.append((method, params))
+                return {}
+
+            async def detach(self):
+                return None
+
+        context = SimpleNamespace(
+            _codex_user_agent="Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36 EdgA/146.0.3856.109",
+            _codex_mobile_viewport={"width": 412, "height": 915},
+            new_cdp_session=AsyncMock(return_value=FakeClient()),
+        )
+        page = SimpleNamespace(context=context, evaluate=AsyncMock())
+
+        with patch("src.utils.get_random_mobile_rewards_user_agent", side_effect=AssertionError("should not randomize UA")), \
+             patch("src.utils.get_random_mobile_rewards_viewport", side_effect=AssertionError("should not randomize viewport")):
+            await manager.toggle_mobile_emulation(page, enable=True)
+
+        ua_override = next(params for method, params in sent if method == "Network.setUserAgentOverride")
+        metrics = next(params for method, params in sent if method == "Emulation.setDeviceMetricsOverride")
+        self.assertEqual(ua_override["userAgent"], context._codex_user_agent)
+        self.assertEqual(metrics["width"], 412)
+        self.assertEqual(metrics["height"], 915)
+        page.evaluate.assert_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

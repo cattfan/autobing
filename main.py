@@ -643,9 +643,19 @@ async def _run_mobile_search_pass(
                 account["password"],
                 account.get("totp_secret"),
             )
+            try:
+                await browser_mgr.toggle_mobile_emulation(page_mobile, enable=True)
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.warning(f"Patchright/mobile emulation refresh after login failed: {e}")
         ctx_mobile = page_mobile.context
         await _persist_storage_state(ctx_mobile, storage_state_path)
         await page_mobile.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
+        try:
+            await browser_mgr.toggle_mobile_emulation(page_mobile, enable=True)
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.warning(f"Patchright/mobile emulation refresh after navigation failed: {e}")
         if hasattr(browser_mgr, "capture_runtime_signature"):
             runtime_signature = await browser_mgr.capture_runtime_signature(page_mobile)
             emit_diagnostic_log(
@@ -849,6 +859,12 @@ def _reconcile_verification_with_session_proof(
     if not session_proofs:
         return snapshot
 
+    reporting_overrides = snapshot.setdefault("reporting_overrides", {})
+    if session_proofs.get("ignore_bing_app_checkin", False):
+        reporting_overrides["ignore_bing_app_checkin"] = True
+    if session_proofs.get("ignore_edge_streak", False):
+        reporting_overrides["ignore_edge_streak"] = True
+
     if not session_proofs.get("daily_set_complete", False):
         return snapshot
 
@@ -1023,6 +1039,7 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
     """Flatten the final verification payload into human-readable remaining work."""
     remaining = describe_search_remaining_items(snapshot)
     task_overview = snapshot.get("task_overview", {})
+    reporting_overrides = snapshot.get("reporting_overrides", {})
 
     daily_set = task_overview.get("daily_set", {})
     daily_done = daily_set.get("completed", 0)
@@ -1031,13 +1048,22 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
         remaining.append(f"Daily Set {daily_done}/{daily_total}")
 
     bing_app = task_overview.get("streaks", {}).get("bing_app", {})
-    if bing_app.get("exists", False) and not bing_app.get("done", False):
+    if (
+        not reporting_overrides.get("ignore_bing_app_checkin", False)
+        and bing_app.get("exists", False)
+        and not bing_app.get("done", False)
+    ):
         remaining.append(f"Mobile App Check-in {bing_app.get('current', 0)}/1")
 
     edge_streak = task_overview.get("streaks", {}).get("edge", {})
     edge_minutes = edge_streak.get("minutes", 0)
     edge_target = edge_streak.get("target", 30)
-    if edge_streak.get("exists", False) and edge_target > 0 and not edge_streak.get("done", False):
+    if (
+        not reporting_overrides.get("ignore_edge_streak", False)
+        and edge_streak.get("exists", False)
+        and edge_target > 0
+        and not edge_streak.get("done", False)
+    ):
         remaining.append(f"Edge Minutes {edge_minutes}/{edge_target}")
 
     pending_tasks = snapshot.get("pending_tasks", [])
@@ -1185,7 +1211,7 @@ async def run_all_tasks(
         pc_done = pc_max = mob_done = mob_max = edge_done = edge_max = 0
         remaining_items: list[str] = []
         account_complete = True
-        session_proofs: dict = {}
+        session_proofs: dict = {"ignore_bing_app_checkin": True}
 
         try:
             emit_diagnostic_log(
@@ -1547,6 +1573,8 @@ async def run_all_tasks(
                     await browser_mgr3.close()
                 except Exception:
                     pass
+            finally:
+                session_proofs["ignore_edge_streak"] = True
 
             # ─── Log & Notify ────────────────────────────────────────
             # Create verification-only settings to prevent Native Edge from reopening loops

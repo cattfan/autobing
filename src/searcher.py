@@ -255,10 +255,11 @@ class Searcher:
                 seen_queries.add(dedupe_key)
 
                 # Choose search method
-                # Mobile searches should stay on the URL-direct lane so Bing sees
-                # the mobile-specific query form parameters consistently.
+                # Mobile Rewards appears to credit more reliably when the query is
+                # submitted through the visible search box instead of direct URL
+                # navigation. We still keep URL-direct for desktop as a mixed path.
                 if mode == "mobile":
-                    method = "url_direct"
+                    method = "searchbox"
                 else:
                     method = random.choices(
                         ["searchbox", "url_direct"],

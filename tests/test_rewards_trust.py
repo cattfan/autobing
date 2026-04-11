@@ -208,6 +208,38 @@ class RewardsTrustTests(unittest.TestCase):
             ["Mobile unverified from original runtime"],
         )
 
+    def test_final_reporting_can_ignore_mobile_app_and_edge_streak(self):
+        snapshot = {
+            "search_status": {},
+            "task_overview": {
+                "daily_set": {"completed": 3, "total": 3},
+                "streaks": {
+                    "bing_app": {"exists": True, "done": False, "current": 0},
+                    "edge": {"exists": True, "done": False, "minutes": 0, "target": 30},
+                },
+            },
+            "reporting_overrides": {
+                "ignore_bing_app_checkin": True,
+                "ignore_edge_streak": True,
+            },
+            "pending_tasks": [],
+        }
+
+        self.assertEqual(_describe_remaining_items(snapshot), [])
+
+    def test_reconcile_session_proof_applies_reporting_overrides_without_daily_set_proof(self):
+        snapshot = {"task_overview": {}, "pending_tasks": []}
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "ignore_bing_app_checkin": True,
+                "ignore_edge_streak": True,
+            },
+        )
+
+        self.assertTrue(reconciled["reporting_overrides"]["ignore_bing_app_checkin"])
+        self.assertTrue(reconciled["reporting_overrides"]["ignore_edge_streak"])
+
     def test_final_reporting_ignores_nonexistent_streaks(self):
         snapshot = {
             "search_status": {},
@@ -1108,6 +1140,26 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, resolved)
         self.assertEqual(searcher.get_search_points_status.await_count, 2)
 
+    async def test_mobile_run_searches_prefers_search_box_path(self):
+        trends = SimpleNamespace(
+            fetch_trending=AsyncMock(),
+            get_batch_queries=lambda count: ["Quote of the day"] * count,
+        )
+        searcher = Searcher(Humanizer(), trends, {})
+        searcher._search_via_box = AsyncMock(return_value=True)
+        searcher._search_via_url = AsyncMock(return_value=True)
+        searcher._session_break_interval = lambda: 99
+        searcher._search_delay_bounds = lambda: (0, 0)
+
+        with patch("src.searcher.asyncio.sleep", new=AsyncMock()), \
+             patch.object(searcher.humanizer, "random_delay", new=AsyncMock()), \
+             patch.object(searcher.humanizer, "simulate_tab_switch", new=AsyncMock()):
+            result = await searcher.run_searches(SimpleNamespace(), 1, "mobile")
+
+        self.assertEqual(result["completed"], 1)
+        searcher._search_via_box.assert_awaited_once()
+        searcher._search_via_url.assert_not_awaited()
+
     async def test_mobile_requirement_resolution_uses_mobile_probe(self):
         settings = {"mobile_searches": 60}
         baseline = {"mobile_current": 0, "mobile_max": 0}
@@ -1178,7 +1230,7 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
                 count=11,
             )
 
-        browser_mgr.toggle_mobile_emulation.assert_awaited_once()
+        self.assertEqual(browser_mgr.toggle_mobile_emulation.await_count, 2)
         self.assertTrue(result["credit_proven"])
         self.assertEqual(result["status_after"]["mobile_current"], 60)
 
@@ -1237,7 +1289,7 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         browser_mgr.create_mobile_patchright.assert_awaited_once()
         browser_mgr.start.assert_not_awaited()
-        browser_mgr.toggle_mobile_emulation.assert_awaited_once()
+        self.assertEqual(browser_mgr.toggle_mobile_emulation.await_count, 2)
         patchright_browser.close.assert_awaited_once()
         patchright_pw.stop.assert_awaited_once()
         self.assertEqual(result["runtime_family"], "patchright_mobile")

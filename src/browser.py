@@ -1304,8 +1304,8 @@ class BrowserManager:
             client = await context.new_cdp_session(page)
 
             if enable:
-                mobile_ua = get_random_mobile_rewards_user_agent()
-                mobile_vp = get_random_mobile_rewards_viewport()
+                mobile_ua = getattr(context, "_codex_user_agent", "") or get_random_mobile_rewards_user_agent()
+                mobile_vp = getattr(context, "_codex_mobile_viewport", None) or get_random_mobile_rewards_viewport()
                 profile = _build_mobile_runtime_profile(mobile_ua)
 
                 # ── Step 1: Clear existing device metrics first (extension does this) ──
@@ -1432,10 +1432,15 @@ class BrowserManager:
                 await client.send("Page.addScriptToEvaluateOnNewDocument", {
                     "source": anti_fingerprint_js,
                 })
+                try:
+                    await page.evaluate(anti_fingerprint_js)
+                except Exception:
+                    pass
                 logger.info("📱 Anti-fingerprint script injected via CDP")
 
                 context._codex_mode = "mobile"
                 context._codex_user_agent = mobile_ua
+                context._codex_mobile_viewport = mobile_vp
                 logger.info(f"📱 Mobile emulation ON (UA={mobile_ua[:60]}...)")
 
             else:
@@ -1567,6 +1572,7 @@ class BrowserManager:
         # Tag context for mode tracking
         context._codex_mode = "mobile"
         context._codex_user_agent = mobile_ua
+        context._codex_mobile_viewport = mobile_vp
 
         # ── Inject comprehensive mobile fingerprint overrides ──
         # Bing server-side checks more than just UA: navigator.platform,
@@ -1584,6 +1590,10 @@ class BrowserManager:
 
         await context.add_init_script(fingerprint_js)
         page = await context.new_page()
+        try:
+            await page.evaluate(fingerprint_js)
+        except Exception:
+            pass
 
         logger.info(f"📱 Patchright mobile browser ready (viewport {mobile_vp['width']}x{mobile_vp['height']}, "
                      f"platform={mobile_platform}, touch={mobile_touch_pts})")

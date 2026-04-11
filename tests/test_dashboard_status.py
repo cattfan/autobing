@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, patch
 from src.dashboard import (
     _build_profile_summary,
     _build_profile_views,
+    _describe_remaining_items,
     _ensure_usable_desktop_search_page,
+    _reconcile_verification_with_session_proof,
     _effective_max_threads,
     _read_search_status_for_runtime_descriptor,
     _resolve_desktop_search_requirement,
@@ -182,6 +184,38 @@ class DashboardStatusTests(unittest.TestCase):
             describe_search_remaining_items(snapshot),
             ["Desktop 39/90", "Mobile unverified from original runtime"],
         )
+
+    def test_dashboard_remaining_items_can_ignore_mobile_app_and_edge_streak(self):
+        snapshot = {
+            "search_status": {},
+            "task_overview": {
+                "daily_set": {"completed": 3, "total": 3},
+                "streaks": {
+                    "bing_app": {"exists": True, "done": False, "current": 0},
+                    "edge": {"exists": True, "done": False, "minutes": 0, "target": 30},
+                },
+            },
+            "reporting_overrides": {
+                "ignore_bing_app_checkin": True,
+                "ignore_edge_streak": True,
+            },
+            "pending_tasks": [],
+        }
+
+        self.assertEqual(_describe_remaining_items(snapshot), [])
+
+    def test_dashboard_reconcile_applies_reporting_overrides_without_daily_set_proof(self):
+        snapshot = {"task_overview": {}, "pending_tasks": []}
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "ignore_bing_app_checkin": True,
+                "ignore_edge_streak": True,
+            },
+        )
+
+        self.assertTrue(reconciled["reporting_overrides"]["ignore_bing_app_checkin"])
+        self.assertTrue(reconciled["reporting_overrides"]["ignore_edge_streak"])
 
 
 class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
