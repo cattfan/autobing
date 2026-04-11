@@ -1307,7 +1307,11 @@ class BrowserManager:
         context = page.context
 
         try:
-            client = await context.new_cdp_session(page)
+            client = getattr(page, "_codex_mobile_emulation_client", None)
+            created_client = False
+            if client is None:
+                client = await context.new_cdp_session(page)
+                created_client = True
 
             if enable:
                 mobile_ua = getattr(context, "_codex_user_agent", "") or get_random_mobile_rewards_user_agent()
@@ -1447,6 +1451,7 @@ class BrowserManager:
                 context._codex_mode = "mobile"
                 context._codex_user_agent = mobile_ua
                 context._codex_mobile_viewport = mobile_vp
+                page._codex_mobile_emulation_client = client
                 logger.info(f"📱 Mobile emulation ON (UA={mobile_ua[:60]}...)")
 
             else:
@@ -1469,11 +1474,18 @@ class BrowserManager:
                 await page.set_extra_http_headers(self._client_hints_headers(context))
 
                 context._codex_mode = "desktop"
+                if hasattr(page, "_codex_mobile_emulation_client"):
+                    delattr(page, "_codex_mobile_emulation_client")
                 logger.info("🖥️ Mobile emulation OFF (restored desktop)")
 
-            await client.detach()
+                await client.detach()
 
         except Exception as e:
+            if created_client:
+                try:
+                    await client.detach()
+                except Exception:
+                    pass
             logger.warning(f"toggle_mobile_emulation failed: {e}")
 
     async def create_mobile_patchright(self, cookies: list = None):

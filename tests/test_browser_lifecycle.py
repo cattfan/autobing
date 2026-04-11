@@ -95,6 +95,7 @@ class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_toggle_mobile_emulation_reuses_existing_mobile_fingerprint(self):
         manager = BrowserManager({})
         sent = []
+        detached = False
 
         class FakeClient:
             async def send(self, method, params):
@@ -102,6 +103,8 @@ class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 return {}
 
             async def detach(self):
+                nonlocal detached
+                detached = True
                 return None
 
         context = SimpleNamespace(
@@ -121,6 +124,34 @@ class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics["width"], 412)
         self.assertEqual(metrics["height"], 915)
         page.evaluate.assert_awaited()
+        self.assertIs(page._codex_mobile_emulation_client.__class__, FakeClient)
+        self.assertFalse(detached)
+
+    async def test_toggle_mobile_emulation_disable_detaches_cached_session(self):
+        manager = BrowserManager({})
+        detached = False
+
+        class FakeClient:
+            async def send(self, method, params):
+                return {}
+
+            async def detach(self):
+                nonlocal detached
+                detached = True
+                return None
+
+        client = FakeClient()
+        context = SimpleNamespace(
+            _codex_mode="mobile",
+            new_cdp_session=AsyncMock(return_value=client),
+        )
+        page = SimpleNamespace(context=context, _codex_mobile_emulation_client=client, set_extra_http_headers=AsyncMock())
+
+        await manager.toggle_mobile_emulation(page, enable=False)
+
+        self.assertTrue(detached)
+        self.assertFalse(hasattr(page, "_codex_mobile_emulation_client"))
+        page.set_extra_http_headers.assert_awaited_once()
 
 
 if __name__ == "__main__":
