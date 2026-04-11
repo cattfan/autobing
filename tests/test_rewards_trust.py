@@ -14,7 +14,7 @@ from main import (
     _run_mobile_search_pass,
 )
 from src.daily_set import DailySetCompleter
-from src.dashboard_scraper import scan_dashboard_dom
+from src.dashboard_scraper import NON_ACTIONABLE_CARD_TITLES, scan_dashboard_dom
 from src.humanizer import Humanizer
 from src.searcher import Searcher
 from src.streaks import TaskDetector
@@ -597,6 +597,74 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
             tasks = await scan_dashboard_dom(page)
 
         self.assertEqual(tasks[0]["category"], "more_promo")
+
+    async def test_dashboard_scraper_skips_non_actionable_streak_cards(self):
+        raw_cards = [
+            {
+                "href": "",
+                "text": "Bing Search Streak\nSearch: 0/3\n+9",
+                "aria": "",
+                "title": "",
+                "index": 0,
+                "sectionHeading": "",
+            },
+            {
+                "href": "https://www.bing.com/search?q=Quote%20of%20the%20day&form=ML2BFU",
+                "text": "Have you heard this quote?\nQuote of the day\n+5",
+                "aria": "",
+                "title": "",
+                "index": 1,
+                "sectionHeading": "Earn more",
+            },
+        ]
+        page = SimpleNamespace(
+            evaluate=AsyncMock(side_effect=lambda script: raw_cards if "querySelectorAll" in script else None)
+        )
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            tasks = await scan_dashboard_dom(page)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["title"], "Have you heard this quote?")
+        self.assertIn("bing search streak", NON_ACTIONABLE_CARD_TITLES)
+
+    async def test_fetch_all_tasks_merges_dashboard_and_earn_surfaces(self):
+        scanner = UniversalTaskScanner(Humanizer())
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/dashboard"
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+
+        page = FakePage()
+
+        async def fake_scan_dashboard_dom(current_page):
+            if current_page.url.endswith("/dashboard"):
+                return []
+            if current_page.url.endswith("/earn"):
+                return [
+                    {
+                        "title": "Have you heard this quote?",
+                        "description": "Quote of the day",
+                        "points": 5,
+                        "url": "https://www.bing.com/search?q=Quote%20of%20the%20day&form=ML2BFU",
+                        "element_index": 27,
+                        "category": "more_promo",
+                        "is_quiz": False,
+                    }
+                ]
+            return []
+
+        with patch("src.dashboard_scraper.scan_dashboard_dom", new=fake_scan_dashboard_dom), \
+             patch("src.universal_task.asyncio.sleep", new=AsyncMock()):
+            tasks = await scanner._fetch_all_tasks(page)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].title, "Have you heard this quote?")
+        self.assertEqual(tasks[0].category, "more_promo")
+        self.assertEqual(tasks[0].raw_data["scan_url"], "https://rewards.bing.com/earn")
 
     async def test_daily_set_executor_runs_before_generic_click_path(self):
         scanner = UniversalTaskScanner(Humanizer())
@@ -1208,6 +1276,23 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(get_deferred_offer_reason(task))
+
+    async def test_keep_earning_quote_offer_uses_quote_handler(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._complete_quote_of_day_offer = AsyncMock(return_value=True)
+        task = RewardsTask(
+            id="promo-quote",
+            title="Have you heard this quote?",
+            description="Quote of the day",
+            category="more_promo",
+            task_type="unknown",
+            destination_url="https://www.bing.com/search?q=Quote%20of%20the%20day&form=ML2BFU",
+        )
+
+        handled = await scanner._complete_known_more_promo(SimpleNamespace(), task)
+
+        self.assertTrue(handled)
+        scanner._complete_quote_of_day_offer.assert_awaited_once()
 
     async def test_non_strict_verification_tolerates_missing_task_after_action(self):
         scanner = UniversalTaskScanner(Humanizer())

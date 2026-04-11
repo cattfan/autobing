@@ -1213,40 +1213,62 @@ class UniversalTaskScanner:
     async def _fetch_all_tasks(self, page: Page) -> list[RewardsTask]:
         """Fetch all tasks from Rewards API and classify them."""
         tasks: list[RewardsTask] = []
+        task_map: dict[tuple[str, str], RewardsTask] = {}
 
         try:
-            # Navigate to rewards page first
-            if "rewards.bing.com" not in page.url:
-                await page.goto(REWARDS_URL,
-                                wait_until="domcontentloaded", timeout=35000)
-                await asyncio.sleep(3)
-
-            # Fetch tasks via the pure DOM visual scraper
             from src.dashboard_scraper import scan_dashboard_dom
-            dom_tasks = await scan_dashboard_dom(page)
-            
-            for dt in dom_tasks:
-                task = RewardsTask()
-                # We use the title as ID since it's the only unique identifier we extract from DOM
-                task.id = dt["title"] 
-                task.title = dt["title"]
-                task.description = dt["description"]
-                task.points = 0
-                task.points_max = dt["points"]
-                task.destination_url = dt["url"]
-                task.is_complete = False # Dashboard DOM only yields incomplete tasks
-                task.category = dt["category"] # "unknown" typically
-                task.task_type = "quiz" if dt["is_quiz"] else "unknown"
-                task.offer_id = "" # Deprecated via DOM layer
-                
-                # We stash the DOM index here so we can natively click it later without CSS selectors
-                task.raw_data = {"element_index": dt["element_index"]}
-                
-                tasks.append(task)
-                
+            scan_urls: list[str] = []
+            current_url = page.url if "rewards.bing.com" in (page.url or "") else ""
+            for candidate in [current_url, f"{REWARDS_URL}/dashboard", f"{REWARDS_URL}/earn", REWARDS_URL]:
+                if candidate and candidate not in scan_urls:
+                    scan_urls.append(candidate)
+
+            for scan_url in scan_urls:
+                if page.url != scan_url:
+                    await page.goto(
+                        scan_url,
+                        wait_until="domcontentloaded",
+                        timeout=35000,
+                    )
+                    await asyncio.sleep(3)
+
+                dom_tasks = await scan_dashboard_dom(page)
+
+                for dt in dom_tasks:
+                    task = RewardsTask()
+                    task.id = dt["title"]
+                    task.title = dt["title"]
+                    task.description = dt["description"]
+                    task.points = 0
+                    task.points_max = dt["points"]
+                    task.destination_url = dt["url"]
+                    task.is_complete = False
+                    task.category = dt["category"]
+                    task.task_type = "quiz" if dt["is_quiz"] else "unknown"
+                    task.offer_id = ""
+                    task.raw_data = {
+                        "element_index": dt["element_index"],
+                        "scan_url": scan_url,
+                    }
+
+                    task_key = (
+                        (task.title or "").strip().lower(),
+                        (task.destination_url or "").strip().lower(),
+                    )
+                    existing = task_map.get(task_key)
+                    if existing is None:
+                        task_map[task_key] = task
+                        continue
+
+                    if existing.category == "unknown" and task.category != "unknown":
+                        task_map[task_key] = task
+                    elif existing.task_type == "unknown" and task.task_type != "unknown":
+                        task_map[task_key] = task
+
         except Exception as e:
             logger.error(f"Failed to fetch visual tasks from DOM: {e}")
 
+        tasks.extend(task_map.values())
         return tasks
 
     def _parse_task(self, data: dict, category: str) -> RewardsTask:
@@ -2055,6 +2077,18 @@ class UniversalTaskScanner:
             )
             return await self._complete_referral_offer(page, task)
 
+        if any(
+            token in offer_text
+            for token in ("quote of the day", "have you heard this quote")
+        ):
+            self._diag(
+                "Matched keep-earning quote-of-the-day handler",
+                scope="promo-handler",
+                handler="quote_of_the_day",
+                **self._task_diag_payload(task),
+            )
+            return await self._complete_quote_of_day_offer(page, task)
+
         self._diag(
             "No targeted keep-earning handler matched",
             scope="promo-handler",
@@ -2222,6 +2256,62 @@ class UniversalTaskScanner:
         self._diag(
             "Referral flow finished without finding a usable CTA",
             scope="promo-referral",
+            **self._task_diag_payload(task),
+        )
+        return False
+
+    async def _complete_quote_of_day_offer(self, page: Page, task: RewardsTask) -> bool:
+        """Open the first real search result on quote-of-the-day SERPs to trigger completion."""
+        selectors = [
+            "#b_results h2 a",
+            "#b_results a",
+            "main a[href]",
+        ]
+
+        self._diag(
+            "Attempting quote-of-the-day keep-earning flow",
+            scope="promo-quote",
+            current_url=(page.url or ""),
+            selectors=selectors,
+            **self._task_diag_payload(task),
+        )
+
+        for selector in selectors:
+            try:
+                locator = page.locator(selector)
+                count = await locator.count()
+                for idx in range(min(count, 8)):
+                    link = locator.nth(idx)
+                    href = await link.get_attribute("href")
+                    text = (await link.inner_text(timeout=1000)).strip()
+                    if not href or not text:
+                        continue
+                    await link.scroll_into_view_if_needed(timeout=3000)
+                    await link.click(timeout=5000)
+                    await asyncio.sleep(6)
+                    await self.humanizer.simulate_reading(page, random.uniform(3, 5))
+                    self._log("info", "  📰 Opened first quote-of-the-day result")
+                    self._diag(
+                        "Opened quote-of-the-day result for promo completion",
+                        scope="promo-quote",
+                        selector=selector,
+                        href=href,
+                        text=text[:120],
+                        **self._task_diag_payload(task),
+                    )
+                    return True
+            except Exception:
+                self._diag(
+                    "Quote-of-the-day selector attempt failed",
+                    scope="promo-quote",
+                    selector=selector,
+                    **self._task_diag_payload(task),
+                )
+                continue
+
+        self._diag(
+            "Quote-of-the-day flow could not find a usable result link",
+            scope="promo-quote",
             **self._task_diag_payload(task),
         )
         return False

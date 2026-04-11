@@ -13,6 +13,15 @@ class DashboardTask(TypedDict):
     is_quiz: bool
 
 
+NON_ACTIONABLE_CARD_TITLES = {
+    "bing search streak",
+    "bing app streak",
+    "edge browsing streak",
+    "daily set streak",
+    "your points history",
+}
+
+
 def _infer_dashboard_category(section_heading: str, title: str, description: str, href: str) -> str:
     """Infer task category from the nearest visible section heading and task copy."""
     section = (section_heading or "").strip().lower()
@@ -137,9 +146,15 @@ async def scan_dashboard_dom(page: Page) -> List[DashboardTask]:
         if title.startswith('+'): title = "Task"
         if repr(points) in desc:
             desc = desc.replace(f"+{points}", "").strip()
+
+        title_lower = title.lower().strip()
+        if title_lower in NON_ACTIONABLE_CARD_TITLES:
+            continue
+        if not href and title_lower in NON_ACTIONABLE_CARD_TITLES:
+            continue
             
         # Infer type
-        is_quiz = "quiz" in title.lower() or "quiz" in href.lower() or "dsetqu" in href.lower()
+        is_quiz = "quiz" in title_lower or "quiz" in href.lower() or "dsetqu" in href.lower()
         
         parsed_tasks.append({
             "title": title,
