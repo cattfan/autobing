@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 from main import (
     _describe_deferred_items,
     _describe_remaining_items,
+    _edge_streak_attempt_allowed,
     _needs_mobile_credit_recheck,
     _reconcile_verification_with_session_proof,
     _read_search_status_with_mobile_recheck,
@@ -139,6 +140,14 @@ class RewardsTrustTests(unittest.TestCase):
         resolved = {"mobile_current": 27, "mobile_max": 60}
         self.assertTrue(_needs_mobile_credit_recheck(ambiguous, settings))
         self.assertFalse(_needs_mobile_credit_recheck(resolved, settings))
+
+    def test_edge_streak_attempt_allowed_without_offer_id(self):
+        info = {"exists": True, "done": False, "minutes": 5, "target": 30}
+        self.assertTrue(_edge_streak_attempt_allowed(info))
+
+    def test_edge_streak_attempt_not_allowed_when_done_or_missing(self):
+        self.assertFalse(_edge_streak_attempt_allowed({"exists": False, "done": False, "minutes": 0, "target": 30}))
+        self.assertFalse(_edge_streak_attempt_allowed({"exists": True, "done": True, "minutes": 30, "target": 30}))
 
     def test_final_reporting_keeps_targeted_pending_tasks_visible(self):
         snapshot = {
@@ -1289,10 +1298,77 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         browser_mgr.create_mobile_patchright.assert_awaited_once()
         browser_mgr.start.assert_not_awaited()
-        self.assertEqual(browser_mgr.toggle_mobile_emulation.await_count, 2)
+        self.assertEqual(browser_mgr.toggle_mobile_emulation.await_count, 1)
         patchright_browser.close.assert_awaited_once()
         patchright_pw.stop.assert_awaited_once()
         self.assertEqual(result["runtime_family"], "patchright_mobile")
+        self.assertTrue(result["credit_proven"])
+
+    async def test_mobile_search_pass_prefers_gpm_mobile_when_available(self):
+        settings = {
+            "mobile_searches": 60,
+            "gpm_integration_enabled": True,
+            "gpm_api_url": "http://127.0.0.1:9495",
+        }
+        account = {
+            "email": "test@example.com",
+            "password": "pw",
+            "gpm_mobile_profile_id": "gpm-mobile-123",
+        }
+        ctx = object()
+        page = SimpleNamespace(context=ctx, goto=AsyncMock())
+        browser_mgr = SimpleNamespace(
+            set_account=lambda _email: None,
+            start_connected_edge=AsyncMock(),
+            create_context=AsyncMock(return_value=ctx),
+            new_page=AsyncMock(return_value=page),
+            toggle_mobile_emulation=AsyncMock(),
+            close=AsyncMock(),
+        )
+        login_mgr = AsyncMock()
+        login_mgr.is_logged_in = AsyncMock(return_value=True)
+        searcher = AsyncMock()
+        searcher.run_searches = AsyncMock(return_value={"completed": 11, "failed": 0})
+        before = {"mobile_current": 27, "mobile_max": 60}
+        after = {"mobile_current": 60, "mobile_max": 60}
+
+        class DummyProgress:
+            def __init__(self, *args, **kwargs):
+                pass
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return False
+            def add_task(self, *_args, **_kwargs):
+                return 1
+            def update(self, *_args, **_kwargs):
+                return None
+
+        with patch("main.BrowserManager", return_value=browser_mgr), \
+             patch("main._persist_storage_state", new=AsyncMock()), \
+             patch("main._read_search_status_with_mobile_recheck", new=AsyncMock(return_value=before)), \
+             patch("main._wait_for_mobile_credit_update", new=AsyncMock(return_value=after)), \
+             patch("main._raise_if_search_stopped"), \
+             patch("main.console.print"), \
+             patch("main.Progress", DummyProgress), \
+             patch("main._start_gpm_profile", new=AsyncMock(return_value="http://127.0.0.1:45678")), \
+             patch("main._stop_gpm_profile") as stop_gpm_profile, \
+             patch("main.asyncio.sleep", new=AsyncMock()):
+            result = await _run_mobile_search_pass(
+                settings,
+                account,
+                None,
+                login_mgr,
+                searcher,
+                Path("state.json"),
+                count=11,
+            )
+
+        browser_mgr.start_connected_edge.assert_awaited_once_with("http://127.0.0.1:45678")
+        browser_mgr.create_context.assert_awaited_once()
+        self.assertEqual(browser_mgr.toggle_mobile_emulation.await_count, 1)
+        stop_gpm_profile.assert_called_once_with("gpm-mobile-123", "http://127.0.0.1:9495")
+        self.assertEqual(result["runtime_family"], "gpm_mobile")
         self.assertTrue(result["credit_proven"])
 
     async def test_strict_verification_fails_when_task_disappears(self):

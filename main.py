@@ -62,8 +62,16 @@ from src.ai_agent import AIAgent
 from src.streaks import EdgeBrowsingStreak, TaskDetector
 from src.edge_streak_native import NativeEdgeStreak
 from src.manual_captcha import ManualCaptchaHandler
-from src.runtime_identity import describe_search_remaining_items
+from src.runtime_identity import (
+    build_runtime_descriptor,
+    describe_search_remaining_items,
+)
 from src.page_agent_flow import PageAgentFlow
+from src.dashboard import (
+    _select_mobile_runtime_strategy,
+    _start_gpm_profile,
+    _stop_gpm_profile,
+)
 
 
 def _configure_stdio() -> None:
@@ -590,6 +598,14 @@ async def _run_mobile_search_pass(
     patchright_pw = None
     patchright_browser = None
     runtime_family = "managed_edge"
+    gpm_mobile_id = str(account.get("gpm_mobile_profile_id") or "").strip()
+    gpm_enabled = bool(settings.get("gpm_integration_enabled", False))
+    gpm_api_url = str(settings.get("gpm_api_url", "http://127.0.0.1:9495")).rstrip("/")
+    fallback_to_native_mobile, mobile_runtime_strategy = _select_mobile_runtime_strategy(
+        gpm_enabled,
+        gpm_mobile_id,
+    )
+    mobile_runtime = None
 
     try:
         emit_diagnostic_log(
@@ -601,39 +617,62 @@ async def _run_mobile_search_pass(
             count=count,
             has_storage_state=storage_state_path.exists(),
             proxy=bool(session_proxy),
+            strategy=mobile_runtime_strategy,
+            has_gpm_mobile_profile=bool(gpm_mobile_id),
         )
-        if bool(settings.get("mobile_patchright_enabled", True)):
-            try:
-                patchright_pw, patchright_browser, ctx_mobile, page_mobile = await browser_mgr.create_mobile_patchright(
-                    load_storage_state_cookies(storage_state_path)
-                )
-                runtime_family = "patchright_mobile"
-                logger.info("Mobile search pass using patchright mobile runtime")
-            except Exception as e:
-                logger.warning(f"Patchright mobile startup failed, falling back to emulation: {e}")
 
-        if page_mobile is None:
-            await browser_mgr.start()
+        if fallback_to_native_mobile:
+            if bool(settings.get("mobile_patchright_enabled", True)):
+                try:
+                    patchright_pw, patchright_browser, ctx_mobile, page_mobile = await browser_mgr.create_mobile_patchright(
+                        load_storage_state_cookies(storage_state_path)
+                    )
+                    runtime_family = "patchright_mobile"
+                    mobile_runtime = build_runtime_descriptor(
+                        "patchright_mobile",
+                        account["email"],
+                        "mobile",
+                    )
+                    logger.info("Mobile search pass using patchright mobile runtime")
+                except Exception as e:
+                    logger.warning(f"Patchright mobile startup failed, falling back to emulation: {e}")
+
+            if page_mobile is None:
+                await browser_mgr.start()
+                ctx_mobile = await browser_mgr.create_context(
+                    mode="mobile",
+                    account_email=account["email"] + "_mobile",
+                    proxy=session_proxy,
+                    storage_state=str(storage_state_path) if storage_state_path.exists() else None,
+                    use_persistent_profile=False,
+                )
+                page_mobile = await browser_mgr.new_page(ctx_mobile)
+                mobile_runtime = build_runtime_descriptor(
+                    "managed_edge",
+                    account["email"],
+                    "mobile",
+                )
+                try:
+                    await browser_mgr.toggle_mobile_emulation(page_mobile, enable=True)
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logger.warning(f"Mobile emulation activation failed: {e}")
+        else:
+            mobile_cdp = await _start_gpm_profile(gpm_mobile_id, gpm_api_url)
+            await browser_mgr.start_connected_edge(mobile_cdp)
             ctx_mobile = await browser_mgr.create_context(
                 mode="mobile",
-                account_email=account["email"] + "_mobile",
-                proxy=session_proxy,
-                storage_state=str(storage_state_path) if storage_state_path.exists() else None,
-                use_persistent_profile=False,
+                account_email=account["email"],
             )
             page_mobile = await browser_mgr.new_page(ctx_mobile)
-            try:
-                await browser_mgr.toggle_mobile_emulation(page_mobile, enable=True)
-                await asyncio.sleep(1)
-            except Exception as e:
-                logger.warning(f"Mobile emulation activation failed: {e}")
-        else:
-            logger.info("Mobile search pass started with patchright-backed Edge mobile runtime")
-            try:
-                await browser_mgr.toggle_mobile_emulation(page_mobile, enable=True)
-                await asyncio.sleep(1)
-            except Exception as e:
-                logger.warning(f"Patchright mobile CDP overlay failed: {e}")
+            runtime_family = "gpm_mobile"
+            mobile_runtime = build_runtime_descriptor(
+                "gpm_mobile",
+                gpm_mobile_id,
+                "mobile",
+                cdp_url=mobile_cdp,
+            )
+            logger.info(f"Mobile search pass using GPM mobile runtime ({gpm_mobile_id[:8]})")
 
         logged_in = await login_mgr.is_logged_in(page_mobile)
         if not logged_in:
@@ -647,7 +686,7 @@ async def _run_mobile_search_pass(
                 await browser_mgr.toggle_mobile_emulation(page_mobile, enable=True)
                 await asyncio.sleep(1)
             except Exception as e:
-                logger.warning(f"Patchright/mobile emulation refresh after login failed: {e}")
+                logger.warning(f"Mobile runtime refresh after login failed: {e}")
         ctx_mobile = page_mobile.context
         await _persist_storage_state(ctx_mobile, storage_state_path)
         await page_mobile.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=35000)
@@ -655,7 +694,7 @@ async def _run_mobile_search_pass(
             await browser_mgr.toggle_mobile_emulation(page_mobile, enable=True)
             await asyncio.sleep(1)
         except Exception as e:
-            logger.warning(f"Patchright/mobile emulation refresh after navigation failed: {e}")
+            logger.warning(f"Mobile runtime refresh after navigation failed: {e}")
         if hasattr(browser_mgr, "capture_runtime_signature"):
             runtime_signature = await browser_mgr.capture_runtime_signature(page_mobile)
             emit_diagnostic_log(
@@ -748,6 +787,7 @@ async def _run_mobile_search_pass(
             "status_before": status_before,
             "status_after": status_after,
             "runtime_family": runtime_family,
+            "runtime_descriptor": mobile_runtime,
         }
     finally:
         try:
@@ -769,6 +809,11 @@ async def _run_mobile_search_pass(
             await browser_mgr.close()
         except Exception:
             pass
+        if not fallback_to_native_mobile and gpm_mobile_id:
+            try:
+                _stop_gpm_profile(gpm_mobile_id, gpm_api_url)
+            except Exception:
+                pass
 
 
 def _mobile_credit_delta(before_status: dict, after_status: dict) -> int:
@@ -778,6 +823,22 @@ def _mobile_credit_delta(before_status: dict, after_status: dict) -> int:
         int(after_status.get("mobile_current", 0))
         - int(before_status.get("mobile_current", 0)),
     )
+
+
+def _edge_streak_attempt_allowed(edge_streak_info: dict) -> bool:
+    """Return True when the native Edge streak loop should run.
+
+    The native streak loop relies on refreshed task counters for verification and
+    does not require an offerId to execute. Some live task payloads expose
+    `exists/minutes/target/done` without an `offerId`, so do not block the loop
+    on that field alone.
+    """
+    info = edge_streak_info or {}
+    exists = bool(info.get("exists", False))
+    done = bool(info.get("done", False))
+    minutes_done = int(info.get("minutes", 0) or 0)
+    minutes_target = int(info.get("target", 30) or 30)
+    return exists and not done and minutes_done < minutes_target
 
 
 async def _wait_for_mobile_credit_update(
@@ -1355,20 +1416,38 @@ async def run_all_tasks(
                 if settings.get("page_agent_enabled", False):
                     pa_flow = PageAgentFlow(settings)
                     await pa_flow.inject(page)
-                    # Run defined flows
-                    daily_result = await pa_flow.run_flow(page, "bing_daily_set")
+                    available_flows = set(pa_flow.list_flows())
+
+                    daily_result = (
+                        await pa_flow.run_flow(page, "daily_set")
+                        if "daily_set" in available_flows
+                        else {"completed": 0, "total_steps": 0, "success": False}
+                    )
                     console.print(f"[green]Page-agent Daily Set: {daily_result}[/green]")
 
-                    punch_result = await pa_flow.run_flow(page, "bing_punch_card")
-                    console.print(f"[green]Page-agent Punch Card: {punch_result}[/green]")
+                    keep_result = (
+                        await pa_flow.run_flow(page, "keep_earning")
+                        if "keep_earning" in available_flows
+                        else {"completed": 0, "total_steps": 0, "success": False}
+                    )
+                    console.print(f"[green]Page-agent Keep Earning: {keep_result}[/green]")
 
-                    # Assuming a generic promotion flow; adjust as needed
-                    promo_result = await pa_flow.run_flow(page, "bing_promotions") if "bing_promotions" in pa_flow.list_flows() else {"completed": 0, "total": 0}
-                    console.print(f"[green]Page-agent Promotions: {promo_result}[/green]")
+                    explore_result = (
+                        await pa_flow.run_flow(page, "explore_bing")
+                        if "explore_bing" in available_flows
+                        else {"completed": 0, "total_steps": 0, "success": False}
+                    )
+                    console.print(f"[green]Page-agent Explore on Bing: {explore_result}[/green]")
 
-                    daily_stats = {"completed": daily_result.get("completed", 0), "total": daily_result.get("total_steps", 0)}
-                    punch_stats = {"completed": punch_result.get("completed", 0), "total": punch_result.get("total_steps", 0)}
-                    promo_stats = {"completed": promo_result.get("completed", 0), "total": promo_result.get("total_steps", 0)}
+                    daily_stats = {
+                        "completed": daily_result.get("completed", 0),
+                        "total": daily_result.get("total_steps", 0),
+                    }
+                    punch_stats = {"completed": 0, "total": 0}
+                    promo_stats = {
+                        "completed": keep_result.get("completed", 0) + explore_result.get("completed", 0),
+                        "total": keep_result.get("total_steps", 0) + explore_result.get("total_steps", 0),
+                    }
                     session_proofs = {}
                     # Log for consistency
                     emit_diagnostic_log(
@@ -1378,7 +1457,8 @@ async def run_all_tasks(
                         scope="tasks",
                         account=masked_email,
                         daily=daily_stats,
-                        punch=punch_stats,
+                        keep=keep_result,
+                        explore=explore_result,
                         promo=promo_stats,
                     )
                 else:
@@ -1443,6 +1523,7 @@ async def run_all_tasks(
 
             # ─── Edge Session (searches + browsing streak) ─────────────
             console.print("\n[bold][ Edge Session ][/bold]")
+            edge_streak_info: dict = {}
             try:
                 edge_runtime_settings = dict(settings)
                 edge_runtime_settings["use_stealth"] = False
@@ -1507,12 +1588,13 @@ async def run_all_tasks(
                 minutes_target = edge_streak_info.get("target", 30)
                 streak_done = edge_streak_info.get("done", False)
                 edge_exists = edge_streak_info.get("exists", False)
-                offer_id = edge_streak_info.get("offerId", "")
 
-                if not edge_exists or not offer_id:
+                if not edge_exists:
                     console.print("[green][SKIP] Edge Streak task is not available or already completed[/green]")
                 elif streak_done or minutes_done >= minutes_target:
                     console.print(f"[green][SKIP] Edge Streak already complete ({minutes_done}/{minutes_target} min)[/green]")
+                elif not _edge_streak_attempt_allowed(edge_streak_info):
+                    console.print("[green][SKIP] Edge Streak task is not actionable for this run[/green]")
                 else:
                     # --- Verify-and-Retry Loop ---
                     max_attempts = 3
@@ -1574,7 +1656,7 @@ async def run_all_tasks(
                 except Exception:
                     pass
             finally:
-                session_proofs["ignore_edge_streak"] = True
+                session_proofs["ignore_edge_streak"] = not bool(edge_streak_info.get("exists", False))
 
             # ─── Log & Notify ────────────────────────────────────────
             # Create verification-only settings to prevent Native Edge from reopening loops
