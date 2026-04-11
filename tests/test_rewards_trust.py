@@ -151,6 +151,42 @@ class RewardsTrustTests(unittest.TestCase):
             ["Task: Explore on Bing for your favorite movie"],
         )
 
+    def test_explore_card_detects_search_requirement_from_description(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        card = {
+            "text": "Plan a quick getaway Search on Bing for a flight to your perfect vacation +10",
+        }
+
+        self.assertTrue(scanner._explore_card_requires_search(card))
+
+    def test_explore_card_extracts_requested_query_from_description(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        card = {
+            "text": "Plan a quick getaway Search on Bing for a flight to your perfect vacation +10",
+        }
+
+        self.assertEqual(
+            scanner._extract_explore_search_query(card),
+            "a flight to your perfect vacation",
+        )
+
+    def test_explore_card_extracts_query_from_href_when_copy_is_insufficient(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        card = {
+            "text": "Explore on Bing +10",
+            "href": "https://www.bing.com/search?q=latest+news&form=ML2X9A",
+        }
+
+        self.assertEqual(scanner._extract_explore_search_query(card), "latest news")
+
+    def test_explore_card_without_search_copy_is_visit_only(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        card = {
+            "text": "Trending destinations +10",
+        }
+
+        self.assertFalse(scanner._explore_card_requires_search(card))
+
     def test_final_reporting_marks_unverified_mobile_runtime_separately(self):
         snapshot = {
             "search_status": {

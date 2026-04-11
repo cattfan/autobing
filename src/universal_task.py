@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -2047,6 +2048,55 @@ class UniversalTaskScanner:
         )
         return " ".join(normalized.split())
 
+    @staticmethod
+    def _normalize_explore_card_text(card: dict) -> str:
+        """Normalize an Explore on Bing card text payload for matching and extraction."""
+        raw = str(card.get("text", "") or "").replace("\u200b", " ").replace("\xa0", " ")
+        return " ".join(raw.split())
+
+    @classmethod
+    def _explore_card_requires_search(cls, card: dict) -> bool:
+        """Return True when card copy explicitly asks the user to search on Bing."""
+        lower = cls._normalize_explore_card_text(card).lower()
+        return any(
+            phrase in lower
+            for phrase in (
+                "search on bing for",
+                "search on bing to",
+                "search bing for",
+                "search bing to",
+            )
+        )
+
+    @classmethod
+    def _extract_explore_search_query(cls, card: dict) -> str | None:
+        """Extract the intended Bing query from Explore card copy or URL."""
+        text = cls._normalize_explore_card_text(card)
+        for pattern in (
+            r"search on bing for (.+?)(?:\.|$)",
+            r"search on bing to (.+?)(?:\.|$)",
+            r"search bing for (.+?)(?:\.|$)",
+            r"search bing to (.+?)(?:\.|$)",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if not match:
+                continue
+            query = re.sub(r"\+\s*\d+\b.*$", "", match.group(1)).strip(" .")
+            if query:
+                return query
+
+        href = str(card.get("href", "") or "").strip()
+        if href:
+            try:
+                parsed = urlsplit(href)
+                query = parse_qs(parsed.query).get("q", [""])[0].strip()
+                if query:
+                    return query
+            except Exception:
+                pass
+
+        return None
+
     async def _complete_known_more_promo(self, page: Page, task: RewardsTask) -> bool:
         """Apply targeted interactions for known Keep Earning offers that need more than a visit."""
         if task.category != "more_promo":
@@ -2508,35 +2558,40 @@ class UniversalTaskScanner:
           Phase 3 – Execute:
             Visit each discovered URL to register task completion.
         """
-        self._log("info", "🔎 AI Smart Scan – checking /earn page for extra tasks...")
+        self._log("info", "🔎 AI Smart Scan – checking Rewards surfaces for Explore on Bing tasks...")
 
-        # ── Navigate and scroll ────────────────────────────────────────
-        try:
-            await page.goto(
-                "https://rewards.bing.com/",
-                wait_until="domcontentloaded",
-                timeout=35000,
-            )
-            await asyncio.sleep(5)
-        except Exception:
-            self._log("info", "  Could not load /earn page")
-            return 0
+        scan_urls: list[str] = []
+        current_url = page.url if "rewards.bing.com" in (page.url or "") else ""
+        for candidate in [current_url, f"{REWARDS_URL}/dashboard", f"{REWARDS_URL}/earn", REWARDS_URL]:
+            if candidate and candidate not in scan_urls:
+                scan_urls.append(candidate)
 
-        # Scroll to trigger lazy rendering of ALL sections
-        for _ in range(30):
-            await page.evaluate("window.scrollBy(0, 400)")
-            await asyncio.sleep(0.25)
-        await asyncio.sleep(3)
-
-        # ── Phase 1: AI-powered discovery ──────────────────────────────
         cards: list[dict] = []
+        for scan_url in scan_urls:
+            try:
+                if page.url != scan_url:
+                    await page.goto(
+                        scan_url,
+                        wait_until="domcontentloaded",
+                        timeout=35000,
+                    )
+                    await asyncio.sleep(5)
+            except Exception:
+                self._log("info", f"  Could not load Rewards surface: {scan_url}")
+                continue
 
-        if self.ai_agent and self.ai_agent.enabled:
-            cards = await self._ai_discover_earn_cards(page)
+            for _ in range(30):
+                await page.evaluate("window.scrollBy(0, 400)")
+                await asyncio.sleep(0.25)
+            await asyncio.sleep(3)
 
-        # ── Phase 2: Fallback DOM heuristic ────────────────────────────
-        if not cards:
-            cards = await self._dom_discover_earn_cards(page)
+            discovered = await self._dom_discover_earn_cards(page)
+            if not discovered and self.ai_agent and self.ai_agent.enabled:
+                discovered = await self._ai_discover_earn_cards(page)
+
+            for card in discovered:
+                card.setdefault("scan_url", scan_url)
+            cards.extend(discovered)
 
         if not cards:
             self._log("info", "  No extra earn-page tasks found")
@@ -2578,7 +2633,8 @@ class UniversalTaskScanner:
         # ── Phase 3: Visit each URL ───────────────────────────────────
         completed = 0
         for i, card in enumerate(cards):
-            title = card.get("text", "")[:50]
+            card_text = self._normalize_explore_card_text(card)
+            title = card_text[:50]
             href = card.get("href", "")
             selector = card.get("selector", "")
             if not href and not selector:
@@ -2594,6 +2650,10 @@ class UniversalTaskScanner:
                     await page.goto(href, wait_until="domcontentloaded", timeout=25000)
                     navigation_succeeded = True
                 else:
+                    scan_url = card.get("scan_url", "")
+                    if scan_url and page.url != scan_url:
+                        await page.goto(scan_url, wait_until="domcontentloaded", timeout=25000)
+                        await asyncio.sleep(2)
                     pages_before = len(page.context.pages)
                     await page.click(selector, timeout=10000)
                     await asyncio.sleep(3)
@@ -2612,18 +2672,22 @@ class UniversalTaskScanner:
                 # If this task explicitly asks to "Search on Bing" (e.g., "Search on Bing for your favorite movie")
                 needs_search = False
                 try:
-                    text_lower = title.lower()
-                    needs_search = "search" in text_lower or "tìm" in text_lower or "explore" in text_lower
+                    text_lower = card_text.lower()
+                    needs_search = (
+                        self._explore_card_requires_search(card)
+                        or "tìm" in text_lower
+                        or "explore" in text_lower
+                    )
                     if needs_search:
                         input_box = active_page.locator("input[type='search'], textarea[type='search'], input[name='q'], textarea[name='q']").first
                         if await input_box.is_visible(timeout=3000):
                             self._log("info", "    ⌨️ Detected 'Search' requirement, context-aware query loading...")
-                            search_term = None
+                            search_term = self._extract_explore_search_query(card)
                             
                             # Ask AI agent to deduce what we should type based on the title
-                            if getattr(self, "ai_agent", None) and self.ai_agent.enabled:
+                            if not search_term and getattr(self, "ai_agent", None) and self.ai_agent.enabled:
                                 try:
-                                    search_term = await self.ai_agent.generate_search_query(title)
+                                    search_term = await self.ai_agent.generate_search_query(card_text)
                                 except Exception as agent_e:
                                     pass
                             
@@ -2667,14 +2731,18 @@ class UniversalTaskScanner:
                 if active_page == page and "rewards" not in page.url:
                     await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=25000)
                     await asyncio.sleep(2)
-                
-                completed += 1
+
+                task_completed = navigation_succeeded and (search_submitted or not needs_search)
+                if task_completed:
+                    completed += 1
+                else:
+                    self._log("info", "  ⚠️ Explore card needed a search but no search was submitted")
 
                 # Register visited card into memory cache
                 cache_key = _build_earn_card_cache_key(href, selector)
                 card_proven = _should_cache_earn_card_visit(
                     cache_key,
-                    navigation_succeeded and (search_submitted or not needs_search or "bing.com/search" in (href or "").lower()),
+                    task_completed,
                 )
                 if card_proven:
                     state = _load_state()
