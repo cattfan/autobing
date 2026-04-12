@@ -239,6 +239,18 @@ class UniversalTaskScanner:
         self.ai_agent = ai_agent
         self.settings = settings or {}
         self.challenge_handler = challenge_handler
+        self._task_fetch_timeout_seconds = float(self.settings.get("task_fetch_timeout_seconds", 45))
+        self._task_quiz_timeout_seconds = float(self.settings.get("task_quiz_timeout_seconds", 90))
+        self._task_verification_refresh_timeout_seconds = float(
+            self.settings.get("task_verification_refresh_timeout_seconds", 60)
+        )
+        self._task_attempt_timeout_seconds = float(
+            self.settings.get("task_attempt_timeout_seconds", 180)
+        )
+        self._task_page_agent_timeout_seconds = float(
+            self.settings.get("task_page_agent_timeout_seconds", 90)
+        )
+        self._task_ai_timeout_seconds = float(self.settings.get("task_ai_timeout_seconds", 75))
         self._active_account_email = ""
         self._daily_set_bulk_attempted_titles: set[str] = set()
         self.daily_set_execution_proofs: dict[str, dict] = {}
@@ -269,6 +281,51 @@ class UniversalTaskScanner:
             level=level,
             scope=scope,
             **fields,
+        )
+
+    async def _run_with_timeout(
+        self,
+        label: str,
+        coro,
+        timeout_seconds: float,
+        *,
+        task: RewardsTask | None = None,
+        default=None,
+        scope: str = "task-timeout",
+    ):
+        """Bound long-running task sub-steps so one stalled surface does not block the whole account."""
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            payload = self._task_diag_payload(task) if task else {}
+            self._log("warning", f"  ⏱️ {label} timed out after {int(timeout_seconds)}s")
+            self._diag(
+                "Task stage timed out",
+                level="warning",
+                scope=scope,
+                label=label,
+                timeout_seconds=timeout_seconds,
+                **payload,
+            )
+            return default
+
+    async def _run_task_attempt(self, page: Page, task: RewardsTask) -> bool:
+        """Run one task end-to-end under a hard timeout so a single offer cannot block the whole account."""
+        async def _attempt():
+            success = await self._execute_task(page, task)
+            if success:
+                success = await self._verify_task_completion(page, task)
+            return success
+
+        return bool(
+            await self._run_with_timeout(
+                "Task end-to-end attempt",
+                _attempt(),
+                self._task_attempt_timeout_seconds,
+                task=task,
+                default=False,
+                scope="task-run",
+            )
         )
 
     @staticmethod
@@ -507,9 +564,7 @@ class UniversalTaskScanner:
                     **self._task_diag_payload(task),
                 )
 
-                success = await self._execute_task(page, task)
-                if success:
-                    success = await self._verify_task_completion(page, task)
+                success = await self._run_task_attempt(page, task)
 
                 if success:
                     stats["completed"] += 1
@@ -606,7 +661,22 @@ class UniversalTaskScanner:
                 failed_task_ids=[task.id for task in failed_tasks],
             )
             await asyncio.sleep(5)
-            retry_tasks = await self._fetch_all_tasks(page)
+            retry_tasks = await self._run_with_timeout(
+                "Retry inventory refresh",
+                self._fetch_all_tasks(page),
+                self._task_verification_refresh_timeout_seconds,
+                default=None,
+                scope="task-retry",
+            )
+            if retry_tasks is None:
+                failed_tasks = still_failed if 'still_failed' in locals() else failed_tasks
+                self._diag(
+                    "Retry round aborted after inventory refresh timeout",
+                    level="warning",
+                    scope="task-retry",
+                    round=retry_round + 1,
+                )
+                break
             
             still_failed = []
             retried = 0
@@ -629,9 +699,7 @@ class UniversalTaskScanner:
                         scope="task-retry",
                         **self._task_diag_payload(rt),
                     )
-                    success = await self._execute_task(page, rt)
-                    if success:
-                        success = await self._verify_task_completion(page, rt)
+                    success = await self._run_task_attempt(page, rt)
                     
                     if success:
                         retried += 1
@@ -855,7 +923,23 @@ class UniversalTaskScanner:
         for attempt in range(max_attempts):
             try:
                 await asyncio.sleep(initial_wait if attempt == 0 else 5)
-                refreshed_tasks = await self._fetch_all_tasks(page)
+                refreshed_tasks = await self._run_with_timeout(
+                    "Task verification refresh",
+                    self._fetch_all_tasks(page),
+                    self._task_verification_refresh_timeout_seconds,
+                    task=task,
+                    default=None,
+                    scope="task-verify",
+                )
+                if refreshed_tasks is None:
+                    self._diag(
+                        "Verification aborted after refresh timeout",
+                        level="warning",
+                        scope="task-verify",
+                        attempt=attempt + 1,
+                        **self._task_diag_payload(task),
+                    )
+                    return False
                 self._diag(
                     "Fetched fresh task inventory for verification attempt",
                     scope="task-verify",
@@ -876,14 +960,14 @@ class UniversalTaskScanner:
                 )
 
                 if refreshed is None:
+                    title_still_present = any(
+                        candidate.category == task.category
+                        and self._normalized_task_title_key(candidate.title or "")
+                        == self._normalized_task_title_key(task.title or "")
+                        for candidate in refreshed_tasks
+                    )
                     if task.category == "daily_set":
                         proof = self._get_daily_set_execution_proof(task)
-                        title_still_present = any(
-                            candidate.category == task.category
-                            and self._normalized_task_title_key(candidate.title or "")
-                            == self._normalized_task_title_key(task.title or "")
-                            for candidate in refreshed_tasks
-                        )
                         if (
                             proof
                             and proof.get("state") in {"attempted_only", "panel_control_failed"}
@@ -909,6 +993,19 @@ class UniversalTaskScanner:
                                 **self._task_diag_payload(task),
                             )
                             return True
+                    if (
+                        task.category == "more_promo"
+                        and task.raw_data.get("_interaction_fired")
+                        and not title_still_present
+                    ):
+                        self._diag(
+                            "Keep-earning verification accepted inventory disappearance after live interaction",
+                            scope="task-verify",
+                            attempt=attempt + 1,
+                            interaction_url=task.raw_data.get("_interaction_url", ""),
+                            **self._task_diag_payload(task),
+                        )
+                        return True
                     if strict_completion:
                         self._log(
                             "info",
@@ -1233,7 +1330,13 @@ class UniversalTaskScanner:
                     )
                     await asyncio.sleep(3)
 
-                dom_tasks = await scan_dashboard_dom(page)
+                dom_tasks = await self._run_with_timeout(
+                    "Rewards DOM scan",
+                    scan_dashboard_dom(page),
+                    self._task_fetch_timeout_seconds,
+                    default=[],
+                    scope="task-scan",
+                )
 
                 for dt in dom_tasks:
                     task = RewardsTask()
@@ -1365,9 +1468,16 @@ class UniversalTaskScanner:
                     settings=self.settings,
                     ai_agent=self.ai_agent,
                 )
-                daily_stats = await daily_set.complete_daily_set(
-                    page,
-                    expected_title=task.title,
+                daily_stats = await self._run_with_timeout(
+                    "Daily Set executor",
+                    daily_set.complete_daily_set(
+                        page,
+                        expected_title=task.title,
+                    ),
+                    self._task_quiz_timeout_seconds,
+                    task=task,
+                    default={"state": "timed_out"},
+                    scope="task-run",
                 )
                 proof = self._store_daily_set_execution_proof(
                     task,
@@ -1483,18 +1593,38 @@ class UniversalTaskScanner:
             promo_handled = False
 
             if task.category == "more_promo":
-                promo_handled = await self._complete_known_more_promo(working_page, task)
+                promo_handled = bool(
+                    await self._run_with_timeout(
+                        "Keep earning handler",
+                        self._complete_known_more_promo(working_page, task),
+                        self._task_page_agent_timeout_seconds,
+                        task=task,
+                        default=False,
+                        scope="promo-handler",
+                    )
+                )
+
+            action_succeeded = True
 
             if promo_handled:
                 pass
             elif promo_type == "quiz" or task.task_type == "quiz":
-                # Quiz: try to solve
-                await self._complete_quiz(working_page, task)
+                # Quiz: try to solve, but never let one quiz tab stall the whole account.
+                quiz_ok = await self._run_with_timeout(
+                    "Quiz completion",
+                    self._complete_quiz(working_page, task),
+                    self._task_quiz_timeout_seconds,
+                    task=task,
+                    default=False,
+                    scope="task-run",
+                )
+                action_succeeded = bool(quiz_ok)
             elif "poll" in (task.title or "").lower() or task.task_type == "poll":
                 # Poll: click a random option
                 await self._complete_poll(working_page, task)
             elif task.task_type == "unknown":
-                
+                fast_visit_promo = bool(task.category == "more_promo" and task.destination_url)
+
                 # Check for existing self-learned Macro first
                 macro_ok = False
                 if self._macro_player.has_macro(task.title):
@@ -1503,16 +1633,28 @@ class UniversalTaskScanner:
                         await asyncio.sleep(2)
                         macro_ok = True
                         
+                if not macro_ok and fast_visit_promo:
+                    self._log("info", "  ⚡ Trying fast visit fallback for unknown keep-earning task")
+                    await self._complete_visit(working_page, task)
+                    macro_ok = True
+
                 # Try page-agent (browser-side LLM with Rewards knowledge)
                 pa_ok = macro_ok
                 if not macro_ok and self._page_agent:
                     self._log("info", "  🌐 Trying page-agent on unknown activity")
                     try:
-                        pa_result = await self._page_agent.run_single_task(
-                            working_page,
-                            f"Complete this Microsoft Rewards activity: "
-                            f"{task.title}. {task.description}",
-                            timeout=120.0,
+                        pa_result = await self._run_with_timeout(
+                            "Unknown-activity page-agent",
+                            self._page_agent.run_single_task(
+                                working_page,
+                                f"Complete this Microsoft Rewards activity: "
+                                f"{task.title}. {task.description}",
+                                timeout=self._task_page_agent_timeout_seconds,
+                            ),
+                            self._task_page_agent_timeout_seconds + 10,
+                            task=task,
+                            default={"success": False},
+                            scope="task-run",
                         )
                         pa_ok = pa_result.get("success", False)
                         
@@ -1526,12 +1668,19 @@ class UniversalTaskScanner:
                 # Then try Python-side AI agent
                 if not pa_ok and self.ai_agent and self.ai_agent.enabled:
                     self._log("info", "  🤖 Trying AI fallback on unknown activity")
-                    ai_result = await self.ai_agent.complete_task_on_page(
-                        working_page,
-                        "Complete this Microsoft Rewards activity. "
-                        f"Title: {task.title}. "
-                        f"Description: {task.description}. "
-                        "Use the current page context to finish the task or reach a completed state.",
+                    ai_result = await self._run_with_timeout(
+                        "Unknown-activity AI fallback",
+                        self.ai_agent.complete_task_on_page(
+                            working_page,
+                            "Complete this Microsoft Rewards activity. "
+                            f"Title: {task.title}. "
+                            f"Description: {task.description}. "
+                            "Use the current page context to finish the task or reach a completed state.",
+                        ),
+                        self._task_ai_timeout_seconds,
+                        task=task,
+                        default={"success": False},
+                        scope="task-run",
                     )
                     if not ai_result.get("success"):
                         self._log("info", "  ⚠️ AI could not finish unknown activity, falling back to visit flow")
@@ -1541,6 +1690,10 @@ class UniversalTaskScanner:
             else:
                 # URL reward / visit: just visit and interact
                 await self._complete_visit(working_page, task)
+
+            if action_succeeded:
+                task.raw_data["_interaction_fired"] = True
+                task.raw_data["_interaction_url"] = working_page.url
 
             # 5. Clean up: close new tab and go back to rewards page
             if new_tab:
@@ -1557,7 +1710,7 @@ class UniversalTaskScanner:
             except Exception:
                 pass
 
-            return True
+            return action_succeeded
 
         except Exception as e:
             logger.warning(f"Task execution failed: {task.title[:30]}: {e}")
@@ -2423,9 +2576,10 @@ class UniversalTaskScanner:
         except Exception:
             pass
 
-    async def _complete_quiz(self, page: Page, task: RewardsTask) -> None:
+    async def _complete_quiz(self, page: Page, task: RewardsTask) -> bool:
         """Complete a quiz using JS quiz info or QuizSolver."""
         try:
+            self._log("info", "  🧩 Starting quiz handler")
             # Click "Start Quiz" if present
             for start_sel in ['#rqStartQuiz', 'input[value="Start playing"]']:
                 try:
@@ -2490,7 +2644,7 @@ class UniversalTaskScanner:
                         await asyncio.sleep(random.uniform(2, 4))
 
                     await asyncio.sleep(random.uniform(1, 3))
-                return
+                return True
 
             # Fallback: try QuizSolver
             try:
@@ -2498,7 +2652,7 @@ class UniversalTaskScanner:
                 qs = QuizSolver(self.humanizer)
                 if await qs.detect_and_solve(page):
                     self._log("info", "  🧩 Quiz solved by QuizSolver")
-                    return
+                    return True
             except Exception as e:
                 logger.debug(f"QuizSolver failed: {e}")
 
@@ -2515,7 +2669,7 @@ class UniversalTaskScanner:
                     )
                     if pa_result.get("success"):
                         self._log("info", "  🌐 Quiz solved by page-agent")
-                        return
+                        return True
                 except Exception as e:
                     logger.debug(f"Page-agent quiz fallback failed: {e}")
 
@@ -2528,15 +2682,17 @@ class UniversalTaskScanner:
                         f"Click the correct answers. Title: {task.title}",
                     )
                     if result.get("success"):
-                        return
+                        return True
                 except Exception:
                     pass
 
             # Last resort: simulate reading
             await self.humanizer.simulate_reading(page, random.uniform(5, 10))
+            return True
 
         except Exception as e:
             logger.warning(f"Quiz attempt failed: {e}")
+            return False
 
     # ── AI-Driven Earn Page Smart Scan ────────────────────────────────────
 

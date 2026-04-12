@@ -3221,45 +3221,17 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                     except Exception as e:
                         add_log("warning", f"⚠️ Verification error: {e}")
 
-                # ── Bing App Rewards (Read to Earn & Check-in) ──
+                # ── Bing App Rewards intentionally skipped ──────────────────
                 if task == "all":
-                    state["current_task"] = "Bing App Rewards"
-                    try:
-                        import random as _rng
-                        from src.mobile_app import BingAppRewards
-                    
-                        bing_app_settings = dict(settings)
-                        bing_app_settings["use_stealth"] = False
-                        bm_app = BrowserManager(bing_app_settings)
-                        bm_app.set_account(email)
-                        await bm_app.start()
-                    
-                        bing_app_ua = _rng.choice(BingAppRewards.BING_APP_UA)
-                        ctx_app, page_app = await _open_account_context(
-                            bm_app,
-                            login_mgr,
-                            account,
-                            session_proxy,
-                            "mobile",
-                            storage_state_path,
-                            user_agent=bing_app_ua,
-                            use_persistent_profile=False,
-                        )
-
-                        # app_rewards = BingAppRewards(humanizer)
-                    
-                        # 1. Read to Earn
-                        # if settings.get("bing_app_read_to_earn", True):
-                        #     await app_rewards.read_to_earn(page_app)
-                        
-                        # 2. Daily Check-in
-                        # if settings.get("bing_app_checkin", True):
-                        #     await app_rewards.daily_checkin(page_app)
-                        
-                        await _persist_storage_state(ctx_app, storage_state_path)
-                        await bm_app.close()
-                    except Exception as e:
-                        add_log("warning", f"⚠️ Bing App Rewards error: {e}")
+                    add_log("info", "⏭️ Skipping Bing App Rewards (phone-only flow disabled)")
+                    _diag_log(
+                        settings,
+                        "Skipped Bing App Rewards during all-task run",
+                        scope="bing-app",
+                        account=mask_email(email),
+                        bing_app_read_to_earn=bool(settings.get("bing_app_read_to_earn", False)),
+                        bing_app_checkin=bool(settings.get("bing_app_checkin", False)),
+                    )
 
                 # Edge Browsing Streak is already handled above in the Edge Session block
                 # (lines 573-600) — no duplicate needed
