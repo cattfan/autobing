@@ -594,6 +594,24 @@ def _mobile_credit_delta(before_status: dict, after_status: dict) -> int:
     )
 
 
+def _total_points_delta(before_status: dict, after_status: dict) -> int:
+    return max(
+        0,
+        int(after_status.get("total_points", 0))
+        - int(before_status.get("total_points", 0)),
+    )
+
+
+def _edge_streak_attempt_allowed(edge_streak_info: dict) -> bool:
+    """Return True when the native Edge streak loop should run."""
+    info = edge_streak_info or {}
+    exists = bool(info.get("exists", False))
+    done = bool(info.get("done", False))
+    minutes_done = int(info.get("minutes", 0) or 0)
+    minutes_target = int(info.get("target", 30) or 30)
+    return exists and not done and minutes_done < minutes_target
+
+
 def _effective_max_threads(settings: dict) -> tuple[int, str]:
     """Return the configured dashboard account concurrency.
 
@@ -656,11 +674,19 @@ async def _wait_for_mobile_credit_update(searcher, page, settings: dict, *, base
             baseline=summarize_search_status(baseline_status),
             latest=summarize_search_status(latest_status),
         )
-        if _mobile_credit_delta(baseline_status, latest_status) > 0:
+        mobile_delta = _mobile_credit_delta(baseline_status, latest_status)
+        points_delta = _total_points_delta(baseline_status, latest_status)
+        if mobile_delta > 0:
             add_log(
                 "info",
                 f"📱 Mobile credits advanced after pass on attempt {attempt + 1}: "
                 f"{latest_status.get('mobile_current', 0)}/{latest_status.get('mobile_max', 0)}",
+            )
+            return latest_status
+        if points_delta > 0:
+            add_log(
+                "info",
+                f"📱 Total points advanced after mobile pass on attempt {attempt + 1}: +{points_delta}",
             )
             return latest_status
 
@@ -696,6 +722,39 @@ def _empty_search_status() -> dict:
         "edge_max": 0,
         "total_points": 0,
     }
+
+
+def _merge_search_status_sources(primary_status: dict, fallback_status: dict) -> dict:
+    """Merge search counters from two readers, preferring the strongest non-zero evidence."""
+    merged = dict(primary_status or {})
+    fallback_status = fallback_status or {}
+    for current_key, max_key in (
+        ("pc_current", "pc_max"),
+        ("mobile_current", "mobile_max"),
+        ("edge_current", "edge_max"),
+    ):
+        primary_pair = (
+            int(merged.get(current_key, 0) or 0),
+            int(merged.get(max_key, 0) or 0),
+        )
+        fallback_pair = (
+            int(fallback_status.get(current_key, 0) or 0),
+            int(fallback_status.get(max_key, 0) or 0),
+        )
+        if fallback_pair[1] > primary_pair[1] or (
+            fallback_pair[1] == primary_pair[1] and fallback_pair[0] > primary_pair[0]
+        ):
+            merged[current_key], merged[max_key] = fallback_pair
+    merged["total_points"] = max(
+        int(merged.get("total_points", 0) or 0),
+        int(fallback_status.get("total_points", 0) or 0),
+    )
+    return merged
+
+
+def _mode_status_resolved(status: dict, mode: str) -> bool:
+    current_value, max_value = _mode_credit(status, mode)
+    return current_value > 0 or max_value > 0
 
 
 async def _read_search_status_for_runtime_descriptor(
@@ -805,7 +864,19 @@ async def _read_search_status_for_runtime_descriptor(
             await browser_mgr.toggle_mobile_emulation(page, enable=True)
             await asyncio.sleep(1)
 
-        status = await _read_search_status_with_mobile_recheck(searcher, page, settings)
+        status = await _read_search_status_with_mobile_recheck(
+            searcher,
+            page,
+            settings,
+            recheck_mobile=(mode == "mobile" and live_for_account_run),
+        )
+        if not _mode_status_resolved(status, mode):
+            return status, build_search_verification(
+                mode,
+                runtime_descriptor,
+                verified=False,
+                reason="ambiguous_search_status",
+            )
         return status, build_search_verification(
             mode,
             runtime_descriptor,
@@ -1709,9 +1780,27 @@ def _needs_mobile_credit_recheck(status: dict, settings: dict) -> bool:
     return mobile_searches > 0 and current == 0 and maximum == 0
 
 
-async def _read_search_status_with_mobile_recheck(searcher, page, settings: dict) -> dict:
+async def _read_search_status_with_mobile_recheck(
+    searcher,
+    page,
+    settings: dict,
+    *,
+    recheck_mobile: bool = True,
+) -> dict:
     """Retry Rewards counters when mobile credits come back as an ambiguous 0/0."""
     status = await searcher.get_search_points_status(page)
+    if recheck_mobile and _needs_mobile_credit_recheck(status, settings):
+        try:
+            task_status = await TaskDetector.get_all_tasks(page)
+            status = _merge_search_status_sources(
+                status,
+                {
+                    **task_status.get("searches", {}),
+                    "total_points": task_status.get("total_points", 0),
+                },
+            )
+        except Exception as e:
+            logger.debug(f"TaskDetector search-status fallback skipped: {e}")
     _diag_log(
         settings,
         "Initial search-credit read",
@@ -1719,7 +1808,7 @@ async def _read_search_status_with_mobile_recheck(searcher, page, settings: dict
         status=summarize_search_status(status),
         page_url=getattr(page, "url", ""),
     )
-    if not _needs_mobile_credit_recheck(status, settings):
+    if not recheck_mobile or not _needs_mobile_credit_recheck(status, settings):
         return status
 
     retries = max(1, int(settings.get("mobile_credit_recheck_attempts", 2)))
@@ -1728,7 +1817,20 @@ async def _read_search_status_with_mobile_recheck(searcher, page, settings: dict
     add_log("info", "📱 Mobile credits returned 0/0; rechecking before skip.")
     for attempt in range(retries):
         await asyncio.sleep(delay_seconds)
-        status = await searcher.get_search_points_status(page)
+        refreshed = await searcher.get_search_points_status(page)
+        if _needs_mobile_credit_recheck(refreshed, settings):
+            try:
+                task_status = await TaskDetector.get_all_tasks(page)
+                refreshed = _merge_search_status_sources(
+                    refreshed,
+                    {
+                        **task_status.get("searches", {}),
+                        "total_points": task_status.get("total_points", 0),
+                    },
+                )
+            except Exception as e:
+                logger.debug(f"TaskDetector search-status fallback skipped on retry: {e}")
+        status = refreshed
         _diag_log(
             settings,
             "Mobile credit recheck attempt finished",
@@ -2098,6 +2200,13 @@ async def _collect_final_verification(
     if search_verification_override is not None:
         snapshot["search_verification"] = dict(search_verification_override)
     snapshot["task_overview"] = await TaskDetector().get_all_tasks(page)
+    snapshot["search_status"] = _merge_search_status_sources(
+        snapshot["search_status"],
+        {
+            **snapshot["task_overview"].get("searches", {}),
+            "total_points": snapshot["task_overview"].get("total_points", 0),
+        },
+    )
 
     try:
         scanner = UniversalTaskScanner(
@@ -2571,22 +2680,93 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                 add_log("info", f"⏩ Edge searches already complete ({edge_done}/{edge_max})")
 
                         # Close search browser before streak
-                        await _persist_storage_state(ctx3, storage_state_path)
-                        await bm3.close()
-
-                        session_proofs["ignore_edge_streak"] = True
                         gpm_edge_session = bool(gpm_enabled and gpm_profile_id)
                         if gpm_edge_session:
+                            await _persist_storage_state(ctx3, storage_state_path)
+                            await bm3.close()
+                            session_proofs["ignore_edge_streak"] = True
                             add_log("info", "⏩ Skipping Edge Browsing Streak for GPM profile")
                         else:
-                            add_log(
-                                "info",
-                                "ℹ️ Edge Browsing Streak reporting is suppressed after the Edge session for this run",
-                            )
+                            task_detector = TaskDetector()
+                            edge_streak_info = (await task_detector.get_all_tasks(page3)).get("streaks", {}).get("edge", {})
+                            minutes_done = edge_streak_info.get("minutes", 0)
+                            minutes_target = edge_streak_info.get("target", 30)
+                            streak_done = edge_streak_info.get("done", False)
+
+                            if not edge_streak_info.get("exists", False):
+                                session_proofs["ignore_edge_streak"] = True
+                                add_log("info", "⏩ Edge Browsing Streak task is not available")
+                                _update_account_state(account_key, task="Edge Session", progress=edge_done, progress_total=max(edge_max, 0))
+                            elif streak_done or minutes_done >= minutes_target:
+                                add_log("info", f"⏩ Edge Browsing Streak already complete ({minutes_done}/{minutes_target})")
+                                session_proofs["ignore_edge_streak"] = False
+                                _update_account_state(account_key, task="Edge Session", progress=minutes_target, progress_total=minutes_target)
+                            elif not _edge_streak_attempt_allowed(edge_streak_info):
+                                add_log("info", "⏩ Edge Browsing Streak is not actionable in this run")
+                                session_proofs["ignore_edge_streak"] = False
+                                _update_account_state(account_key, task="Edge Session", progress=minutes_done, progress_total=minutes_target)
+                            else:
+                                remaining_minutes = max(0, minutes_target - minutes_done)
+                                run_minutes = remaining_minutes + 5
+                                add_log("info", f"🌐 Edge Browsing Streak — {minutes_done}/{minutes_target} min ({remaining_minutes} left)")
+                                state["current_task"] = "Edge Browsing Streak"
+                                state["progress"] = minutes_done
+                                state["progress_total"] = minutes_target
+                                _update_account_state(
+                                    account_key,
+                                    task="Edge Browsing Streak",
+                                    progress=minutes_done,
+                                    progress_total=minutes_target,
+                                )
+                                native_streak = NativeEdgeStreak(account_email=email)
+
+                                def on_streak_progress(done, total):
+                                    credited_now = min(minutes_done + done, minutes_target)
+                                    state["current_task"] = "Edge Browsing Streak"
+                                    state["progress"] = credited_now
+                                    state["progress_total"] = minutes_target
+                                    _update_account_state(
+                                        account_key,
+                                        task="Edge Browsing Streak",
+                                        progress=credited_now,
+                                        progress_total=minutes_target,
+                                    )
+
+                                await native_streak.browse(
+                                    target_minutes=run_minutes,
+                                    on_progress=on_streak_progress,
+                                )
+
+                                try:
+                                    refreshed_tasks = await task_detector.get_all_tasks(page3)
+                                    edge_streak_info = refreshed_tasks.get("streaks", {}).get("edge", {})
+                                    refreshed_minutes = edge_streak_info.get("minutes", minutes_done)
+                                    refreshed_target = edge_streak_info.get("target", minutes_target)
+                                    _update_account_state(
+                                        account_key,
+                                        task="Edge Browsing Streak",
+                                        progress=refreshed_minutes,
+                                        progress_total=refreshed_target,
+                                    )
+                                except Exception as verify_error:
+                                    add_log("warning", f"⚠️ Edge streak verify failed: {verify_error}")
+                                session_proofs["ignore_edge_streak"] = not bool(edge_streak_info.get("exists", False))
+
+                            try:
+                                await asyncio.wait_for(
+                                    _persist_storage_state(ctx3, storage_state_path),
+                                    timeout=12,
+                                )
+                            except Exception as persist_error:
+                                add_log("warning", f"⚠️ Edge session storage persist timed out: {persist_error}")
+                            try:
+                                await asyncio.wait_for(bm3.close(), timeout=15)
+                            except Exception as close_error:
+                                add_log("warning", f"⚠️ Edge session shutdown timed out: {close_error}")
                     except Exception as e:
                         add_log("warning", f"⚠️ Edge session error: {e}")
                         try:
-                            await bm3.close()
+                            await asyncio.wait_for(bm3.close(), timeout=15)
                         except Exception:
                             pass
 
@@ -2717,7 +2897,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                         scan_result = await scanner.scan_and_complete(
                             page, account_email=email,
                         )
-                        session_proofs = dict(scan_result.get("session_proofs", {}))
+                        session_proofs.update(scan_result.get("session_proofs", {}))
                         add_log("info",
                                 f"🧠 Smart Scanner: {scan_result['completed']}/{scan_result['total']} completed, "
                                 f"{scan_result['skipped_locked']} locked, {scan_result['failed']} failed")
@@ -3086,6 +3266,11 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                     status_before_mobile,
                                     status_after_mobile,
                                 )
+                                points_delta = _total_points_delta(
+                                    status_before_mobile,
+                                    status_after_mobile,
+                                )
+                                credit_proven = credit_delta > 0 or points_delta > 0
                                 add_log(
                                     "info",
                                     f"📱 Mobile: {mob_result.get('completed', 0)}/{mob_searches} OK, "
@@ -3098,6 +3283,12 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                         f"{credit_delta} points "
                                         f"({status_after_mobile.get('mobile_current', 0)}/"
                                         f"{status_after_mobile.get('mobile_max', 0)})",
+                                    )
+                                elif points_delta > 0:
+                                    add_log(
+                                        "info",
+                                        "📱 Mobile search pass credited via total-points delta "
+                                        f"(+{points_delta}) while counters stayed ambiguous",
                                     )
                                 else:
                                     add_log(
@@ -3116,6 +3307,8 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                     before=summarize_search_status(status_before_mobile),
                                     after=summarize_search_status(status_after_mobile),
                                     credit_delta=credit_delta,
+                                    points_delta=points_delta,
+                                    credit_proven=credit_proven,
                                 )
                                 _update_account_state(
                                     account_key,

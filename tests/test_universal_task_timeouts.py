@@ -32,6 +32,38 @@ class _FakePage:
 
 
 class UniversalTaskTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scan_skips_hidden_ai_scans_when_inventory_is_empty(self):
+        humanizer = SimpleNamespace(
+            simulate_reading=AsyncMock(),
+            short_delay=AsyncMock(),
+        )
+        ai_agent = SimpleNamespace(
+            enabled=True,
+            complete_quests=AsyncMock(return_value={"success": True}),
+        )
+        scanner = UniversalTaskScanner(
+            humanizer=humanizer,
+            settings={},
+            ai_agent=ai_agent,
+        )
+        page = _FakePage()
+
+        scanner._ensure_no_manual_challenge = AsyncMock()
+        scanner._fetch_all_tasks = AsyncMock(return_value=[])
+        scanner._dom_verify_task_status = AsyncMock(return_value=set())
+        scanner._apply_live_category_completion_proofs = AsyncMock(return_value={})
+        scanner._scan_explore_on_bing = AsyncMock(return_value=2)
+
+        with patch("src.universal_task._load_state", return_value={}), \
+             patch("src.universal_task._save_state"), \
+             patch("src.universal_task.asyncio.sleep", new=AsyncMock()):
+            result = await scanner.scan_and_complete(page, account_email="test@example.com")
+
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["completed"], 0)
+        ai_agent.complete_quests.assert_not_awaited()
+        scanner._scan_explore_on_bing.assert_not_awaited()
+
     async def test_verify_task_completion_fails_fast_when_refresh_times_out(self):
         humanizer = SimpleNamespace(simulate_reading=AsyncMock())
         scanner = UniversalTaskScanner(humanizer=humanizer, settings={})

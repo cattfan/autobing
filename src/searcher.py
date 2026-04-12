@@ -263,7 +263,7 @@ class Searcher:
                 else:
                     method = random.choices(
                         ["searchbox", "url_direct"],
-                        weights=[55, 45],
+                        weights=[72, 28],
                     )[0]
 
                 if method == "url_direct":
@@ -556,7 +556,7 @@ class Searcher:
             except Exception:
                 raise
 
-    @retry(max_retries=2, delay=2)
+    @retry(max_retries=1, delay=1.5)
     async def _search_via_url(self, page: Page, query: str, cur: int, total: int) -> bool:
         """Search by navigating directly to search URL (like typing in address bar)."""
         logger.info(f"[{cur}/{total}] Search (url): \"{query}\"")
@@ -575,7 +575,7 @@ class Searcher:
                 suffix = random.choice(["", "&form=QBLH", "&qs=n", "&form=QBRE"])
             url = f"{BING_SEARCH_URL}?q={encoded}{suffix}"
 
-            await self._safe_navigate(page, url)
+            await self._safe_navigate(page, url, timeout=10000)
             await asyncio.sleep(random.uniform(1, 2))
             await self._check_safety_signals(page)
 
@@ -602,22 +602,22 @@ class Searcher:
         """
         roll = random.random()
 
-        if roll < 0.35:
+        if roll < 0.22:
             # Click a result, spend time reading, go back
             await self._click_random_result(page)
-        elif roll < 0.50:
+        elif roll < 0.34:
             # Hover over results (reading snippets without clicking)
             hover_count = random.randint(1, 3)
             for _ in range(hover_count):
                 await self._hover_result(page)
                 await asyncio.sleep(random.uniform(0.5, 1.5))
-        elif roll < 0.60:
+        elif roll < 0.42:
             # Click related searches (natural exploration)
             await self._click_related(page)
-        elif roll < 0.65:
+        elif roll < 0.46:
             # Scroll to page 2 of results
             await self._browse_page2(page)
-        elif roll < 0.70:
+        elif roll < 0.52:
             # Deep scroll through results
             for _ in range(random.randint(2, 4)):
                 await self.humanizer.natural_scroll(page, "down", random.randint(300, 600))

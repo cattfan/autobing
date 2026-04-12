@@ -728,8 +728,12 @@ class UniversalTaskScanner:
                 
             failed_tasks = still_failed
 
+        should_scan_hidden_rewards = stats["total"] > 0
+        if not should_scan_hidden_rewards:
+            self._log("info", "🪶 No API task inventory found; skipping hidden earn-page scans")
+
         # ── Quests (AI-driven multi-step cards) ──
-        if "quests" not in skip_categories and self.ai_agent and self.ai_agent.enabled:
+        if should_scan_hidden_rewards and "quests" not in skip_categories and self.ai_agent and self.ai_agent.enabled:
             try:
                 self._log("info", "🗺️ AI Smart Scan – checking /earn page for Quests...")
                 quest_res = await self.ai_agent.complete_quests(page)
@@ -739,7 +743,7 @@ class UniversalTaskScanner:
                 self._log("debug", f"Quests scan softly failed: {e}")
 
         # ── Explore on Bing (DOM-scraped from /earn page) ──
-        if "explore" not in skip_categories:
+        if should_scan_hidden_rewards and "explore" not in skip_categories:
             try:
                 explore_done = await self._scan_explore_on_bing(page)
                 stats["completed"] += explore_done
@@ -749,8 +753,11 @@ class UniversalTaskScanner:
         self._log("info",
                    f"✅ Tasks: {stats['completed']}/{stats['total']} completed, "
                    f"{stats['skipped_locked']} locked, {stats['failed']} failed")
+        daily_category = stats.get("by_category", {}).get("daily_set", {})
+        daily_completed = int(daily_category.get("completed", 0)) + int(daily_category.get("skipped_done", 0))
+        daily_total = int(daily_category.get("total", 0))
         stats["session_proofs"] = {
-            "daily_set_complete": "daily_set" in self._session_completed_categories,
+            "daily_set_complete": "daily_set" in self._session_completed_categories or (daily_total > 0 and daily_completed >= daily_total),
             "daily_set_titles": sorted(self._session_daily_set_titles),
         }
         self._diag(
@@ -1348,7 +1355,12 @@ class UniversalTaskScanner:
                     task.destination_url = dt["url"]
                     task.is_complete = False
                     task.category = dt["category"]
-                    task.task_type = "quiz" if dt["is_quiz"] else "unknown"
+                    if dt["is_quiz"]:
+                        task.task_type = "quiz"
+                    elif "bing.com/search" in (dt["url"] or "").lower():
+                        task.task_type = "search"
+                    else:
+                        task.task_type = "unknown"
                     task.offer_id = ""
                     task.raw_data = {
                         "element_index": dt["element_index"],
@@ -1619,6 +1631,16 @@ class UniversalTaskScanner:
                     scope="task-run",
                 )
                 action_succeeded = bool(quiz_ok)
+            elif task.category == "more_promo" and task.task_type == "search":
+                promo_search_ok = await self._run_with_timeout(
+                    "Keep earning search incentive",
+                    self._complete_search_incentive_offer(working_page, task),
+                    self._task_page_agent_timeout_seconds,
+                    task=task,
+                    default=False,
+                    scope="promo-search",
+                )
+                action_succeeded = bool(promo_search_ok)
             elif "poll" in (task.title or "").lower() or task.task_type == "poll":
                 # Poll: click a random option
                 await self._complete_poll(working_page, task)

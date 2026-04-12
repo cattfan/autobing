@@ -9,15 +9,18 @@ from src.dashboard import (
     _account_timeout_seconds,
     _build_profile_summary,
     _build_profile_views,
+    _collect_final_verification,
     _ensure_dashboard_bind_is_safe,
     _describe_remaining_items,
     _ensure_usable_desktop_search_page,
     _reconcile_verification_with_session_proof,
     _effective_max_threads,
     _profile_lock_keys_for_account,
+    _read_search_status_with_mobile_recheck,
     _read_search_status_for_runtime_descriptor,
     _resolve_desktop_search_requirement,
     _select_mobile_runtime_strategy,
+    _wait_for_mobile_credit_update,
 )
 from src.runtime_identity import (
     build_runtime_descriptor,
@@ -291,6 +294,86 @@ class DashboardStatusTests(unittest.TestCase):
 
 
 class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dashboard_search_status_uses_task_detector_fallback_before_retry(self):
+        settings = {
+            "mobile_searches": 60,
+            "mobile_credit_recheck_attempts": 2,
+            "mobile_credit_recheck_delay_seconds": 1,
+        }
+        ambiguous = {
+            "pc_current": 0,
+            "pc_max": 0,
+            "mobile_current": 0,
+            "mobile_max": 0,
+            "edge_current": 0,
+            "edge_max": 0,
+            "total_points": 3454,
+        }
+        page = SimpleNamespace(url="https://rewards.bing.com/about")
+        searcher = AsyncMock()
+        searcher.get_search_points_status = AsyncMock(return_value=ambiguous)
+
+        with patch(
+            "src.dashboard.TaskDetector.get_all_tasks",
+            new=AsyncMock(return_value={
+                "searches": {
+                    "pc_current": 66,
+                    "pc_max": 90,
+                    "mobile_current": 57,
+                    "mobile_max": 60,
+                },
+                "total_points": 3454,
+            }),
+        ), patch("src.dashboard.asyncio.sleep", new=AsyncMock()):
+            status = await _read_search_status_with_mobile_recheck(
+                searcher,
+                page,
+                settings,
+            )
+
+        self.assertEqual(status["pc_current"], 66)
+        self.assertEqual(status["pc_max"], 90)
+        self.assertEqual(status["mobile_current"], 57)
+        self.assertEqual(status["mobile_max"], 60)
+        searcher.get_search_points_status.assert_awaited_once()
+
+    async def test_mobile_credit_postcheck_stops_after_total_points_advance(self):
+        baseline = {
+            "pc_current": 0,
+            "pc_max": 0,
+            "mobile_current": 0,
+            "mobile_max": 0,
+            "edge_current": 0,
+            "edge_max": 0,
+            "total_points": 3397,
+        }
+        after = {
+            "pc_current": 0,
+            "pc_max": 0,
+            "mobile_current": 0,
+            "mobile_max": 0,
+            "edge_current": 0,
+            "edge_max": 0,
+            "total_points": 3454,
+        }
+
+        with patch(
+            "src.dashboard._read_search_status_with_mobile_recheck",
+            new=AsyncMock(return_value=after),
+        ) as read_status, patch("src.dashboard.asyncio.sleep", new=AsyncMock()):
+            status = await _wait_for_mobile_credit_update(
+                AsyncMock(),
+                object(),
+                {
+                    "mobile_credit_postcheck_attempts": 3,
+                    "mobile_credit_postcheck_delay_seconds": 6,
+                },
+                baseline_status=baseline,
+            )
+
+        self.assertEqual(status["total_points"], 3454)
+        read_status.assert_awaited_once()
+
     async def test_live_gpm_desktop_requirement_resolution_falls_back_to_original_probe_when_dedicated_probe_stays_ambiguous(self):
         settings = {"desktop_searches": 30}
         baseline = {"pc_current": 0, "pc_max": 0}
@@ -449,6 +532,78 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(meta["verified"])
         browser_mgr.close.assert_awaited_once()
 
+    async def test_runtime_descriptor_reader_skips_mobile_recheck_for_desktop_track(self):
+        browser_mgr = SimpleNamespace(
+            set_account=lambda _email: None,
+            start=AsyncMock(),
+            toggle_mobile_emulation=AsyncMock(),
+            close=AsyncMock(),
+        )
+        ctx = object()
+        page = object()
+        read_status = AsyncMock(return_value={
+            "pc_current": 66,
+            "pc_max": 90,
+            "mobile_current": 0,
+            "mobile_max": 0,
+            "edge_current": 0,
+            "edge_max": 0,
+            "total_points": 3454,
+        })
+
+        with patch("src.browser.BrowserManager", return_value=browser_mgr), \
+             patch("src.dashboard._open_account_context", new=AsyncMock(return_value=(ctx, page))), \
+             patch("src.dashboard._read_search_status_with_mobile_recheck", new=read_status), \
+             patch("src.dashboard._persist_storage_state", new=AsyncMock()):
+            _status, meta = await _read_search_status_for_runtime_descriptor(
+                {"use_stealth": False},
+                {"email": "test@example.com", "password": "pw"},
+                None,
+                AsyncMock(),
+                AsyncMock(),
+                Path("state.json"),
+                build_runtime_descriptor("managed_edge", "test@example.com", "desktop"),
+            )
+
+        self.assertTrue(meta["verified"])
+        self.assertFalse(read_status.await_args.kwargs["recheck_mobile"])
+
+    async def test_runtime_descriptor_reader_marks_ambiguous_zero_zero_as_unverified(self):
+        browser_mgr = SimpleNamespace(
+            set_account=lambda _email: None,
+            start=AsyncMock(),
+            toggle_mobile_emulation=AsyncMock(),
+            close=AsyncMock(),
+        )
+        ctx = object()
+        page = object()
+
+        with patch("src.browser.BrowserManager", return_value=browser_mgr), \
+             patch("src.dashboard._open_account_context", new=AsyncMock(return_value=(ctx, page))), \
+             patch("src.dashboard._read_search_status_with_mobile_recheck", new=AsyncMock(return_value={
+                 "pc_current": 0,
+                 "pc_max": 0,
+                 "mobile_current": 0,
+                 "mobile_max": 0,
+                 "edge_current": 0,
+                 "edge_max": 0,
+                 "total_points": 3454,
+             })), \
+             patch("src.dashboard._persist_storage_state", new=AsyncMock()):
+            status, meta = await _read_search_status_for_runtime_descriptor(
+                {"use_stealth": False},
+                {"email": "test@example.com", "password": "pw"},
+                None,
+                AsyncMock(),
+                AsyncMock(),
+                Path("state.json"),
+                build_runtime_descriptor("managed_edge", "test@example.com", "desktop"),
+            )
+
+        self.assertEqual(status["pc_current"], 0)
+        self.assertFalse(meta["verified"])
+        self.assertIn("ambiguous", meta["reason"])
+
     async def test_patchright_mobile_runtime_reader_reuses_mobile_family_without_emulation(self):
         ctx = object()
         page = SimpleNamespace(context=ctx)
@@ -536,6 +691,45 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(meta["verified"])
         browser_mgr.start_connected_edge.assert_awaited_once_with("http://127.0.0.1:9555")
         start_gpm.assert_not_awaited()
+
+    async def test_collect_final_verification_merges_task_overview_search_counters(self):
+        page = object()
+        scanner = SimpleNamespace(_fetch_all_tasks=AsyncMock(return_value=[]))
+
+        with patch(
+            "src.dashboard.TaskDetector.get_all_tasks",
+            new=AsyncMock(return_value={
+                "searches": {
+                    "pc_current": 66,
+                    "pc_max": 90,
+                    "mobile_current": 57,
+                    "mobile_max": 60,
+                },
+                "total_points": 3454,
+                "daily_set": {"completed": 3, "total": 3},
+                "streaks": {},
+            }),
+        ), patch("src.dashboard.UniversalTaskScanner", return_value=scanner):
+            snapshot = await _collect_final_verification(
+                page,
+                AsyncMock(),
+                SimpleNamespace(),
+                {},
+                search_status_override={
+                    "pc_current": 0,
+                    "pc_max": 0,
+                    "mobile_current": 0,
+                    "mobile_max": 0,
+                    "edge_current": 0,
+                    "edge_max": 0,
+                    "total_points": 3454,
+                },
+            )
+
+        self.assertEqual(snapshot["search_status"]["pc_current"], 66)
+        self.assertEqual(snapshot["search_status"]["pc_max"], 90)
+        self.assertEqual(snapshot["search_status"]["mobile_current"], 57)
+        self.assertEqual(snapshot["search_status"]["mobile_max"], 60)
 
     async def test_dead_desktop_page_reacquires_from_live_cdp(self):
         dead_page = SimpleNamespace(
