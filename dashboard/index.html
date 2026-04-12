@@ -643,6 +643,25 @@
     <div class="toast-box" id="toastMsg"></div>
   </div>
 
+  <div id="authGate" class="auth-gate hidden">
+    <div class="auth-panel">
+      <p class="panel-kicker">Dashboard Access</p>
+      <h3>Unlock command center</h3>
+      <p id="authGateMessage">Enter the dashboard password to access live data and control actions.</p>
+      <div class="field">
+        <label class="label" for="authPassword">Password</label>
+        <input id="authPassword" type="password" class="input" placeholder="Master password">
+      </div>
+      <div class="auth-actions">
+        <button id="authSubmitBtn" class="btn btn-primary" type="button" onclick="submitDashboardAuth()">Unlock</button>
+        <span id="authStatusText" class="auth-status-text"></span>
+      </div>
+    </div>
+  </div>
+
+  <script src="modules/overview-panels.js"></script>
+  <script src="modules/profile-surfaces.js"></script>
+  <script src="modules/dashboard-shell.js"></script>
   <script src="app.js"></script>
 </body>
 

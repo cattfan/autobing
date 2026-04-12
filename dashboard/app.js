@@ -14,6 +14,13 @@ const appState = {
   statusPayload: {},
   profiles: [],
   selectedProfileId: "",
+  profileHistory: {},
+  profileLogs: {},
+  profileDetailMeta: {},
+  profileDrawerOpen: false,
+  tickInFlight: false,
+  authRequired: false,
+  authenticated: true,
 };
 
 const PAGE_TITLES = {
@@ -99,6 +106,31 @@ function formatTimeOnly(value) {
   });
 }
 
+function formatSignedDelta(value) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount)) return "0";
+  if (amount > 0) return `+${amount.toLocaleString("vi-VN")}`;
+  if (amount < 0) return amount.toLocaleString("vi-VN");
+  return "0";
+}
+
+function trendGlyph(trend) {
+  if (trend === "up") return "↗";
+  if (trend === "down") return "↘";
+  return "→";
+}
+
+function formatResetCountdown(value) {
+  if (!value) return "—";
+  const resetAt = new Date(value);
+  if (Number.isNaN(resetAt.getTime())) return String(value);
+  const diff = resetAt.getTime() - Date.now();
+  if (diff <= 0) return "Reset now";
+  const hours = Math.floor(diff / 3600000);
+  const minutes = Math.floor((diff % 3600000) / 60000);
+  return `${hours}h ${minutes}m`;
+}
+
 function normalizeStatus(status) {
   if (["running", "done", "error", "idle"].includes(status)) return status;
   return "idle";
@@ -182,6 +214,17 @@ function buildLegacyProfiles(accountsMap = {}) {
     last_level: value?.last_level || "info",
     has_logs: Boolean(value?.log_count),
     log_count: Number(value?.log_count || 0),
+    points_now: Number(value?.points || 0),
+    earned_today: Number(value?.earned_today || 0),
+    earned_yesterday: Number(value?.earned_yesterday || 0),
+    delta_vs_yesterday: Number(value?.delta_vs_yesterday || 0),
+    trend: value?.trend || "flat",
+    reset_at: value?.reset_at || "",
+    tracks: value?.tracks || {},
+    verification_state: value?.verification_state || "idle",
+    runtime_family: value?.runtime_family || "",
+    remaining_items: Array.isArray(value?.remaining_items) ? value.remaining_items : [],
+    history_available: Boolean(value?.history_available),
   }));
 }
 
@@ -205,6 +248,17 @@ function getMergedProfiles(statusPayload = {}) {
       last_level: "info",
       has_logs: false,
       log_count: 0,
+      points_now: Number(account.points || 0),
+      earned_today: 0,
+      earned_yesterday: 0,
+      delta_vs_yesterday: 0,
+      trend: "flat",
+      reset_at: "",
+      tracks: {},
+      verification_state: "idle",
+      runtime_family: "",
+      remaining_items: [],
+      history_available: false,
       proxy: account.proxy || "",
       has_session: Boolean(account.has_session),
       has_totp: Boolean(account.has_totp),
@@ -238,6 +292,17 @@ function getMergedProfiles(statusPayload = {}) {
       last_level: profile.last_level || existing.last_level || "info",
       has_logs: Boolean(profile.has_logs ?? existing.has_logs),
       log_count: Number(profile.log_count ?? existing.log_count ?? 0),
+      points_now: Number(profile.points_now ?? existing.points_now ?? profile.points ?? existing.points ?? 0),
+      earned_today: Number(profile.earned_today ?? existing.earned_today ?? 0),
+      earned_yesterday: Number(profile.earned_yesterday ?? existing.earned_yesterday ?? 0),
+      delta_vs_yesterday: Number(profile.delta_vs_yesterday ?? existing.delta_vs_yesterday ?? 0),
+      trend: profile.trend || existing.trend || "flat",
+      reset_at: profile.reset_at || existing.reset_at || "",
+      tracks: profile.tracks || existing.tracks || {},
+      verification_state: profile.verification_state || existing.verification_state || "idle",
+      runtime_family: profile.runtime_family || existing.runtime_family || "",
+      remaining_items: Array.isArray(profile.remaining_items) ? profile.remaining_items : (existing.remaining_items || []),
+      history_available: Boolean(profile.history_available ?? existing.history_available),
     };
     merged.progress_percent = progressPercent(merged);
     profilesById.set(profileId, merged);
@@ -289,13 +354,115 @@ function ensureSelectedProfile(profiles, preferredId = "") {
   return profiles[0];
 }
 
-function renderOverview(statusPayload, profiles) {
+function _legacyEnsureDashboardEnhancements() {
+  const heroTitle = document.querySelector(".hero-copy h2");
+  const heroText = document.querySelector(".hero-copy .hero-text");
+  if (heroTitle) {
+    heroTitle.textContent = "Operations cockpit for multi-account Rewards farming";
+  }
+  if (heroText) {
+    heroText.textContent = "Theo dõi từng account như một live mission tile: điểm hiện tại, tiến độ theo track, delta hôm nay so với hôm qua, trạng thái runtime và lịch sử ngắn hạn trong cùng một bề mặt.";
+  }
+  const heroStatus = document.querySelector(".hero-status");
+  if (heroStatus && !document.getElementById("overviewResetText")) {
+    const meta = document.createElement("div");
+    meta.className = "hero-status-meta";
+    meta.innerHTML = '<span>Reset</span><strong id="overviewResetText">—</strong>';
+    heroStatus.appendChild(meta);
+  }
+
+  const overviewGrid = document.querySelector(".overview-grid");
+  if (overviewGrid && !document.getElementById("summaryEarnedToday")) {
+    overviewGrid.insertAdjacentHTML("beforeend", `
+      <article class="overview-card">
+        <span class="overview-label">Điểm hôm nay</span>
+        <strong id="summaryEarnedToday">0</strong>
+        <p>Tổng điểm farm trong ngày hiện tại</p>
+      </article>
+      <article class="overview-card">
+        <span class="overview-label">Hôm qua</span>
+        <strong id="summaryEarnedYesterday">0</strong>
+        <p>Mốc so sánh cho toàn dashboard</p>
+      </article>
+      <article class="overview-card overview-card-accent">
+        <span class="overview-label">Delta</span>
+        <strong id="summaryDelta">0</strong>
+        <p id="summaryTrendText">Không đổi so với hôm qua</p>
+      </article>
+    `);
+  }
+
+  const inspector = document.getElementById("profileInspector");
+  if (inspector && !document.getElementById("profileInspectorPoints")) {
+    const status = document.getElementById("profileInspectorStatus");
+    const meta = document.getElementById("profileInspectorMeta");
+    if (status && meta) {
+      meta.insertAdjacentHTML("afterend", `
+        <div class="inspector-stat-row">
+          <div class="inspector-pill">
+            <span class="inspector-label">Points now</span>
+            <strong id="profileInspectorPoints">—</strong>
+          </div>
+          <div class="inspector-pill">
+            <span class="inspector-label">Today Δ</span>
+            <strong id="profileInspectorDelta">—</strong>
+          </div>
+          <div class="inspector-pill">
+            <span class="inspector-label">Runtime</span>
+            <strong id="profileInspectorRuntime">—</strong>
+          </div>
+        </div>
+      `);
+    }
+    const latestSignal = Array.from(inspector.querySelectorAll(".inspector-block"))[1];
+    if (latestSignal) {
+      latestSignal.insertAdjacentHTML("beforebegin", `
+        <div class="inspector-block">
+          <span class="inspector-label">Realtime tracks</span>
+          <div id="profileInspectorTracks" class="track-stack">
+            <div class="empty-state compact">Chưa có track live.</div>
+          </div>
+        </div>
+      `);
+      latestSignal.insertAdjacentHTML("afterend", `
+        <div class="inspector-block">
+          <span class="inspector-label">7-day history</span>
+          <div id="profileInspectorHistory" class="history-strip">
+            <div class="empty-state compact">Chưa có lịch sử.</div>
+          </div>
+        </div>
+      `);
+    }
+  }
+}
+
+function _legacyBuildOverviewFallback(profiles) {
+  const earnedToday = profiles.reduce((sum, profile) => sum + Number(profile.earned_today || 0), 0);
+  const earnedYesterday = profiles.reduce((sum, profile) => sum + Number(profile.earned_yesterday || 0), 0);
+  const delta = earnedToday - earnedYesterday;
+  return {
+    earned_today: earnedToday,
+    earned_yesterday: earnedYesterday,
+    delta_vs_yesterday: delta,
+    trend: delta > 0 ? "up" : delta < 0 ? "down" : "flat",
+    reset_at: "",
+  };
+}
+
+function _legacyRenderOverview(statusPayload, profiles) {
+  ensureDashboardEnhancements();
   const summary = summarizeProfiles(profiles);
+  const overview = statusPayload.overview || buildOverviewFallback(profiles);
   setText("summaryTotal", String(summary.total));
   setText("summaryRunning", String(summary.running));
   setText("summaryDone", String(summary.done));
   setText("summaryIssues", String(summary.error));
   setText("summaryPoints", summary.total_points.toLocaleString("vi-VN"));
+  setText("summaryEarnedToday", Number(overview.earned_today || 0).toLocaleString("vi-VN"));
+  setText("summaryEarnedYesterday", Number(overview.earned_yesterday || 0).toLocaleString("vi-VN"));
+  setText("summaryDelta", formatSignedDelta(overview.delta_vs_yesterday || 0));
+  setText("summaryTrendText", `${trendGlyph(overview.trend)} ${overview.trend === "up" ? "Tăng" : overview.trend === "down" ? "Giảm" : "Ổn định"} so với hôm qua`);
+  setText("overviewResetText", formatResetCountdown(overview.reset_at));
   setText("profileSearchCount", summary.total ? `${summary.idle} idle · ${summary.profiles_with_logs} profile có log` : "Chưa có tài khoản");
   setHTML("stStatus", renderStatusBadge(statusPayload.status || "idle"));
   setText("heroStatusText", {
@@ -314,13 +481,25 @@ function renderOverview(statusPayload, profiles) {
   }
 }
 
-function createProfileCardMarkup(profile, selected, compact = false) {
+function _legacyCreateProfileCardMarkup(profile, selected, compact = false) {
   const encodedId = encodeDataId(profile.id);
   const tone = statusTone(profile.status);
   const meta = [];
   if (profile.email) meta.push(maskEmail(profile.email));
-  if (profile.points) meta.push(`${Number(profile.points).toLocaleString("vi-VN")} pts`);
+  if (profile.points_now || profile.points) meta.push(`${Number(profile.points_now || profile.points || 0).toLocaleString("vi-VN")} pts`);
   if (profile.log_count) meta.push(`${profile.log_count} log`);
+  const delta = Number(profile.delta_vs_yesterday || 0);
+  const trackRows = Object.entries(profile.tracks || {}).map(([key, track]) => `
+    <div class="track-row">
+      <div class="track-row-head">
+        <span>${escapeHtml(track.label || key)}</span>
+        <strong>${escapeHtml(track.detail || "0/0")}</strong>
+      </div>
+      <div class="progress-bar track-bar">
+        <div class="progress-fill progress-fill-${escapeHtml(track.status || "idle")}" style="width:${Number(track.percent || 0)}%"></div>
+      </div>
+    </div>
+  `).join("");
   return `
     <article class="profile-card profile-card-${tone}${selected ? " selected" : ""}${compact ? " compact" : ""}" data-profile-id="${encodedId}">
       <button class="profile-card-hitbox" type="button" data-card-action="focus" data-profile-id="${encodedId}"></button>
@@ -351,7 +530,7 @@ function createProfileCardMarkup(profile, selected, compact = false) {
   `;
 }
 
-function wireProfileCardActions(container) {
+function _legacyWireProfileCardActions(container) {
   if (!container) return;
   container.querySelectorAll("[data-card-action='focus']").forEach((button) => {
     button.addEventListener("click", (event) => {
@@ -375,7 +554,7 @@ function wireProfileCardActions(container) {
   });
 }
 
-function renderProfileBoard() {
+function _legacyRenderProfileBoard() {
   const container = document.getElementById("profileBoard");
   if (!container) return;
   if (!appState.profiles.length) {
@@ -388,7 +567,7 @@ function renderProfileBoard() {
   wireProfileCardActions(container);
 }
 
-function renderControlProfileBoard() {
+function _legacyRenderControlProfileBoard() {
   const container = document.getElementById("controlProfileBoard");
   if (!container) return;
   if (!appState.profiles.length) {
@@ -401,7 +580,7 @@ function renderControlProfileBoard() {
   wireProfileCardActions(container);
 }
 
-function renderProfileInspector(profile) {
+function _legacyRenderProfileInspector(profile) {
   if (!profile) {
     setText("profileInspectorTitle", "Chọn một profile");
     setHTML("profileInspectorStatus", renderStatusBadge("idle"));
@@ -473,7 +652,7 @@ function renderRunProfiles(profiles, running, statusPayload) {
     : '<div class="empty-state">Chưa có trạng thái để hiển thị.</div>';
 }
 
-function renderAllStatus(statusPayload) {
+function _legacyRenderAllStatus(statusPayload) {
   appState.statusPayload = statusPayload || {};
   appState.profiles = getMergedProfiles(appState.statusPayload);
   const currentProfileId = appState.statusPayload.current_profile?.id || "";
@@ -482,6 +661,9 @@ function renderAllStatus(statusPayload) {
   renderProfileBoard();
   renderControlProfileBoard();
   renderProfileInspector(selectedProfile);
+  if (selectedProfile) {
+    loadProfileHistory(selectedProfile);
+  }
   renderRunProfiles(appState.profiles, appState.statusPayload.status === "running", appState.statusPayload);
 }
 
@@ -489,14 +671,14 @@ function getProfileById(profileId) {
   return appState.profiles.find((profile) => profile.id === profileId);
 }
 
-function selectProfileById(profileId) {
+function _legacySelectProfileById(profileId) {
   appState.selectedProfileId = profileId;
   renderProfileBoard();
   renderControlProfileBoard();
   renderProfileInspector(getProfileById(profileId));
 }
 
-function openProfileLog(profile) {
+function _legacyOpenProfileLog(profile) {
   const targetKey = profile.key || profile.label || profile.id;
   const nav = document.querySelector('[data-page="log"]');
   if (nav) nav.click();
@@ -510,12 +692,12 @@ function openProfileLog(profile) {
   switchLogTab(targetKey, tabButton);
 }
 
-function openSelectedProfileLog() {
+function _legacyOpenSelectedProfileLog() {
   const profile = getProfileById(appState.selectedProfileId);
   if (profile) openProfileLog(profile);
 }
 
-async function apiJSON(url, options = {}) {
+async function _legacyApiJSON(url, options = {}, meta = {}) {
   const response = await fetch(url, options);
   let data = {};
   try {
@@ -523,13 +705,26 @@ async function apiJSON(url, options = {}) {
   } catch (_error) {
     data = {};
   }
+  if (response.status === 401 && !meta.allowAuthFailure) {
+    appState.authRequired = true;
+    appState.authenticated = false;
+    setAuthGateVisible(true);
+    setAuthStatus("Session locked");
+  }
   if (!response.ok) {
     throw new Error(data.error || "Thất bại");
   }
   return data;
 }
 
-async function tick() {
+async function _legacyTick() {
+  if (appState.authRequired && !appState.authenticated) {
+    return;
+  }
+  if (appState.tickInFlight) {
+    return;
+  }
+  appState.tickInFlight = true;
   try {
     const statusPayload = await apiJSON(`${API}/api/status`);
     const running = statusPayload.status === "running";
@@ -578,10 +773,12 @@ async function tick() {
     }
   } catch (_error) {
     // Swallow polling errors to avoid breaking the dashboard on restart.
+  } finally {
+    appState.tickInFlight = false;
   }
 }
 
-function createAccountLogTab(accountKey) {
+function _legacyCreateAccountLogTab(accountKey) {
   const tabBar = document.getElementById("logTabs");
   const button = document.createElement("button");
   button.className = "log-tab";
@@ -599,7 +796,7 @@ function createAccountLogTab(accountKey) {
   panels.appendChild(panel);
 }
 
-function switchLogTab(key, button) {
+function _legacySwitchLogTab(key, button) {
   appState.activeLogTab = key;
   document.querySelectorAll(".log-tab").forEach((item) => item.classList.remove("active"));
   if (button) button.classList.add("active");
@@ -608,7 +805,7 @@ function switchLogTab(key, button) {
   });
 }
 
-function appendLogs(logs, panelKey) {
+function _legacyAppendLogs(logs, panelKey) {
   const key = panelKey || "__global__";
   const box = document.getElementById(`logPanel-${key}`) || document.getElementById("logPanel-__global__");
   if (!box) return;
@@ -632,7 +829,7 @@ function appendLogs(logs, panelKey) {
   box.scrollTop = box.scrollHeight;
 }
 
-function clearLogs() {
+function _legacyClearLogs() {
   appState.logIdx = 0;
   Object.keys(appState.accLogIdx).forEach((key) => {
     appState.accLogIdx[key] = 0;
@@ -642,7 +839,7 @@ function clearLogs() {
   });
 }
 
-function setLogFilter(filter, button) {
+function _legacySetLogFilter(filter, button) {
   appState.currentFilter = filter;
   document.querySelectorAll(".log-filter").forEach((item) => item.classList.remove("active"));
   button.classList.add("active");
@@ -1185,7 +1382,74 @@ function toast(message) {
   setTimeout(() => element.classList.remove("show"), 2800);
 }
 
-function initNavigation() {
+function _legacySetAuthGateVisible(visible) {
+  const gate = document.getElementById("authGate");
+  if (!gate) return;
+  gate.classList.toggle("hidden", !visible);
+}
+
+function _legacySetAuthStatus(message = "") {
+  setText("authStatusText", message);
+}
+
+async function _legacyCheckDashboardAuth() {
+  try {
+    const payload = await apiJSON(`${API}/api/auth/check`, {}, { allowAuthFailure: true });
+    appState.authRequired = Boolean(payload.required);
+    appState.authenticated = Boolean(payload.authenticated || !payload.required);
+    setAuthGateVisible(appState.authRequired && !appState.authenticated);
+    setAuthStatus(appState.authenticated ? "" : "Locked");
+    return appState.authenticated;
+  } catch (_error) {
+    appState.authRequired = true;
+    appState.authenticated = false;
+    setAuthGateVisible(true);
+    setAuthStatus("Unable to verify access");
+    return false;
+  }
+}
+
+async function _legacySubmitDashboardAuth() {
+  const passwordInput = document.getElementById("authPassword");
+  const submitButton = document.getElementById("authSubmitBtn");
+  const password = passwordInput?.value || "";
+  if (!password) {
+    setAuthStatus("Enter the password first");
+    return;
+  }
+  try {
+    if (submitButton) submitButton.disabled = true;
+    setAuthStatus("Unlocking...");
+    const payload = await apiJSON(`${API}/api/auth`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    }, { allowAuthFailure: true });
+    appState.authRequired = Boolean(payload.required);
+    appState.authenticated = true;
+    if (passwordInput) passwordInput.value = "";
+    setAuthStatus("");
+    setAuthGateVisible(false);
+    await refreshDashboardAfterAuth();
+  } catch (error) {
+    appState.authenticated = false;
+    setAuthGateVisible(true);
+    setAuthStatus(error.message || "Wrong password");
+  } finally {
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+async function _legacyRefreshDashboardAfterAuth() {
+  await Promise.allSettled([
+    loadAccounts(),
+    loadSettings(),
+    loadSchedule(),
+  ]);
+  await tick();
+}
+
+function _legacyInitNavigation() {
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.addEventListener("click", () => {
       document.querySelectorAll(".nav-item").forEach((node) => node.classList.remove("active"));
@@ -1198,13 +1462,414 @@ function initNavigation() {
   });
 }
 
-function init() {
-  initNavigation();
-  loadAccounts();
-  loadSettings();
-  loadSchedule();
-  appState.poll = setInterval(tick, 2000);
-  tick();
+function renderTrackList(tracks = {}) {
+  const rows = Object.entries(tracks).map(([key, track]) => `
+    <div class="track-row">
+      <div class="track-row-head">
+        <span>${escapeHtml(track.label || key)}</span>
+        <strong>${escapeHtml(track.detail || "0/0")}</strong>
+      </div>
+      <div class="progress-bar track-bar">
+        <div class="progress-fill progress-fill-${escapeHtml(track.status || "idle")}" style="width:${Number(track.percent || 0)}%"></div>
+      </div>
+    </div>
+  `).join("");
+  return rows || '<div class="empty-state compact">Chưa có track live.</div>';
+}
+
+function createMissionTileMarkup(profile, selected, compact = false) {
+  const encodedId = encodeDataId(profile.id);
+  const tone = statusTone(profile.status);
+  const meta = [];
+  if (profile.email) meta.push(maskEmail(profile.email));
+  if (profile.log_count) meta.push(`${profile.log_count} log`);
+  if (profile.runtime_family) meta.push(profile.runtime_family);
+
+  return `
+    <article class="profile-card profile-card-${tone}${selected ? " selected" : ""}${compact ? " compact" : ""}" data-profile-id="${encodedId}">
+      <button class="profile-card-hitbox" type="button" data-card-action="focus" data-profile-id="${encodedId}"></button>
+      <div class="profile-card-head">
+        <div>
+          <p class="profile-card-kicker">${escapeHtml(profile.label || "Profile")}</p>
+          <h4>${escapeHtml(profile.email || profile.label || "Profile")}</h4>
+        </div>
+        ${renderStatusBadge(profile.status)}
+      </div>
+      <div class="profile-card-points">
+        <strong>${Number(profile.points_now || profile.points || 0).toLocaleString("vi-VN")}</strong>
+        <span class="delta-chip delta-${profile.trend || "flat"}">${trendGlyph(profile.trend)} ${formatSignedDelta(profile.delta_vs_yesterday || 0)}</span>
+      </div>
+      <p class="profile-card-task">${escapeHtml(profile.task || "Sẵn sàng")}</p>
+      <div class="profile-card-progress">
+        <div class="progress-bar">
+          <div class="progress-fill progress-fill-${tone}" style="width:${profile.progress_percent || 0}%"></div>
+        </div>
+        <span>${profile.progress || 0}/${profile.progress_total || 0}</span>
+      </div>
+      <div class="profile-card-tracklist">
+        ${renderTrackList(profile.tracks)}
+      </div>
+      <div class="profile-card-meta">
+        ${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+      </div>
+      <div class="profile-card-foot">
+        <button class="btn btn-ghost btn-sm" type="button" data-card-action="log" data-profile-id="${encodedId}">Log</button>
+        ${profile.email
+          ? `<button class="btn btn-primary btn-sm" type="button" data-card-action="run" data-email="${escapeHtml(profile.email)}">Run</button>`
+          : ""}
+      </div>
+    </article>
+  `;
+}
+
+async function _legacyLoadProfileHistory(profile) {
+  if (!profile?.key) return;
+  try {
+    const response = await apiJSON(`${API}/api/dashboard/accounts/${encodeURIComponent(profile.key)}/history?days=7`);
+    appState.profileHistory[profile.key] = Array.isArray(response.history) ? response.history : [];
+    if (appState.selectedProfileId === profile.id) {
+      renderProfileInspector(getProfileById(profile.id));
+    }
+  } catch (_error) {
+    appState.profileHistory[profile.key] = [];
+  }
+}
+
+function renderHistoryStrip(history = []) {
+  if (!history.length) {
+    return '<div class="empty-state compact">Chưa có lịch sử.</div>';
+  }
+  const peak = Math.max(...history.map((item) => Number(item.earned_today || 0)), 1);
+  return history.slice(-7).map((item) => {
+    const earned = Number(item.earned_today || 0);
+    const height = Math.max(10, Math.round((earned / peak) * 64));
+    return `
+      <div class="history-bar">
+        <span class="history-bar-date">${escapeHtml(String(item.date || "").slice(5))}</span>
+        <div class="history-bar-rail"><div class="history-bar-fill" style="height:${height}px"></div></div>
+        <strong>${earned.toLocaleString("vi-VN")}</strong>
+      </div>
+    `;
+  }).join("");
+}
+
+function _legacyMissionRenderProfileBoard() {
+  const container = document.getElementById("profileBoard");
+  if (!container) return;
+  if (!appState.profiles.length) {
+    container.innerHTML = '<div class="empty-state">Chưa có profile nào để hiển thị.</div>';
+    return;
+  }
+  container.innerHTML = appState.profiles
+    .map((profile) => createMissionTileMarkup(profile, profile.id === appState.selectedProfileId, false))
+    .join("");
+  wireProfileCardActions(container);
+}
+
+function _legacyMissionRenderControlProfileBoard() {
+  const container = document.getElementById("controlProfileBoard");
+  if (!container) return;
+  if (!appState.profiles.length) {
+    container.innerHTML = '<div class="empty-state">Khởi chạy bot để xem trạng thái live.</div>';
+    return;
+  }
+  container.innerHTML = appState.profiles
+    .map((profile) => createMissionTileMarkup(profile, profile.id === appState.selectedProfileId, true))
+    .join("");
+  wireProfileCardActions(container);
+}
+
+function _legacyMissionRenderProfileInspector(profile) {
+  ensureDashboardEnhancements();
+  if (!profile) {
+    setText("profileInspectorTitle", "Chọn một profile");
+    setHTML("profileInspectorStatus", renderStatusBadge("idle"));
+    setText("profileInspectorMeta", "Không có dữ liệu.");
+    setText("profileInspectorPoints", "—");
+    setText("profileInspectorDelta", "—");
+    setText("profileInspectorRuntime", "—");
+    setText("profileInspectorTask", "—");
+    setText("profileInspectorProgress", "0/0");
+    document.getElementById("profileInspectorProgressBar").style.width = "0%";
+    setHTML("profileInspectorTracks", '<div class="empty-state compact">Chưa có track live.</div>');
+    setText("profileInspectorMessage", "Chưa có log cho profile này.");
+    setHTML("profileInspectorHistory", '<div class="empty-state compact">Chưa có lịch sử.</div>');
+    setText("profileInspectorUpdated", "Cập nhật: —");
+    return;
+  }
+  setText("profileInspectorTitle", profile.email || profile.label || "Profile");
+  setHTML("profileInspectorStatus", renderStatusBadge(profile.status));
+  const meta = [];
+  meta.push(profile.label || "Profile");
+  if (profile.has_logs) meta.push(`${profile.log_count || 0} log`);
+  if (profile.verification_state) meta.push(profile.verification_state);
+  setText("profileInspectorMeta", meta.join(" · "));
+  setText("profileInspectorPoints", Number(profile.points_now || profile.points || 0).toLocaleString("vi-VN"));
+  setText("profileInspectorDelta", `${trendGlyph(profile.trend)} ${formatSignedDelta(profile.delta_vs_yesterday || 0)}`);
+  setText("profileInspectorRuntime", profile.runtime_family || "live");
+  setText("profileInspectorTask", profile.task || "Sẵn sàng");
+  setText("profileInspectorProgress", `${profile.progress || 0}/${profile.progress_total || 0}`);
+  document.getElementById("profileInspectorProgressBar").style.width = `${profile.progress_percent || 0}%`;
+  setHTML("profileInspectorTracks", renderTrackList(profile.tracks));
+  const message = Array.isArray(profile.remaining_items) && profile.remaining_items.length
+    ? `Unresolved: ${profile.remaining_items.join(", ")}`
+    : (profile.last_message || "Chưa có log cho profile này.");
+  setText("profileInspectorMessage", message);
+  setHTML("profileInspectorHistory", renderHistoryStrip(appState.profileHistory[profile.key] || []));
+  const updatedAt = profile.updated_at || profile.last_log_time;
+  setText("profileInspectorUpdated", `Cập nhật: ${updatedAt ? formatDateTime(updatedAt) : "—"}`);
+}
+
+function _legacyMissionSelectProfileById(profileId) {
+  appState.selectedProfileId = profileId;
+  renderProfileBoard();
+  renderControlProfileBoard();
+  const profile = getProfileById(profileId);
+  renderProfileInspector(profile);
+  if (profile) {
+    loadProfileHistory(profile);
+  }
+}
+
+let dashboardOverviewPanels = null;
+let dashboardProfileSurfaces = null;
+let dashboardShell = null;
+
+function ensureDashboardControllers() {
+  if (dashboardOverviewPanels && dashboardProfileSurfaces) return;
+  if (typeof window.AutoBingOverviewPanels !== "function" || typeof window.AutoBingProfileSurfaces !== "function") {
+    throw new Error("Dashboard render modules are not loaded.");
+  }
+
+  dashboardOverviewPanels = window.AutoBingOverviewPanels({
+    document,
+    setText,
+    setHTML,
+    escapeHtml,
+    formatSignedDelta,
+    trendGlyph,
+    formatResetCountdown,
+    normalizeStatus,
+    summarizeProfiles,
+    humanizeTask,
+    formatTimeOnly,
+    renderStatusBadge,
+  });
+
+  dashboardProfileSurfaces = window.AutoBingProfileSurfaces({
+    document,
+    setText,
+    setHTML,
+    escapeHtml,
+    encodeDataId,
+    decodeDataId,
+    maskEmail,
+    formatSignedDelta,
+    trendGlyph,
+    formatDateTime,
+    renderStatusBadge,
+    statusTone,
+    onFocusProfile: (profileId) => selectProfileById(profileId, { openDrawer: true }),
+    onOpenLog: (profileId) => {
+      const profile = getProfileById(profileId);
+      if (profile) openProfileLog(profile);
+    },
+    onRunProfile: (email) => runTask("all", [email]),
+    onOpenDrawer: () => openProfileDrawer(),
+    onCloseDrawer: () => closeProfileDrawer(),
+  });
+}
+
+function ensureDashboardShell() {
+  if (dashboardShell) return;
+  if (typeof window.AutoBingDashboardShell !== "function") {
+    throw new Error("Dashboard shell module is not loaded.");
+  }
+  dashboardShell = window.AutoBingDashboardShell({
+    API,
+    appState,
+    document,
+    setText,
+    pageTitles: PAGE_TITLES,
+    escapeHtml,
+    isAILogMessage,
+    renderAIStatus,
+    renderAllStatus,
+    loadAccounts,
+    loadSettings,
+    loadSchedule,
+    getProfileById,
+  });
+}
+
+function getProfileDetail(profile) {
+  if (!profile?.key) {
+    return { history: [], logs: [] };
+  }
+  return {
+    history: Array.isArray(appState.profileHistory[profile.key]) ? appState.profileHistory[profile.key] : [],
+    logs: Array.isArray(appState.profileLogs[profile.key]) ? appState.profileLogs[profile.key] : [],
+  };
+}
+
+function openProfileLog(profile) {
+  ensureDashboardShell();
+  dashboardShell.openProfileLog(profile);
+}
+
+function openSelectedProfileLog() {
+  ensureDashboardShell();
+  dashboardShell.openSelectedProfileLog();
+}
+
+async function apiJSON(url, options = {}, meta = {}) {
+  ensureDashboardShell();
+  return dashboardShell.apiJSON(url, options, meta);
+}
+
+async function tick() {
+  ensureDashboardShell();
+  return dashboardShell.tick();
+}
+
+function switchLogTab(key, button) {
+  ensureDashboardShell();
+  dashboardShell.switchLogTab(key, button);
+}
+
+function clearLogs() {
+  ensureDashboardShell();
+  dashboardShell.clearLogs();
+}
+
+function setLogFilter(filter, button) {
+  ensureDashboardShell();
+  dashboardShell.setLogFilter(filter, button);
+}
+
+async function submitDashboardAuth() {
+  ensureDashboardShell();
+  return dashboardShell.submitDashboardAuth();
+}
+
+function renderOverview(statusPayload, profiles) {
+  ensureDashboardControllers();
+  dashboardOverviewPanels.renderOverview(statusPayload, profiles);
+}
+
+function renderAnalytics(statusPayload, profiles) {
+  ensureDashboardControllers();
+  dashboardOverviewPanels.renderAnalytics(statusPayload, profiles);
+}
+
+function renderProfileBoard() {
+  ensureDashboardControllers();
+  dashboardProfileSurfaces.renderProfileBoard(appState.profiles, appState.selectedProfileId);
+}
+
+function renderControlProfileBoard() {
+  ensureDashboardControllers();
+  dashboardProfileSurfaces.renderControlProfileBoard(appState.profiles, appState.selectedProfileId);
+}
+
+function renderProfileInspector(profile) {
+  ensureDashboardControllers();
+  dashboardProfileSurfaces.renderInspector(profile, getProfileDetail(profile), appState.profileDrawerOpen);
+}
+
+async function loadProfileHistory(profile) {
+  if (!profile?.key) return;
+  try {
+    const response = await apiJSON(`${API}/api/dashboard/accounts/${encodeURIComponent(profile.key)}/history?days=7`);
+    appState.profileHistory[profile.key] = Array.isArray(response.history) ? response.history : [];
+    if (appState.selectedProfileId === profile.id) {
+      renderProfileInspector(getProfileById(profile.id));
+    }
+  } catch (_error) {
+    appState.profileHistory[profile.key] = [];
+  }
+}
+
+async function loadProfileLogs(profile) {
+  if (!profile?.key) return;
+  try {
+    const response = await apiJSON(`${API}/api/dashboard/accounts/${encodeURIComponent(profile.key)}/logs`);
+    const logs = Array.isArray(response.logs) ? response.logs : [];
+    appState.profileLogs[profile.key] = logs.slice(-24);
+    if (appState.selectedProfileId === profile.id) {
+      renderProfileInspector(getProfileById(profile.id));
+    }
+  } catch (_error) {
+    appState.profileLogs[profile.key] = [];
+  }
+}
+
+async function hydrateProfileDetail(profile, options = {}) {
+  if (!profile?.key) return;
+  const force = Boolean(options.force);
+  const signature = `${profile.updated_at || profile.last_log_time || ""}:${profile.progress || 0}:${profile.progress_total || 0}:${profile.task || ""}`;
+  const cached = appState.profileDetailMeta[profile.key];
+  if (!force && cached && cached.signature === signature && (Date.now() - cached.fetchedAt) < 4000) {
+    return;
+  }
+  appState.profileDetailMeta[profile.key] = {
+    signature,
+    fetchedAt: Date.now(),
+  };
+  await Promise.all([
+    loadProfileHistory(profile),
+    loadProfileLogs(profile),
+  ]);
+}
+
+function renderAllStatus(statusPayload) {
+  appState.statusPayload = statusPayload || {};
+  appState.profiles = getMergedProfiles(appState.statusPayload);
+  const currentProfileId = appState.statusPayload.current_profile?.id || "";
+  const selectedProfile = ensureSelectedProfile(appState.profiles, currentProfileId);
+  renderOverview(appState.statusPayload, appState.profiles);
+  renderAnalytics(appState.statusPayload, appState.profiles);
+  renderProfileBoard();
+  renderControlProfileBoard();
+  renderProfileInspector(selectedProfile);
+  if (selectedProfile && (appState.profileDrawerOpen || !appState.profileHistory[selectedProfile.key])) {
+    hydrateProfileDetail(selectedProfile);
+  }
+  renderRunProfiles(appState.profiles, appState.statusPayload.status === "running", appState.statusPayload);
+}
+
+function openProfileDrawer() {
+  appState.profileDrawerOpen = true;
+  const profile = getProfileById(appState.selectedProfileId);
+  renderProfileInspector(profile);
+  if (profile) {
+    hydrateProfileDetail(profile);
+  }
+}
+
+function closeProfileDrawer() {
+  appState.profileDrawerOpen = false;
+  renderProfileInspector(getProfileById(appState.selectedProfileId));
+}
+
+function selectProfileById(profileId, options = {}) {
+  appState.selectedProfileId = profileId;
+  if (options.openDrawer) {
+    appState.profileDrawerOpen = true;
+  }
+  renderProfileBoard();
+  renderControlProfileBoard();
+  const profile = getProfileById(profileId);
+  renderProfileInspector(profile);
+  if (profile) {
+    hydrateProfileDetail(profile, options);
+  }
+}
+
+async function init() {
+  ensureDashboardControllers();
+  ensureDashboardShell();
+  await dashboardShell.init();
 }
 
 window.filterAccounts = filterAccounts;
@@ -1233,5 +1898,6 @@ window.switchLogTab = switchLogTab;
 window.setLogFilter = setLogFilter;
 window.clearLogs = clearLogs;
 window.openSelectedProfileLog = openSelectedProfileLog;
+window.submitDashboardAuth = submitDashboardAuth;
 
 init();

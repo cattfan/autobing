@@ -9,6 +9,7 @@ from src.dashboard import (
     _account_timeout_seconds,
     _build_profile_summary,
     _build_profile_views,
+    _ensure_dashboard_bind_is_safe,
     _describe_remaining_items,
     _ensure_usable_desktop_search_page,
     _reconcile_verification_with_session_proof,
@@ -120,6 +121,13 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(_account_timeout_seconds(0, 2), 4500.0)
         self.assertEqual(_account_timeout_seconds(1, 2), 4500.0)
         self.assertEqual(_account_timeout_seconds(2, 2), 9000.0)
+
+    def test_dashboard_bind_stays_local_when_no_dashboard_password_is_configured(self):
+        with self.assertRaisesRegex(RuntimeError, "Refusing to bind"):
+            _ensure_dashboard_bind_is_safe("0.0.0.0", {"master_password_hash": ""})
+
+    def test_dashboard_bind_allows_non_loopback_when_dashboard_password_is_configured(self):
+        _ensure_dashboard_bind_is_safe("0.0.0.0", {"master_password_hash": "configured"})
 
     def test_profile_views_include_recent_log_context(self):
         accounts_snapshot = {

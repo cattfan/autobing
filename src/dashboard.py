@@ -12,11 +12,13 @@ from contextlib import AsyncExitStack
 import socket
 import time
 import logging
+import secrets
 from hashlib import md5
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
-from flask import Flask, request, jsonify, send_from_directory, send_file
+from flask import Flask, request, jsonify, send_from_directory, send_file, session
 
 from src.utils import (
     logger,
@@ -58,6 +60,9 @@ app = Flask(
     __name__,
     static_folder=None,
 )
+app.config["SECRET_KEY"] = os.environ.get("AUTOBING_DASHBOARD_SECRET") or secrets.token_hex(32)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 # ─── Global State ──────────────────────────────────────────────────────────
 
@@ -94,6 +99,8 @@ _current_log_key = contextvars.ContextVar("current_log_key", default=None)
 
 # Lock bảo vệ global state dict — tránh race condition khi nhiều accounts chạy đồng thời
 _state_lock = threading.Lock()
+_snapshot_lock = threading.RLock()
+ACCOUNT_DAILY_SNAPSHOTS_PATH = DATA_DIR / "account_daily_snapshots.jsonl"
 
 
 def _select_mobile_runtime_strategy(gpm_enabled: bool, gpm_mobile_profile_id: str | None) -> tuple[bool, str]:
@@ -222,11 +229,267 @@ def _account_display_label(email: str) -> str:
     return f"{masked_local}@{domain}"
 
 
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return default
+
+
+def _current_reset_context(now: datetime | None = None) -> tuple[str, str]:
+    local_now = (now or datetime.now()).astimezone()
+    reset_key = local_now.date().isoformat()
+    next_reset = (local_now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return reset_key, next_reset.isoformat(timespec="seconds")
+
+
+def _read_account_daily_snapshots_unlocked() -> list[dict]:
+    if not ACCOUNT_DAILY_SNAPSHOTS_PATH.exists():
+        return []
+    records: list[dict] = []
+    try:
+        with open(ACCOUNT_DAILY_SNAPSHOTS_PATH, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    records.append(payload)
+    except Exception:
+        return []
+    return records
+
+
+def _read_account_daily_snapshots() -> list[dict]:
+    with _snapshot_lock:
+        return _read_account_daily_snapshots_unlocked()
+
+
+def _write_account_daily_snapshots_unlocked(records: list[dict]) -> None:
+    ACCOUNT_DAILY_SNAPSHOTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(ACCOUNT_DAILY_SNAPSHOTS_PATH.parent),
+        delete=False,
+        prefix="account_daily_snapshots.",
+        suffix=".tmp",
+    ) as fh:
+        for record in records:
+            fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        temp_path = fh.name
+    os.replace(temp_path, ACCOUNT_DAILY_SNAPSHOTS_PATH)
+
+
+def _write_account_daily_snapshots(records: list[dict]) -> None:
+    with _snapshot_lock:
+        _write_account_daily_snapshots_unlocked(records)
+
+
+def _upsert_account_daily_snapshot(record: dict) -> None:
+    with _snapshot_lock:
+        records = _read_account_daily_snapshots_unlocked()
+        key = (record.get("account_key", ""), record.get("date", ""))
+        updated = False
+        for idx, existing in enumerate(records):
+            if (existing.get("account_key", ""), existing.get("date", "")) == key:
+                records[idx] = record
+                updated = True
+                break
+        if not updated:
+            records.append(record)
+        records.sort(key=lambda item: (item.get("account_key", ""), item.get("date", "")))
+        _write_account_daily_snapshots_unlocked(records)
+
+
+def _recent_account_snapshots(account_key: str, days: int = 30) -> list[dict]:
+    records = [
+        row for row in _read_account_daily_snapshots()
+        if row.get("account_key") == account_key
+    ]
+    records.sort(key=lambda item: item.get("date", ""))
+    return records[-days:] if len(records) > days else records
+
+
+def _normalize_track(label: str, current: int, maximum: int, *, status_hint: str = "idle") -> dict:
+    current = _safe_int(current)
+    maximum = _safe_int(maximum)
+    percent = max(0, min(100, round((current / maximum) * 100))) if maximum > 0 else 0
+    if status_hint == "error":
+        status = "error"
+    elif maximum > 0 and current >= maximum:
+        status = "done"
+    elif current > 0 or status_hint == "running":
+        status = "running"
+    elif status_hint == "blocked":
+        status = "blocked"
+    else:
+        status = "idle"
+    detail = f"{current}/{maximum}" if maximum > 0 else "Not available"
+    return {
+        "label": label,
+        "current": current,
+        "max": maximum,
+        "percent": percent,
+        "status": status,
+        "detail": detail,
+    }
+
+
+def _build_profile_tracks(item: dict, *, summary: dict | None = None) -> dict:
+    summary = summary or {}
+    search_status = item.get("search_status") or {}
+    task_overview = item.get("task_overview") or {}
+    category_status = item.get("category_status") or {}
+    status_hint = _normalize_account_status(item.get("status", "idle"))
+    current_task = str(item.get("task", "") or "").lower()
+    task_progress = _safe_int(item.get("progress"))
+    task_progress_total = _safe_int(item.get("progress_total"))
+
+    def _value(name: str, snapshot_name: str | None = None) -> int:
+        if name in search_status:
+            return _safe_int(search_status.get(name))
+        if snapshot_name:
+            return _safe_int(summary.get("snapshot", {}).get(snapshot_name))
+        return 0
+
+    daily = task_overview.get("daily_set", {})
+    daily_current = _safe_int(daily.get("completed", summary.get("snapshot", {}).get("daily_set_completed", 0)))
+    daily_total = _safe_int(daily.get("total", summary.get("snapshot", {}).get("daily_set_total", 0)))
+
+    promos = category_status.get("more_promo", {})
+    promo_current = _safe_int(promos.get("completed", summary.get("snapshot", {}).get("promos_completed", 0)))
+    promo_total = _safe_int(promos.get("total", summary.get("snapshot", {}).get("promos_total", 0)))
+
+    tracks = {
+        "total_points": _normalize_track(
+            "Total Points",
+            _safe_int(item.get("points", summary.get("points_now", 0))),
+            max(_safe_int(item.get("points", summary.get("points_now", 0))), 1),
+            status_hint=status_hint,
+        ),
+        "daily_set": _normalize_track("Daily Set", daily_current, daily_total, status_hint=status_hint),
+        "pc_search": _normalize_track(
+            "PC Search",
+            _value("pc_current", "pc_current"),
+            _value("pc_max", "pc_max"),
+            status_hint="running" if current_task == "desktop searches" else status_hint,
+        ),
+        "mobile_search": _normalize_track(
+            "Mobile Search",
+            _value("mobile_current", "mobile_current"),
+            _value("mobile_max", "mobile_max"),
+            status_hint="running" if current_task == "mobile searches" else status_hint,
+        ),
+        "edge": _normalize_track(
+            "Edge",
+            _value("edge_current", "edge_current"),
+            _value("edge_max", "edge_max"),
+            status_hint="running" if "edge" in current_task else status_hint,
+        ),
+        "promos": _normalize_track("Promotions", promo_current, promo_total, status_hint=status_hint),
+    }
+
+    if current_task == "desktop searches" and task_progress_total > 0:
+        tracks["pc_search"] = _normalize_track("PC Search", task_progress, task_progress_total, status_hint="running")
+    elif current_task == "mobile searches" and task_progress_total > 0:
+        tracks["mobile_search"] = _normalize_track("Mobile Search", task_progress, task_progress_total, status_hint="running")
+    elif current_task == "edge searches" and task_progress_total > 0:
+        tracks["edge"] = _normalize_track("Edge", task_progress, task_progress_total, status_hint="running")
+
+    return tracks
+
+
+def _build_profile_day_summary(item: dict) -> dict:
+    account_key = item.get("key") or item.get("id") or ""
+    reset_key, reset_at = _current_reset_context()
+    records = _recent_account_snapshots(account_key, days=30)
+    today_record = next((row for row in reversed(records) if row.get("date") == reset_key), {})
+    yesterday_record = records[-2] if len(records) >= 2 and records[-1].get("date") == reset_key else (records[-1] if records and records[-1].get("date") != reset_key else {})
+
+    points_now = _safe_int(item.get("points", today_record.get("points_now", 0)))
+    earned_today = _safe_int(item.get("earned_today", today_record.get("earned_today", 0)))
+    earned_yesterday = _safe_int(item.get("earned_yesterday", yesterday_record.get("earned_today", 0)))
+    delta_vs_yesterday = earned_today - earned_yesterday
+    trend = "up" if delta_vs_yesterday > 0 else "down" if delta_vs_yesterday < 0 else "flat"
+    return {
+        "points_now": points_now,
+        "earned_today": earned_today,
+        "earned_yesterday": earned_yesterday,
+        "delta_vs_yesterday": delta_vs_yesterday,
+        "trend": trend,
+        "reset_key": reset_key,
+        "reset_at": reset_at,
+        "snapshot": today_record,
+        "history_available": bool(records),
+    }
+
+
+def _record_account_daily_snapshot(
+    *,
+    account_key: str,
+    email: str,
+    total_points: int,
+    earned_today: int,
+    search_status: dict | None,
+    task_overview: dict | None,
+    category_status: dict | None,
+    verification_state: str,
+    runtime_family: str,
+) -> None:
+    reset_key, _ = _current_reset_context()
+    existing_today = next(
+        (row for row in reversed(_recent_account_snapshots(account_key, days=30)) if row.get("date") == reset_key),
+        None,
+    )
+    search_status = search_status or {}
+    task_overview = task_overview or {}
+    category_status = category_status or {}
+    daily = task_overview.get("daily_set", {})
+    promos = category_status.get("more_promo", {})
+    normalized_total_points = _safe_int(total_points)
+    normalized_earned_today = _safe_int(earned_today)
+    if existing_today:
+        day_start_points = _safe_int(existing_today.get("points_now", 0)) - _safe_int(existing_today.get("earned_today", 0))
+        normalized_earned_today = max(
+            _safe_int(existing_today.get("earned_today", 0)),
+            normalized_total_points - day_start_points,
+        )
+    record = {
+        "date": reset_key,
+        "account_key": account_key,
+        "email": email,
+        "points_now": normalized_total_points,
+        "earned_today": normalized_earned_today,
+        "pc_current": _safe_int(search_status.get("pc_current", 0)),
+        "pc_max": _safe_int(search_status.get("pc_max", 0)),
+        "mobile_current": _safe_int(search_status.get("mobile_current", 0)),
+        "mobile_max": _safe_int(search_status.get("mobile_max", 0)),
+        "edge_current": _safe_int(search_status.get("edge_current", 0)),
+        "edge_max": _safe_int(search_status.get("edge_max", 0)),
+        "daily_set_completed": _safe_int(daily.get("completed", 0)),
+        "daily_set_total": _safe_int(daily.get("total", 0)),
+        "promos_completed": _safe_int(promos.get("completed", 0)),
+        "promos_total": _safe_int(promos.get("total", 0)),
+        "verification_state": verification_state,
+        "runtime_family": runtime_family,
+        "captured_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _upsert_account_daily_snapshot(record)
+
+
 def _build_profile_views(accounts_snapshot: dict, account_logs_snapshot: dict) -> list[dict]:
     """Build a stable profile list for the dashboard without breaking the legacy accounts map."""
     profiles: list[dict] = []
     for account_key, raw_state in accounts_snapshot.items():
         item = dict(raw_state or {})
+        item["key"] = account_key
         status = _normalize_account_status(item.get("status", "idle"))
         progress = int(item.get("progress", 0) or 0)
         progress_total = int(item.get("progress_total", 0) or 0)
@@ -237,6 +500,8 @@ def _build_profile_views(accounts_snapshot: dict, account_logs_snapshot: dict) -
         last_message = item.get("last_message") or (logs[-1]["message"] if logs else "")
         last_level = item.get("last_level") or (logs[-1]["level"] if logs else "info")
         last_log_time = item.get("last_log_time") or (logs[-1]["time"] if logs else "")
+        day_summary = _build_profile_day_summary(item)
+        tracks = _build_profile_tracks(item, summary=day_summary)
 
         profiles.append({
             "id": profile_id,
@@ -259,6 +524,18 @@ def _build_profile_views(accounts_snapshot: dict, account_logs_snapshot: dict) -
             "last_level": last_level,
             "has_logs": bool(logs),
             "log_count": int(item.get("log_count", len(logs)) or 0),
+            "points_now": day_summary["points_now"],
+            "earned_today": day_summary["earned_today"],
+            "earned_yesterday": day_summary["earned_yesterday"],
+            "delta_vs_yesterday": day_summary["delta_vs_yesterday"],
+            "trend": day_summary["trend"],
+            "reset_key": day_summary["reset_key"],
+            "reset_at": day_summary["reset_at"],
+            "tracks": tracks,
+            "verification_state": item.get("verification_state", day_summary["snapshot"].get("verification_state", "idle")),
+            "remaining_items": item.get("remaining_items", []),
+            "runtime_family": item.get("runtime_family", day_summary["snapshot"].get("runtime_family", "")),
+            "history_available": day_summary["history_available"],
         })
 
     def _profile_sort_key(profile: dict) -> tuple[int, str]:
@@ -286,6 +563,27 @@ def _build_profile_summary(profiles: list[dict]) -> dict:
             summary["profiles_with_logs"] += 1
         summary["total_points"] += int(profile.get("points", 0) or 0)
     return summary
+
+
+def _build_dashboard_overview(profiles: list[dict]) -> dict:
+    reset_key, reset_at = _current_reset_context()
+    earned_today = sum(_safe_int(profile.get("earned_today", 0)) for profile in profiles)
+    earned_yesterday = sum(_safe_int(profile.get("earned_yesterday", 0)) for profile in profiles)
+    delta_vs_yesterday = earned_today - earned_yesterday
+    trend = "up" if delta_vs_yesterday > 0 else "down" if delta_vs_yesterday < 0 else "flat"
+    return {
+        "earned_today": earned_today,
+        "earned_yesterday": earned_yesterday,
+        "delta_vs_yesterday": delta_vs_yesterday,
+        "trend": trend,
+        "reset_key": reset_key,
+        "reset_at": reset_at,
+        "accounts_with_history": sum(1 for profile in profiles if profile.get("history_available")),
+        "accounts_needing_attention": sum(
+            1 for profile in profiles
+            if profile.get("status") == "error" or profile.get("remaining_items")
+        ),
+    }
 
 
 def _mobile_credit_delta(before_status: dict, after_status: dict) -> int:
@@ -918,16 +1216,80 @@ async def _ensure_usable_desktop_search_page(
 
 # ─── Auth ──────────────────────────────────────────────────────────────────
 
+def _dashboard_password_hash(settings: dict | None = None) -> str:
+    settings = settings or load_settings()
+    return str(settings.get("master_password_hash", "") or "").strip()
+
+
+def _dashboard_auth_required(settings: dict | None = None) -> bool:
+    return bool(_dashboard_password_hash(settings))
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = str(host or "").strip().lower()
+    return normalized in {"127.0.0.1", "localhost", "::1"}
+
+
+def _ensure_dashboard_bind_is_safe(host: str, settings: dict | None = None) -> None:
+    settings = settings or load_settings()
+    if _dashboard_auth_required(settings):
+        return
+    if not _is_loopback_host(host):
+        raise RuntimeError(
+            "Dashboard authentication is not configured. "
+            "Refusing to bind the dashboard to a non-loopback host."
+        )
+
+
+def _dashboard_request_authenticated(settings: dict | None = None) -> bool:
+    settings = settings or load_settings()
+    if not _dashboard_auth_required(settings):
+        return True
+    return bool(session.get("dashboard_authenticated", False))
+
+
+@app.before_request
+def require_dashboard_auth():
+    path = request.path or ""
+    if not path.startswith("/api/"):
+        return None
+    if path in {"/api/auth", "/api/auth/check"}:
+        return None
+    settings = load_settings()
+    if _dashboard_request_authenticated(settings):
+        return None
+    return jsonify({"error": "Authentication required", "code": "auth_required"}), 401
+
 @app.route("/api/auth", methods=["POST"])
 def auth():
-    """No-op auth — always succeeds."""
-    return jsonify({"status": "ok", "message": "Authenticated"})
+    """Authenticate dashboard access using the configured master password hash."""
+    settings = load_settings()
+    password_hash = _dashboard_password_hash(settings)
+    if not password_hash:
+        session["dashboard_authenticated"] = True
+        return jsonify({"status": "ok", "message": "Dashboard auth not required", "required": False})
+
+    data = request.json or {}
+    password = str(data.get("password", "") or "")
+    if not verify_password(password, password_hash):
+        session["dashboard_authenticated"] = False
+        return jsonify({"error": "Wrong password", "required": True}), 401
+
+    session["dashboard_authenticated"] = True
+    with _state_lock:
+        state["master_password"] = password
+    return jsonify({"status": "ok", "message": "Authenticated", "required": True})
 
 
 @app.route("/api/auth/check", methods=["GET"])
 def auth_check():
-    """Always authenticated."""
-    return jsonify({"authenticated": True})
+    """Return whether the current dashboard session is authenticated."""
+    settings = load_settings()
+    required = _dashboard_auth_required(settings)
+    return jsonify({
+        "authenticated": _dashboard_request_authenticated(settings),
+        "required": required,
+    })
 
 
 # ─── Accounts ──────────────────────────────────────────────────────────────
@@ -1126,10 +1488,6 @@ def get_gpm_profiles():
 @app.route("/api/run", methods=["POST"])
 def run_bot():
     """Start the bot in a background thread."""
-    if state["status"] == "running":
-        return jsonify({"error": "Bot is already running"}), 409
-
-
     data = request.json or {}
     task = data.get("task", "all")  # all, searches, daily, punch, promos, bootstrap
     target_emails = data.get("target_emails", [])
@@ -1137,22 +1495,27 @@ def run_bot():
     global _gpm_available_cache
     _gpm_available_cache.clear()
 
-    state["status"] = "running"
-    state["current_task"] = task
-    state["current_account"] = ""
-    state["progress"] = 0
-    state["progress_total"] = 0
-    state["total_points"] = 0
-    state["logs"] = []
-    state["account_logs"] = {}
-    state["accounts"] = {}  # Reset per-account tracking on new run
-    _update_ai_state(
-        active=False,
-        last_event="Đã khởi tạo phiên chạy mới.",
-        task=task,
-        model=load_settings().get("ai_model", ""),
-        last_level="info",
-    )
+    with _state_lock:
+        if state["status"] == "running":
+            return jsonify({"error": "Bot is already running"}), 409
+
+        state["status"] = "running"
+        state["current_task"] = task
+        state["current_account"] = ""
+        state["progress"] = 0
+        state["progress_total"] = 0
+        state["total_points"] = 0
+        state["logs"] = []
+        state["account_logs"] = {}
+        state["accounts"] = {}  # Reset per-account tracking on new run
+        state["ai"] = {
+            "active": False,
+            "last_update": datetime.now().isoformat(timespec="seconds"),
+            "last_event": "Đã khởi tạo phiên chạy mới.",
+            "task": task,
+            "model": load_settings().get("ai_model", ""),
+            "last_level": "info",
+        }
     
     if target_emails:
         add_log("info", f"Starting task: {task} (Targeted: {len(target_emails)})")
@@ -1172,10 +1535,10 @@ def run_bot():
 @app.route("/api/stop", methods=["POST"])
 def stop_bot():
     """Stop the bot (sets stop flag)."""
-    if state["status"] != "running":
-        return jsonify({"error": "Bot is not running"}), 400
-
-    state["status"] = "stopping"
+    with _state_lock:
+        if state["status"] != "running":
+            return jsonify({"error": "Bot is not running"}), 400
+        state["status"] = "stopping"
     add_log("warning", "Stop requested")
     return jsonify({"status": "stopping"})
 
@@ -1197,6 +1560,7 @@ def get_status():
         ai_snapshot = dict(state.get("ai", {}))
     profiles = _build_profile_views(accounts_snapshot, account_logs_snapshot)
     summary = _build_profile_summary(profiles)
+    overview = _build_dashboard_overview(profiles)
     current_profile = next((profile for profile in profiles if profile["key"] == current_account), None)
     ai_snapshot["enabled"] = bool(settings.get("ai_enabled", False))
     ai_snapshot["configured"] = bool(settings.get("ai_api_key") or settings.get("ai_api_url"))
@@ -1212,6 +1576,7 @@ def get_status():
         "accounts": accounts_snapshot,
         "profiles": profiles,
         "summary": summary,
+        "overview": overview,
         "current_profile": current_profile,
         "ai": ai_snapshot,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -1237,6 +1602,82 @@ def get_account_logs():
         # Return list of accounts that have logs
         accounts_with_logs = list(state["account_logs"].keys())
     return jsonify({"accounts": accounts_with_logs})
+
+
+def _resolve_account_email(account_key: str) -> str:
+    with _state_lock:
+        account = state["accounts"].get(account_key, {})
+        email = str(account.get("email", "") or "").strip()
+    if email:
+        return email
+    try:
+        for account in load_encrypted_accounts(""):
+            if _account_state_key(account.get("email", "")) == account_key:
+                return account.get("email", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _read_archived_account_log(email: str, date_key: str) -> list[dict]:
+    if not email or not date_key:
+        return []
+    safe_email = email.replace("@", "_at_").replace(".", "_")
+    compact_date = date_key.replace("-", "")
+    log_path = DATA_DIR / "logs" / f"acc_{safe_email}_{compact_date}.log"
+    if not log_path.exists():
+        return []
+    entries: list[dict] = []
+    try:
+        with open(log_path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.rstrip()
+                if not line:
+                    continue
+                time_part = line[:8] if len(line) >= 8 else ""
+                level_part = line[10:18].strip() if len(line) >= 18 else "info"
+                message = line[20:].strip() if len(line) >= 20 else line
+                entries.append({
+                    "time": time_part,
+                    "level": level_part.lower(),
+                    "message": message,
+                })
+    except Exception:
+        return []
+    return entries
+
+
+@app.route("/api/dashboard/overview", methods=["GET"])
+def get_dashboard_overview():
+    with _state_lock:
+        accounts_snapshot = dict(state["accounts"])
+        account_logs_snapshot = dict(state["account_logs"])
+    profiles = _build_profile_views(accounts_snapshot, account_logs_snapshot)
+    return jsonify({"overview": _build_dashboard_overview(profiles)})
+
+
+@app.route("/api/dashboard/accounts/<account_key>/history", methods=["GET"])
+def get_dashboard_account_history(account_key: str):
+    days = request.args.get("days", 30, type=int)
+    days = max(1, min(days, 90))
+    records = _recent_account_snapshots(account_key, days)
+    return jsonify({"account_key": account_key, "history": records})
+
+
+@app.route("/api/dashboard/accounts/<account_key>/logs", methods=["GET"])
+def get_dashboard_account_logs(account_key: str):
+    date_key = request.args.get("date", "").strip()
+    email = _resolve_account_email(account_key)
+    if not date_key:
+        with _state_lock:
+            logs = list(state["account_logs"].get(account_key, []))
+        return jsonify({"account_key": account_key, "email": email, "logs": logs, "date": _current_reset_context()[0]})
+    return jsonify({
+        "account_key": account_key,
+        "email": email,
+        "logs": _read_archived_account_log(email, date_key),
+        "date": date_key,
+    })
 
 
 def _search_count_setting(settings: dict, mode: str) -> int:
@@ -2004,6 +2445,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                 diagnostic_logging=bool(settings.get("diagnostic_logging", True)),
             )
             account_complete = True
+            run_start_points = 0
 
             try:
                 attach_runtime = False
@@ -2308,6 +2750,12 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             storage_state_path,
                             status_before,
                             desktop_runtime,
+                        )
+                        run_start_points = _safe_int(status_before.get("total_points", 0))
+                        _update_account_state(
+                            account_key,
+                            points=status_before.get("total_points", 0),
+                            search_status=dict(status_before),
                         )
 
                         # Desktop searches (API returns points, 3 points per search)
@@ -2669,6 +3117,11 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                     after=summarize_search_status(status_after_mobile),
                                     credit_delta=credit_delta,
                                 )
+                                _update_account_state(
+                                    account_key,
+                                    points=status_after_mobile.get("total_points", state.get("total_points", 0)),
+                                    search_status=dict(status_after_mobile),
+                                )
 
                             except Exception as run_err:
                                 add_log("error", f"📱 Mobile search execution failed: {run_err}")
@@ -2741,6 +3194,30 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             add_log("warning", f"⚠️ Search deficit: {', '.join(deficit)}")
                         else:
                             add_log("info", "✅ All search credits verified")
+                        current_points = max(
+                            _safe_int(state.get("total_points", 0)),
+                            _safe_int(final_status.get("total_points", 0)),
+                        )
+                        earned_today_value = max(0, current_points - run_start_points)
+                        _update_account_state(
+                            account_key,
+                            points=current_points,
+                            earned_today=earned_today_value,
+                            search_status=dict(final_status),
+                            verification_state="verified" if not deficit else "incomplete",
+                            remaining_items=list(deficit),
+                        )
+                        _record_account_daily_snapshot(
+                            account_key=account_key,
+                            email=email,
+                            total_points=current_points,
+                            earned_today=earned_today_value,
+                            search_status=final_status,
+                            task_overview={},
+                            category_status={},
+                            verification_state="verified" if not deficit else "incomplete",
+                            runtime_family=((desktop_runtime or {}).get("family") or (mobile_runtime or {}).get("family") or ""),
+                        )
                     except Exception as e:
                         add_log("warning", f"⚠️ Verification error: {e}")
 
@@ -2853,6 +3330,34 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                                 "info",
                                 "ℹ️ Deferred offers: " + ", ".join(deferred_items[:5]),
                             )
+                        current_points = max(
+                            _safe_int(state.get("total_points", 0)),
+                            _safe_int(verification.get("search_status", {}).get("total_points", 0)),
+                        )
+                        earned_today_value = max(0, current_points - run_start_points)
+                        verification_state = "verified" if not remaining_items else "incomplete"
+                        _update_account_state(
+                            account_key,
+                            points=current_points,
+                            earned_today=earned_today_value,
+                            search_status=dict(verification.get("search_status", {})),
+                            task_overview=dict(verification.get("task_overview", {})),
+                            category_status=dict(verification.get("category_status", {})),
+                            remaining_items=list(remaining_items),
+                            verification_state=verification_state,
+                            runtime_family=((desktop_runtime or {}).get("family") or (mobile_runtime or {}).get("family") or ""),
+                        )
+                        _record_account_daily_snapshot(
+                            account_key=account_key,
+                            email=email,
+                            total_points=current_points,
+                            earned_today=earned_today_value,
+                            search_status=verification.get("search_status", {}),
+                            task_overview=verification.get("task_overview", {}),
+                            category_status=verification.get("category_status", {}),
+                            verification_state=verification_state,
+                            runtime_family=((desktop_runtime or {}).get("family") or (mobile_runtime or {}).get("family") or ""),
+                        )
                         
                         # Google Sheets Webhook
                         webhook_url = settings.get("google_sheets_webhook_url", "")
@@ -2990,6 +3495,8 @@ def assets(filename):
 @app.route("/<path:filename>")
 def dashboard_file(filename):
     """Serve top-level dashboard files such as favicon or direct index links."""
+    if filename.startswith("api/"):
+        return jsonify({"error": "Not found"}), 404
     file_path = DASHBOARD_DIR / filename
     if file_path.is_file():
         return send_file(file_path)
@@ -3000,25 +3507,37 @@ def start_dashboard(port: int = 8080, host: str = "127.0.0.1"):
     """Start the dashboard server (waitress production WSGI)."""
     import logging
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    _ensure_dashboard_bind_is_safe(host, load_settings())
+    startup_state = {"error": None}
 
     def _serve():
         try:
-            from waitress import serve
-            serve(app, host=host, port=port, threads=4)
-        except ImportError:
-            # Fallback to Flask dev server (suppress warning)
-            import os
-            os.environ["WERKZEUG_RUN_MAIN"] = "true"
-            app.run(host=host, port=port, debug=False, use_reloader=False)
+            try:
+                from waitress import serve
+                serve(app, host=host, port=port, threads=4)
+            except ImportError:
+                # Fallback to Flask dev server (suppress warning)
+                import os
+                os.environ["WERKZEUG_RUN_MAIN"] = "true"
+                app.run(host=host, port=port, debug=False, use_reloader=False)
+        except Exception as exc:
+            startup_state["error"] = exc
+            logger.error(f"Dashboard server crashed during startup: {exc}")
 
     thread = threading.Thread(target=_serve, daemon=True)
     thread.start()
     deadline = time.time() + 5
+    ready = False
     while time.time() < deadline:
+        if startup_state["error"] is not None:
+            raise RuntimeError(f"Dashboard failed to start on {host}:{port}") from startup_state["error"]
         try:
             with socket.create_connection((host, port), timeout=0.5):
+                ready = True
                 break
         except OSError:
             time.sleep(0.1)
+    if not ready:
+        raise RuntimeError(f"Dashboard failed to become ready on {host}:{port} within 5 seconds")
     logger.info(f"Dashboard started: http://{host}:{port}")
     return thread
