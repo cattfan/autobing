@@ -56,6 +56,7 @@ from src.quiz import QuizSolver
 from src.points import PointsTracker
 from src.notifier import Notifier
 from src.scheduler import Scheduler
+from src.control_plane import ScheduleUpdate, apply_schedule_update
 from src.trends import TrendsManager
 from src.humanizer import Humanizer
 from src.ai_agent import AIAgent
@@ -2273,8 +2274,11 @@ def setup_schedule(settings):
 
     if choice == "1":
         time_str = Prompt.ask("Run time (HH:MM)", default="08:00")
-        settings["schedule_time"] = time_str
-        settings["schedule_enabled"] = True
+        updated = apply_schedule_update(
+            settings,
+            ScheduleUpdate(enabled=True, time=time_str, create_task=True),
+        )
+        settings.update(updated)
         save_settings(settings)
 
         if scheduler.setup_windows_task(time_str):
@@ -2284,7 +2288,14 @@ def setup_schedule(settings):
 
     elif choice == "2":
         if scheduler.remove_windows_task():
-            settings["schedule_enabled"] = False
+            updated = apply_schedule_update(
+                settings,
+                ScheduleUpdate(
+                    enabled=False,
+                    time=str(settings.get("schedule_time", "08:00") or "08:00"),
+                ),
+            )
+            settings.update(updated)
             save_settings(settings)
             console.print("[green][OK] Schedule removed[/green]")
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Flask Web Dashboard — Full GUI for Rewards Search Automator.
 Provides API endpoints for accounts, settings, running tasks, logs, and status.
 """
@@ -101,6 +101,32 @@ _current_log_key = contextvars.ContextVar("current_log_key", default=None)
 _state_lock = threading.Lock()
 _snapshot_lock = threading.RLock()
 ACCOUNT_DAILY_SNAPSHOTS_PATH = DATA_DIR / "account_daily_snapshots.jsonl"
+DASHBOARD_STATE_FILE = DATA_DIR / "dashboard_state.json"
+
+_last_state_hash = None
+
+def _state_sync_worker():
+    """Background thread running inside the worker process to sync state to disk."""
+    global _last_state_hash
+    while True:
+        try:
+            with _state_lock:
+                current_state_json = json.dumps(state, ensure_ascii=False)
+            current_hash = hash(current_state_json)
+            if current_hash != _last_state_hash:
+                tmp_path = DASHBOARD_STATE_FILE.with_suffix(".tmp")
+                tmp_path.write_text(current_state_json, encoding="utf-8")
+                tmp_path.replace(DASHBOARD_STATE_FILE)
+                _last_state_hash = current_hash
+        except Exception as e:
+            logger.debug(f"State sync failed: {e}")
+        time.sleep(1)
+
+def start_state_sync_for_worker():
+    """Start the disk synchronization loop in a background thread."""
+    t = threading.Thread(target=_state_sync_worker, daemon=True)
+    t.start()
+
 
 
 def _select_mobile_runtime_strategy(gpm_enabled: bool, gpm_mobile_profile_id: str | None) -> tuple[bool, str]:
@@ -1593,23 +1619,87 @@ def run_bot():
     else:
         add_log("info", f"Starting task: {task} (All Accounts)")
 
-    thread = threading.Thread(
-        target=_run_bot_thread,
-        args=(task, state["master_password"], target_emails),
-        daemon=True,
-    )
-    thread.start()
+    import subprocess
+    import sys
+    
+    job_id = "job-" + datetime.now().strftime("%Y%m%d%H%M%S")
+    with _state_lock:
+        state["job_id"] = job_id
 
-    return jsonify({"status": "started", "task": task})
+    cmd = [
+        "cargo", "run", "-q", "-p", "autobing-control-plane", "--",
+        "start-job",
+        "--job-id", job_id,
+        "--task", task,
+        "--secret-ref", "env:REWARDS_BOT_PASSWORD"
+    ]
+    for email in target_emails:
+        cmd.extend(["--target-email", email])
+
+    env = os.environ.copy()
+    env["REWARDS_BOT_PASSWORD"] = state["master_password"]
+    
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    else:
+        kwargs["start_new_session"] = True
+    
+    try:
+        subprocess.Popen(cmd, env=env, **kwargs)
+        logger.info(f"Launched Rust control plane for job {job_id}")
+    except Exception as e:
+        add_log("error", f"Failed to launch Rust control plane: {e}")
+        with _state_lock:
+            state["status"] = "error"
+
+    return jsonify({"status": "started", "task": task, "job_id": job_id})
+
+
+def _get_effective_state():
+    global state
+    with _state_lock:
+        if DASHBOARD_STATE_FILE.exists():
+            try:
+                ext_state = json.loads(DASHBOARD_STATE_FILE.read_text(encoding="utf-8"))
+                ext_status = ext_state.get("status", "idle")
+                
+                if ext_status in ("running", "stopping"):
+                    return ext_state
+                
+                state["accounts"] = ext_state.get("accounts", state["accounts"])
+                state["account_logs"] = ext_state.get("account_logs", state.get("account_logs", {}))
+                state["logs"] = ext_state.get("logs", state.get("logs", []))
+                state["status"] = ext_status
+                state["current_task"] = ext_state.get("current_task", "")
+                state["progress"] = ext_state.get("progress", 0)
+                state["progress_total"] = ext_state.get("progress_total", 0)
+                
+                try:
+                    DASHBOARD_STATE_FILE.unlink()
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.error(f"Failed to read external state: {e}")
+        return state
 
 
 @app.route("/api/stop", methods=["POST"])
 def stop_bot():
     """Stop the bot (sets stop flag)."""
+    from src.worker_store import cancel_job
     with _state_lock:
-        if state["status"] != "running":
+        eff_state = _get_effective_state()
+        if eff_state["status"] != "running":
             return jsonify({"error": "Bot is not running"}), 400
         state["status"] = "stopping"
+        job_id = state.get("job_id") or eff_state.get("job_id")
+        if job_id:
+             try:
+                 cancel_job(job_id)
+             except Exception as e:
+                 logger.error(f"Failed to cancel job: {e}")
+                 
     add_log("warning", "Stop requested")
     return jsonify({"status": "stopping"})
 
@@ -1618,17 +1708,19 @@ def stop_bot():
 def get_status():
     """Get current bot status including per-account progress."""
     settings = load_settings()
-    with _state_lock:
-        accounts_snapshot = dict(state["accounts"])
-        account_logs_snapshot = dict(state["account_logs"])
-        current_account = state["current_account"]
-        current_task = state["current_task"]
-        progress = state["progress"]
-        progress_total = state["progress_total"]
-        last_run = state["last_run"]
-        total_points = state["total_points"]
-        status_value = state["status"]
-        ai_snapshot = dict(state.get("ai", {}))
+    eff = _get_effective_state()
+    # No need to hold the lock while building profiles since eff is a distinct dict snapshot
+    accounts_snapshot = dict(eff.get("accounts", {}))
+    account_logs_snapshot = dict(eff.get("account_logs", {}))
+    current_account = eff.get("current_account", "")
+    current_task = eff.get("current_task", "")
+    progress = eff.get("progress", 0)
+    progress_total = eff.get("progress_total", 0)
+    last_run = eff.get("last_run", None)
+    total_points = eff.get("total_points", 0)
+    status_value = eff.get("status", "idle")
+    ai_snapshot = dict(eff.get("ai", {}))
+    
     profiles = _build_profile_views(accounts_snapshot, account_logs_snapshot)
     summary = _build_profile_summary(profiles)
     overview = _build_dashboard_overview(profiles)
@@ -1658,7 +1750,8 @@ def get_status():
 def get_logs():
     """Get log entries."""
     since = request.args.get("since", 0, type=int)
-    return jsonify({"logs": state["logs"][since:]})
+    eff = _get_effective_state()
+    return jsonify({"logs": eff.get("logs", [])[since:]})
 
 
 @app.route("/api/logs/accounts", methods=["GET"])
@@ -1666,12 +1759,14 @@ def get_account_logs():
     """Get per-account log entries for dashboard tabs."""
     account = request.args.get("account", "").strip()
     since = request.args.get("since", 0, type=int)
-    with _state_lock:
-        if account:
-            logs = list(state["account_logs"].get(account, []))
-            return jsonify({"logs": logs[since:], "account": account})
-        # Return list of accounts that have logs
-        accounts_with_logs = list(state["account_logs"].keys())
+    eff = _get_effective_state()
+    account_logs = eff.get("account_logs", {})
+    if account:
+        logs = list(account_logs.get(account, []))
+        return jsonify({"logs": logs[since:], "account": account})
+    # Return list of accounts that have logs
+    accounts_with_logs = list(account_logs.keys())
+
     return jsonify({"accounts": accounts_with_logs})
 
 

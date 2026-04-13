@@ -11,6 +11,7 @@ from typing import Optional
 
 import schedule
 
+from src.control_plane import WINDOWS_TASK_NAME, build_windows_task_command
 from src.utils import logger
 
 
@@ -43,7 +44,7 @@ class Scheduler:
             os.path.join(os.path.dirname(__file__), "..", "main.py")
         )
 
-        task_name = "RewardsSearchAutomator"
+        task_name = WINDOWS_TASK_NAME
 
         # Delete existing task if any
         try:
@@ -59,7 +60,7 @@ class Scheduler:
         cmd = [
             "schtasks", "/create",
             "/tn", task_name,
-            "/tr", f'"{python_path}" "{script_path}" --auto',
+            "/tr", build_windows_task_command(python_path, script_path),
             "/sc", "DAILY",
             "/st", run_time,
             "/f",  # Force overwrite
@@ -96,7 +97,7 @@ class Scheduler:
 
         try:
             result = subprocess.run(
-                ["schtasks", "/delete", "/tn", "RewardsSearchAutomator", "/f"],
+                ["schtasks", "/delete", "/tn", WINDOWS_TASK_NAME, "/f"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -117,7 +118,7 @@ class Scheduler:
         try:
             result = subprocess.run(
                 [
-                    "schtasks", "/query", "/tn", "RewardsSearchAutomator",
+                    "schtasks", "/query", "/tn", WINDOWS_TASK_NAME,
                     "/fo", "LIST", "/v",
                 ],
                 capture_output=True,
