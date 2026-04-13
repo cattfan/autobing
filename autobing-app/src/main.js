@@ -1,8 +1,154 @@
 import './style.css';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { check } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
+import { getVersion } from '@tauri-apps/api/app';
+
+const i18n = {
+    vi: {
+        navDashboard: "Bảng điều khiển",
+        navLogs: "Nhật ký hệ thống",
+        navSettings: "Cài đặt",
+        appSettingsTitle: "Cài đặt ứng dụng",
+        langLabel: "Ngôn ngữ / Language",
+        antiDetectSettingsTitle: "Tích hợp Anti-Detect Browser",
+        platformLabel: "Tên trình duyệt (Platform)",
+        apiUrlLabel: "URL API Trình duyệt",
+        saveSettingsBtn: "Lưu cài đặt",
+        savedSuccessMsg: "Đã lưu thành công!",
+        profilesManagementTitle: "Quản lý Hồ sơ",
+        startSelectedBtn: "Khởi chạy Đã chọn",
+        waitForLogs: "Đang chờ nhật ký...",
+        systemLabel: "Hệ Thống",
+        successLabel: "Thành Công",
+        errorLabel: "Lỗi",
+        warnLabel: "Cảnh Báo",
+        editBtn: "Sửa",
+        startBtn: "Chạy",
+        stopBtn: "Dừng",
+        statusRunning: "Đang chạy",
+        statusStopped: "Đã dừng",
+        editProfileTitle: "Chỉnh sửa Hồ sơ",
+        editEmailLabel: "Tài khoản / Email",
+        editPasswordLabel: "Mật khẩu",
+        editGpmPcLabel: "Profile PC (Trình duyệt)",
+        editGpmMobileLabel: "Profile Mobile (Trình duyệt)",
+        loadingProfiles: "Đang tải danh sách...",
+        noProfileSelected: "-- Chưa chọn Profile --",
+        scanFailedMsg: "-- Quét thất bại --",
+        cancelBtn: "Hủy",
+        saveChangesBtn: "Lưu thay đổi",
+        logPatternMappings: [
+            { rx: /Started job for/i, replace: "Đã bắt đầu trình quản lí tác vụ" },
+            { rx: /Cancelled job for/i, replace: "Đã hủy khởi chạy Auto Bot!" },
+            { rx: /Detected Edge version/i, replace: "Phát hiện phiên bản trình duyệt" },
+            { rx: /Warming up browser/i, replace: "Đang khởi động trình duyệt..." },
+            { rx: /Smart Task Scanner starting/i, replace: "Bắt đầu Module Quét Nhiệm vụ..." },
+            { rx: /AI Agent enabled for complex tasks/i, replace: "Đã bật Agent AI cho các tác vụ phức tạp" },
+            { rx: /Checking search credits/i, replace: "Đang kiểm tra số lượt tìm kiếm..." },
+            { rx: /Desktop searches done/i, replace: "Hoàn tất tìm kiếm trên máy tính" },
+            { rx: /Desktop searches already complete/i, replace: "Hoàn tất tìm kiếm trên máy tính từ trước" },
+            { rx: /Mobile searches done/i, replace: "Hoàn tất tìm kiếm trên điện thoại" },
+            { rx: /Mobile searches already complete/i, replace: "Hoàn tất tìm kiếm trên điện thoại từ trước" },
+            { rx: /Starting GPM login for/i, replace: "Đang khởi tạo cấu hình trình duyệt..." },
+            { rx: /GPM profile created/i, replace: "Khởi tạo thành công bản quyền" },
+            { rx: /Added account/i, replace: "Đã thêm tài khoản vào danh sách quản lý..." },
+            { rx: /Points/i, replace: "Điểm hiện tại" },
+            { rx: /Verifying search credits/i, replace: "Đang xác thực thông tin..." },
+            { rx: /All search credits verified/i, replace: "Hoàn tất xác thực các tìm kiếm" },
+            { rx: /Account .* fully verified/i, replace: "Tài khoản đã được xác thực" },
+            { rx: /All tasks completed and verified/i, replace: "Hoàn tất toàn bộ tác vụ" },
+            { rx: /Stopped GPM Profile/i, replace: "Đã đóng cấu hình trình duyệt" },
+            { rx: /Waiting.*for browser profile data sync/i, replace: "Đang đồng bộ dữ liệu..." },
+        ]
+    },
+    en: {
+        navDashboard: "Dashboard",
+        navLogs: "System Logs",
+        navSettings: "Application Settings",
+        appSettingsTitle: "App Settings",
+        langLabel: "Language / Ngôn ngữ",
+        antiDetectSettingsTitle: "Anti-Detect Browser Integration",
+        platformLabel: "Browser Platform",
+        apiUrlLabel: "Browser API URL",
+        saveSettingsBtn: "Save Settings",
+        savedSuccessMsg: "Saved successfully!",
+        profilesManagementTitle: "Profiles Management",
+        startSelectedBtn: "Start Selected",
+        waitForLogs: "Waiting for logs...",
+        systemLabel: "System",
+        successLabel: "Success",
+        errorLabel: "Error",
+        warnLabel: "Warn",
+        editBtn: "Edit",
+        startBtn: "Start",
+        stopBtn: "Stop",
+        statusRunning: "Running",
+        statusStopped: "Stopped",
+        editProfileTitle: "Edit Profile",
+        editEmailLabel: "Account / Email",
+        editPasswordLabel: "Password",
+        editGpmPcLabel: "GPM PC Profile",
+        editGpmMobileLabel: "GPM Mobile Profile",
+        loadingProfiles: "Loading profiles...",
+        noProfileSelected: "-- No Profile Selected --",
+        scanFailedMsg: "-- Scan Failed --",
+        cancelBtn: "Cancel",
+        saveChangesBtn: "Save Changes",
+        logPatternMappings: [] // English stays raw from python mostly
+    }
+};
+
+let currentLang = 'vi'; // default
+
+function updateUIText() {
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.getAttribute('data-i18n');
+        if (i18n[currentLang] && i18n[currentLang][key]) {
+            // Keep child SVG if present
+            const svg = el.querySelector('svg');
+            el.textContent = i18n[currentLang][key];
+            if (svg) el.prepend(svg);
+        }
+    });
+}
+
+function translateLogNode(msgStr) {
+    if (currentLang === 'en') return msgStr;
+    const mappings = i18n.vi.logPatternMappings;
+    let newMsg = msgStr;
+    mappings.forEach(m => {
+        if (m.rx.test(newMsg)) {
+            newMsg = newMsg.replace(m.rx, m.replace);
+        }
+    });
+    return newMsg;
+}
 
 document.addEventListener("DOMContentLoaded", () => {
+    // Sync language from selection if stored
+    const storedLang = localStorage.getItem('autobing_lang');
+    if (storedLang) {
+        currentLang = storedLang;
+        const sel = document.getElementById('setting-language');
+        if (sel) sel.value = currentLang;
+    }
+    updateUIText();
+    
+    document.getElementById('setting-language')?.addEventListener('change', (e) => {
+        currentLang = e.target.value;
+        localStorage.setItem('autobing_lang', currentLang);
+        updateUIText();
+        // Re-render dynamic content (cards, log boxes) with new language
+        if (lastDashboardState) {
+            // Clear log boxes so they re-create with translated text
+            const logsGrid = document.getElementById('logs-grid');
+            if (logsGrid) logsGrid.innerHTML = '';
+            renderDashboard(lastDashboardState);
+        }
+    });
+
     // Basic View Management Pipeline
     const navItems = document.querySelectorAll('.nav-item');
     const views = document.querySelectorAll('.view');
@@ -16,6 +162,14 @@ document.addEventListener("DOMContentLoaded", () => {
             const targetId = item.getAttribute('data-target');
             const el = document.getElementById(targetId);
             if (el) el.classList.add('active');
+            
+            // Sync title
+            const viewTitle = document.getElementById('view-title');
+            if (viewTitle) {
+                viewTitle.setAttribute('data-i18n', item.getAttribute('data-i18n'));
+                viewTitle.textContent = item.textContent.trim();
+                updateUIText();
+            }
         });
     });
 
@@ -23,9 +177,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const startAllBtn = document.getElementById('start-all-btn');
     if (startAllBtn) {
         startAllBtn.addEventListener('click', async () => {
+            if (typeof selectedEmails === 'undefined' || selectedEmails.size === 0) return;
             try {
-                console.log("Start Selected clicked");
-                // await invoke('start_missing_jobs');
+                for (let email of selectedEmails) {
+                    // Try to start each selected
+                    console.log("Bulk starting:", email);
+                    await invoke('start_job', { email }).catch(e => console.error(e));
+                }
+                setTimeout(() => window.dispatchEvent(new Event('initialLoadReq')), 1000);
             } catch (e) {
                 console.error("Failed to start jobs:", e);
             }
@@ -33,9 +192,28 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     let currentJobs = [];
+    let lastDashboardState = null;
+    let selectedEmails = new Set();
+    let isDragging = false;
+    let dragSelectMode = true;
+
+    function updateActionButtons() {
+        const delBtn = document.getElementById('delete-selected-btn');
+        const startBtn = document.getElementById('start-all-btn');
+        const t = i18n[currentLang] || i18n.vi;
+        
+        if (selectedEmails.size > 0) {
+            if(delBtn) delBtn.style.display = 'inline-flex';
+            if(startBtn) startBtn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> ${t.startSelectedBtn || 'Start Selected'} (${selectedEmails.size})`;
+        } else {
+            if(delBtn) delBtn.style.display = 'none';
+            if(startBtn) startBtn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> ${t.startSelectedBtn || 'Start Selected'}`;
+        }
+    }
 
     // Dynamic state rendering
     function renderDashboard(state) {
+        lastDashboardState = state;
         if (state.jobs) {
             currentJobs = state.jobs;
         }
@@ -43,16 +221,20 @@ document.addEventListener("DOMContentLoaded", () => {
         // Render jobs
         const jobsGrid = document.getElementById('jobs-grid');
         if (jobsGrid && state.jobs) {
+            const t = i18n[currentLang] || i18n.vi;
             jobsGrid.innerHTML = state.jobs.map(job => {
-                const statusClass = job.status === 'Running' ? 'status-running' : 'status-stopped';
+                const isRunning = job.status === 'Running';
+                const statusClass = isRunning ? 'status-running' : 'status-stopped';
+                const statusText = isRunning ? t.statusRunning : t.statusStopped;
                 const pcPct = job.pc_max > 0 ? Math.round((job.pc_current / job.pc_max) * 100) : 0;
                 const mobPct = job.mobile_max > 0 ? Math.round((job.mobile_current / job.mobile_max) * 100) : 0;
                 const dailyPct = job.daily_max > 0 ? Math.round((job.daily_current / job.daily_max) * 100) : 0;
                 const streakPct = job.streak_max > 0 ? Math.round((job.streak_current / job.streak_max) * 100) : 0;
-                const animClass = job.status === 'Running' ? 'animated' : '';
+                const animClass = isRunning ? 'animated' : '';
+                const isSelected = selectedEmails.has(job.email) ? 'selected' : '';
 
                 return `
-                <div class="account-card">
+                <div class="account-card ${isSelected}" data-email="${job.email}">
                     <div class="acc-head">
                         <div class="acc-info-top">
                             <svg class="acc-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
@@ -60,15 +242,15 @@ document.addEventListener("DOMContentLoaded", () => {
                                 <h4>${job.email}</h4>
                             </div>
                         </div>
-                        <span class="acc-status ${statusClass}">${job.status}</span>
+                        <span class="acc-status ${statusClass}">${statusText}</span>
                     </div>
                     
                     <div class="acc-body">
                         <div class="points-row">
-                            <span class="points-label">Total Points</span>
+                            <span class="points-label">${currentLang === 'vi' ? 'Tổng điểm' : 'Total Points'}</span>
                             <div style="display: flex; align-items: center; gap: 12px;">
-                                <span class="points-val">${job.points.toLocaleString()}</span>
-                                <div class="daily-streak" style="display: flex; align-items: center; gap: 4px; color: #f97316; font-weight: 600; font-size: 14px; background: rgba(249, 115, 22, 0.1); padding: 2px 8px; border-radius: 12px;" title="Daily Streak">
+                                <span class="points-val">${(job.points || 0).toLocaleString()}</span>
+                                <div class="daily-streak-badge" title="${currentLang === 'vi' ? 'Chuỗi ngày liên tục' : 'Daily Streak'}">
                                     <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 2c0 0-3 5-3 10a5 5 0 0 0 10 0c0-5-3-10-3-10z"></path></svg>
                                     <span>${job.daily_streak || 0}</span>
                                 </div>
@@ -78,8 +260,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         <div class="metrics-grid">
                             <div class="metric">
                                 <div class="metric-header">
-                                    <span>PC Search</span>
-                                    <span>${job.pc_current}/${job.pc_max}</span>
+                                    <span class="metric-label">PC Search</span>
+                                    <span class="metric-value">${job.pc_current}/${job.pc_max}</span>
                                 </div>
                                 <div class="progress-container">
                                     <div class="progress-bar ${animClass}" style="width: ${pcPct}%;"></div>
@@ -87,8 +269,8 @@ document.addEventListener("DOMContentLoaded", () => {
                             </div>
                             <div class="metric">
                                 <div class="metric-header">
-                                    <span>Mobile Search</span>
-                                    <span>${job.mobile_current}/${job.mobile_max}</span>
+                                    <span class="metric-label">Mobile Search</span>
+                                    <span class="metric-value">${job.mobile_current}/${job.mobile_max}</span>
                                 </div>
                                 <div class="progress-container">
                                     <div class="progress-bar mobile-bar ${animClass}" style="width: ${mobPct}%;"></div>
@@ -96,44 +278,31 @@ document.addEventListener("DOMContentLoaded", () => {
                             </div>
                             <div class="metric">
                                 <div class="metric-header">
-                                    <span>Daily Set</span>
-                                    <span>${job.daily_current || 0}/${job.daily_max || 3}</span>
+                                    <span class="metric-label">Daily Set</span>
+                                    <span class="metric-value">${job.daily_current || 0}/${job.daily_max || 3}</span>
                                 </div>
                                 <div class="progress-container">
-                                    <div class="progress-bar ${animClass}" style="background-color:#8b5cf6; width: ${dailyPct}%;"></div>
+                                    <div class="progress-bar ${animClass}" style="background: linear-gradient(90deg, #8b5cf6, #a78bfa); width: ${dailyPct}%;"></div>
                                 </div>
                             </div>
                             <div class="metric">
                                 <div class="metric-header">
-                                    <span>Bing Search Streak</span>
-                                    <span>${job.streak_current || 0}/${job.streak_max || 3}</span>
+                                    <span class="metric-label">Bing Search Streak</span>
+                                    <span class="metric-value">${job.streak_current || 0}/${job.streak_max || 3}</span>
                                 </div>
                                 <div class="progress-container">
-                                    <div class="progress-bar ${animClass}" style="background-color:#f59e0b; width: ${streakPct}%;"></div>
+                                    <div class="progress-bar ${animClass}" style="background: linear-gradient(90deg, #f59e0b, #fbbf24); width: ${streakPct}%;"></div>
                                 </div>
                             </div>
                         </div>
-                        
-                        <div class="metric overall-progress">
-                            <div class="metric-header">
-                                <span>Grinding Progress</span>
-                                <span>${job.progress}%</span>
-                            </div>
-                            <div class="progress-container">
-                                <div class="progress-bar ${animClass}" style="width: ${job.progress}%;"></div>
-                            </div>
-                        </div>
-                        
-                        <p class="card-msg">${job.msg}</p>
                     </div>
                     
                     <div class="acc-footer">
-                        <span>PID: ${job.pid || '---'}</span>
                         <div style="display:flex; gap:8px;">
-                            <button class="btn btn-sm edit-job-btn" data-email="${job.email}">Edit</button>
-                            ${job.status === 'Stopped' 
-                                ? `<button class="btn btn-sm start-job-btn" data-email="${job.email}">Start</button>` 
-                                : `<button class="btn btn-sm danger-btn stop-job-btn" data-email="${job.email}">Stop</button>`
+                            <button class="btn btn-sm edit-job-btn" data-email="${job.email}">${t.editBtn}</button>
+                            ${!isRunning 
+                                ? `<button class="btn btn-sm start-job-btn" data-email="${job.email}">${t.startBtn}</button>` 
+                                : `<button class="btn btn-sm danger-btn stop-job-btn" data-email="${job.email}">${t.stopBtn}</button>`
                             }
                         </div>
                     </div>
@@ -144,6 +313,8 @@ document.addEventListener("DOMContentLoaded", () => {
         // Render Logs Grid - incrementally to preserve scroll state
         const logsGrid = document.getElementById('logs-grid');
         if (logsGrid && state.jobs) {
+            const validBoxIds = new Set(state.jobs.map(job => 'log-box-' + job.email.replace(/[@.]/g, '-')));
+            
             state.jobs.forEach(job => {
                 const safeEmail = job.email.replace(/[@.]/g, '-');
                 const boxId = `log-box-${safeEmail}`;
@@ -159,10 +330,10 @@ document.addEventListener("DOMContentLoaded", () => {
                                 <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 17l6-6-6-6"></path><line x1="12" y1="19" x2="20" y2="19"></line></svg>
                                 ${job.email}
                             </div>
-                            <div class="log-box-status" id="log-status-${safeEmail}">${job.status}</div>
+                            <div class="log-box-status" id="log-status-${safeEmail}">${job.status === 'Running' ? (i18n[currentLang] || i18n.vi).statusRunning : (i18n[currentLang] || i18n.vi).statusStopped}</div>
                         </div>
                         <div class="log-box-content" id="log-content-${safeEmail}">
-                            <div class="log-line"><span class="log-level-info">[INFO]</span> Waiting for logs...</div>
+                            <div class="log-line"><span class="log-level-info">[${(i18n[currentLang] || i18n.vi).systemLabel}]</span> ${(i18n[currentLang] || i18n.vi).waitForLogs}</div>
                         </div>
                     `;
                     logsGrid.appendChild(newBox);
@@ -172,6 +343,13 @@ document.addEventListener("DOMContentLoaded", () => {
                     if (statusEl) {
                         statusEl.textContent = job.status;
                     }
+                }
+            });
+            
+            // Remove old boxes of deleted accounts
+            Array.from(logsGrid.children).forEach(child => {
+                if (!validBoxIds.has(child.id)) {
+                    logsGrid.removeChild(child);
                 }
             });
         }
@@ -195,9 +373,55 @@ document.addEventListener("DOMContentLoaded", () => {
             if (container) {
                 try {
                     const logs = await invoke('get_job_logs', { email: job.email });
-                    const logsHtml = logs.map(l => 
-                        `<div class="log-line"><span class="log-time">${l.time ? '['+l.time+']' : ''}</span> <span class="log-level-${l.level}">[${l.level.toUpperCase()}]</span> ${l.msg}</div>`
-                    ).join('');
+                    const logsHtml = logs.map(l => {
+                        let text = l.msg || "";
+                        // Strip python rich timestamp & logger prefix e.g. "17:18:51  INFO      RewardsBot          ..."
+                        const match = text.match(/^\d{2}:\d{2}:\d{2}\s+[A-Z]+\s+\S+\s+(.*)$/);
+                        if (match) {
+                            text = match[1];
+                        }
+                        
+                        // --- FILTER SPAM LOGS ---
+                        const spamPatterns = [
+                            /Phát hiện phiên bản trình duyệt/i,
+                            /Detected Edge version/i,
+                            /Effective max_threads/i,
+                            /\[diag\]/i,
+                            /Account slot timeout budget/i,
+                            /Loaded \d+ search topics/i,
+                            /│││ Account/i,
+                            /Edge Session/i,
+                            /Attached to existing Edge/i,
+                            /Dedicated Edge runtime ready/i,
+                            /Using native Edge runtime/i,
+                            /Context attached from/i,
+                            /Search Điểm hiện tại/i,
+                            /Search points:/i,
+                            /Tasks detected/i
+                        ];
+                        if (spamPatterns.some(p => p.test(text))) {
+                            return null;
+                        }
+                        // ------------------------
+                        
+                        let localizedLevel = i18n[currentLang]?.systemLabel || "System";
+                        let levelClass = l.level;
+                        
+                        // Treat "🎉" or "✅" or "created" as Success
+                        if (/✅|🎉|created|added/i.test(text)) {
+                            localizedLevel = i18n[currentLang]?.successLabel || "Success";
+                            levelClass = "info"; 
+                        } else if (l.level === "error") {
+                            localizedLevel = i18n[currentLang]?.errorLabel || "Error";
+                        } else if (l.level === "warn") {
+                            localizedLevel = i18n[currentLang]?.warnLabel || "Warn";
+                        }
+
+                        // Also translate text payload
+                        const translatedText = translateLogNode(text);
+
+                        return `<div class="log-line"><span class="log-level-${levelClass}">[${localizedLevel}]</span> ${translatedText}</div>`;
+                    }).filter(Boolean).join('');
                     
                     const isScrolledToBottom = container.scrollHeight - container.clientHeight <= container.scrollTop + 50;
                     if (container.innerHTML !== logsHtml) {
@@ -257,15 +481,117 @@ document.addEventListener("DOMContentLoaded", () => {
     loadSettings();
     setInterval(updateLogs, 1000);
 
+    // Start drag select event listeners
+    const jobsGrid = document.getElementById('jobs-grid');
+    if (jobsGrid) {
+        jobsGrid.addEventListener('mousedown', (e) => {
+            const card = e.target.closest('.account-card');
+            if (!card) return;
+            if (e.target.closest('button')) return; // ignore clicks on buttons
+
+            isDragging = true;
+            const email = card.getAttribute('data-email');
+            
+            if (selectedEmails.has(email)) {
+                selectedEmails.delete(email);
+                card.classList.remove('selected');
+                dragSelectMode = false;
+            } else {
+                selectedEmails.add(email);
+                card.classList.add('selected');
+                dragSelectMode = true;
+            }
+            updateActionButtons();
+        });
+
+        jobsGrid.addEventListener('mouseover', (e) => {
+            if (!isDragging) return;
+            const card = e.target.closest('.account-card');
+            if (!card) return;
+            if (e.target.closest('button')) return;
+
+            const email = card.getAttribute('data-email');
+            if (dragSelectMode) {
+                selectedEmails.add(email);
+                card.classList.add('selected');
+            } else {
+                selectedEmails.delete(email);
+                card.classList.remove('selected');
+            }
+            updateActionButtons();
+        });
+    }
+
+    document.addEventListener('mouseup', () => {
+        isDragging = false;
+    });
+
+    // Handle Add Profile moved to delegated listener
+
+    // Handle Delete Selected
+    document.getElementById('delete-selected-btn')?.addEventListener('click', async () => {
+        if (selectedEmails.size === 0) return;
+        const msg = currentLang === 'vi' 
+            ? `Bạn có chắc muốn xoá ${selectedEmails.size} hồ sơ đã chọn?` 
+            : `Are you sure you want to delete ${selectedEmails.size} selected profiles?`;
+            
+        if (!confirm(msg)) return;
+        
+        try {
+            await invoke('delete_accounts', { emails: Array.from(selectedEmails) });
+            selectedEmails.clear();
+            updateActionButtons();
+            setTimeout(initialLoad, 500);
+        } catch (e) {
+            console.error("Failed to delete accounts:", e);
+            alert(e);
+        }
+    });
+
     // Setup action delegations for Start and Stop
     document.addEventListener('click', async (e) => {
-        if (e.target.classList.contains('start-job-btn')) {
+        if (e.target.closest('#add-profile-btn')) {
+            const emailInput = document.getElementById('edit-email');
+            const passInput = document.getElementById('edit-password');
+            
+            emailInput.value = '';
+            emailInput.disabled = false; // enable for add
+            passInput.value = '';
+            
+            document.querySelector('#edit-modal h3').textContent = currentLang === 'vi' ? 'Thêm hồ sơ' : 'Add Profile';
+            document.getElementById('edit-modal').setAttribute('data-mode', 'add');
+            
+            // Reset dropdowns
+            const t = i18n[currentLang] || i18n.vi;
+            document.getElementById('edit-gpm-pc').innerHTML = `<option value="">${t.loadingProfiles || 'Loading...'}</option>`;
+            document.getElementById('edit-gpm-mobile').innerHTML = `<option value="">${t.loadingProfiles || 'Loading...'}</option>`;
+            
+            document.getElementById('edit-modal').classList.add('active');
+
+            // Load profiles for selection
+            invoke('scan_gpm_profiles').then(profiles => {
+                let opts = `<option value="">${t.noProfileSelected || 'None'}</option>`;
+                if (profiles && profiles.length > 0) {
+                    profiles.forEach(p => {
+                        opts += `<option value="${p.id}">${p.name} [ID: ${p.id.substring(0,8)}...]</option>`;
+                    });
+                }
+                document.getElementById('edit-gpm-pc').innerHTML = opts;
+                document.getElementById('edit-gpm-mobile').innerHTML = opts;
+            }).catch(err => {
+                console.error('Scan Error:', err);
+                document.getElementById('edit-gpm-pc').innerHTML = `<option value="">${t.scanFailedMsg || 'Failed'}</option>`;
+                document.getElementById('edit-gpm-mobile').innerHTML = `<option value="">${t.scanFailedMsg || 'Failed'}</option>`;
+            });
+        } else if (e.target.classList.contains('start-job-btn')) {
             const email = e.target.getAttribute('data-email');
             try {
-                // Optimistic UI update could go here
                 console.log("Starting job for ", email);
                 const res = await invoke('start_job', { email });
                 console.log(res);
+                // Refresh dashboard to show Stop button
+                setTimeout(initialLoad, 500);
+                setTimeout(initialLoad, 1500);
             } catch (err) {
                 console.error("Start job failed:", err);
             }
@@ -275,6 +601,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 console.log("Stopping job for ", email);
                 const res = await invoke('stop_job', { email });
                 console.log(res);
+                // Refresh dashboard to show Start button
+                setTimeout(initialLoad, 500);
+                setTimeout(initialLoad, 1500);
             } catch (err) {
                 console.error("Stop job failed:", err);
             }
@@ -283,18 +612,24 @@ document.addEventListener("DOMContentLoaded", () => {
             try {
                 const accountData = await invoke('get_account', { email });
                 document.getElementById('edit-email').value = accountData.email || '';
+                document.getElementById('edit-email').disabled = true; // disable in edit mode
                 document.getElementById('edit-password').value = accountData.password || '';
+                document.getElementById('edit-modal').setAttribute('data-mode', 'edit');
+                document.querySelector('#edit-modal h3').textContent = currentLang === 'vi' ? 'Sửa hồ sơ' : 'Edit Profile';
+
                 
                 const pcSelect = document.getElementById('edit-gpm-pc');
                 const mobileSelect = document.getElementById('edit-gpm-mobile');
-                pcSelect.innerHTML = '<option value="">Loading profiles...</option>';
-                mobileSelect.innerHTML = '<option value="">Loading profiles...</option>';
+                const t = i18n[currentLang] || i18n.vi;
+                pcSelect.innerHTML = `<option value="">${t.loadingProfiles}</option>`;
+                mobileSelect.innerHTML = `<option value="">${t.loadingProfiles}</option>`;
                 
                 document.getElementById('edit-modal').classList.add('active');
+                updateUIText();
 
                 // Background load profiles
                 invoke('scan_gpm_profiles').then(profiles => {
-                    let opts = '<option value="">-- No Profile Selected --</option>';
+                    let opts = `<option value="">${t.noProfileSelected}</option>`;
                     const pcId = accountData.gpm_profile_id || '';
                     const mobileId = accountData.gpm_mobile_profile_id || '';
                     
@@ -325,8 +660,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     
                 }).catch(err => {
                     console.error('Scan Error:', err);
-                    pcSelect.innerHTML = '<option value="">-- Scan Failed --</option>';
-                    mobileSelect.innerHTML = '<option value="">-- Scan Failed --</option>';
+                    pcSelect.innerHTML = `<option value="">${t.scanFailedMsg}</option>`;
+                    mobileSelect.innerHTML = `<option value="">${t.scanFailedMsg}</option>`;
                     
                     // Keep the current ones
                     const pcId = accountData.gpm_profile_id || '';
@@ -365,11 +700,82 @@ document.addEventListener("DOMContentLoaded", () => {
         };
 
         try {
-            await invoke('update_account', { email, data: config });
+            if (editModal.getAttribute('data-mode') === 'add') {
+                await invoke('add_account', { email, data: config });
+            } else {
+                await invoke('update_account', { email, data: config });
+            }
             editModal.classList.remove('active');
-            initialLoad(); // Refresh table view to show changes if any
+            setTimeout(initialLoad, 500); // Refresh table view to show changes if any
         } catch (err) {
-            console.error("Failed to update account:", err);
+            console.error("Failed to update/add account:", err);
+            alert("Lỗi: " + err);
         }
     });
+
+    // Auto Updater Setup
+    try {
+        const appVersion = await getVersion();
+        const verEl = document.getElementById('app-version');
+        if (verEl) verEl.textContent = "v" + appVersion;
+    } catch(e) {
+        console.error("Failed to get app version", e);
+    }
+
+    const checkUpdateBtn = document.getElementById('check-update-btn');
+    const updateMsg = document.getElementById('update-status-msg');
+    
+    if (checkUpdateBtn && updateMsg) {
+        checkUpdateBtn.addEventListener('click', async () => {
+            updateMsg.style.display = 'block';
+            updateMsg.style.color = 'var(--text-secondary)';
+            updateMsg.textContent = "Đang kiểm tra máy chủ cập nhật...";
+            checkUpdateBtn.disabled = true;
+
+            try {
+                const update = await check();
+                if (update) {
+                    let downloaded = 0;
+                    let contentLength = 0;
+                    
+                    updateMsg.style.color = 'var(--primary)';
+                    updateMsg.textContent = `Tìm thấy bản cập nhật v${update.version}! Đang tải xuống (0%)...`;
+
+                    await update.downloadAndInstall((event) => {
+                        switch (event.event) {
+                            case 'Started':
+                                contentLength = event.data.contentLength || 0;
+                                break;
+                            case 'Progress':
+                                downloaded += event.data.chunkLength;
+                                if (contentLength > 0) {
+                                    const percent = Math.round((downloaded / contentLength) * 100);
+                                    updateMsg.textContent = `Đang tải xuống... ${percent}%`;
+                                }
+                                break;
+                            case 'Finished':
+                                updateMsg.textContent = 'Đã tải xong! Đang cài đặt...';
+                                break;
+                        }
+                    });
+
+                    updateMsg.style.color = 'var(--success)';
+                    updateMsg.textContent = 'Cập nhật thành công! Ứng dụng sẽ khởi động lại trong 3 giây...';
+                    setTimeout(async () => {
+                        await relaunch();
+                    }, 3000);
+
+                } else {
+                    updateMsg.style.color = 'var(--success)';
+                    updateMsg.textContent = "Bạn đang ở phiên bản mới nhất.";
+                    checkUpdateBtn.disabled = false;
+                }
+            } catch (error) {
+                console.error("Update error:", error);
+                updateMsg.style.color = 'var(--danger)';
+                updateMsg.textContent = "Lỗi kiểm tra cập nhật: " + error.toString();
+                checkUpdateBtn.disabled = false;
+            }
+        });
+    }
 });

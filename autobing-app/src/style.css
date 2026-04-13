@@ -278,6 +278,7 @@ body {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
     gap: 20px;
+    user-select: none;
 }
 
 .account-card {
@@ -288,11 +289,22 @@ body {
     display: flex;
     flex-direction: column;
     transition: var(--transition);
+    cursor: pointer;
+}
+
+.account-card.selected {
+    border-color: var(--primary-blue);
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+    background-color: rgba(59, 130, 246, 0.03);
 }
 
 .account-card:hover {
     box-shadow: 0 4px 12px rgba(0,0,0,0.08);
     border-color: #cbd5e1;
+}
+
+.account-card.selected:hover {
+    border-color: var(--primary-blue);
 }
 
 .acc-head {
@@ -355,26 +367,59 @@ body {
     color: var(--primary-blue);
 }
 
+.daily-streak-badge {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: #f97316;
+    font-weight: 600;
+    font-size: 14px;
+    background: rgba(249, 115, 22, 0.1);
+    padding: 2px 8px;
+    border-radius: 12px;
+}
+
 .metrics-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
-    background: var(--bg-base);
-    padding: 12px;
-    border-radius: var(--radius-md);
 }
 
 .metric {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+    transition: var(--transition);
+}
+
+.metric:hover {
+    border-color: #cbd5e1;
+    background: #f8fafc;
 }
 
 .metric-header {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     font-size: 0.8rem;
     color: var(--text-muted);
+}
+
+.metric-label {
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.metric-value {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-main);
 }
 
 /* Progress bar */
@@ -390,11 +435,11 @@ body {
     height: 100%;
     background: var(--primary-blue);
     border-radius: 3px;
-    transition: width 0.3s ease;
+    transition: width 0.5s ease;
 }
 
 .progress-bar.mobile-bar {
-    background: #0ea5e9;
+    background: linear-gradient(90deg, #0ea5e9, #38bdf8);
 }
 
 @keyframes progress-stripes {
@@ -507,19 +552,22 @@ body {
 }
 
 .log-line {
-    margin-bottom: 4px;
+    margin-bottom: 2px;
     word-wrap: break-word;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05); /* clean separation */
+    padding-bottom: 2px;
 }
 
 .log-time {
-    color: #64748b;
-    margin-right: 8px;
+    color: #475569;
+    margin-right: 6px;
+    font-size: 0.85em;
 }
 
-.log-level-info { color: #38bdf8; }
-.log-level-error { color: #f87171; }
-.log-level-warn { color: #fbbf24; }
-.log-level-debug { color: #94a3b8; }
+.log-level-info { color: #38bdf8; font-weight: bold; margin-right: 4px; }
+.log-level-warn { color: #f59e0b; font-weight: bold; margin-right: 4px; }
+.log-level-error { color: #ef4444; font-weight: bold; margin-right: 4px; }
+.log-level-debug { color: #94a3b8; font-weight: bold; margin-right: 4px; }
 
 /* Edit Profile Modal */
 .modal-overlay {

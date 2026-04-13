@@ -1,0 +1,108 @@
+name: 'AutoBing Release Pipeline'
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Frontend Dependencies
+        run: |
+          cd autobing-app
+          npm install
+
+      - name: Install Backend Python Dependencies
+        run: |
+          python -m pip install --upgrade pip build pyinstaller
+          pip install -r requirements.txt
+
+      - name: Compile Python Code to Sidecars
+        run: |
+          New-Item -ItemType Directory -Force -Path "autobing-app/src-tauri/bin"
+          python -m PyInstaller --noconfirm --onefile --log-level ERROR --name worker_api src/worker_api.py
+          python -m PyInstaller --noconfirm --onefile --log-level ERROR --name browser_scanner src/browser_scanner.py
+          Copy-Item dist\*.exe -Destination autobing-app\src-tauri\bin\ -Force
+
+      - name: Build Tauri and Create Release
+        uses: tauri-apps/tauri-action@v0
+        id: tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        with:
+          projectPath: autobing-app
+          tagName: ${{ github.ref_name }}
+          releaseName: "AutoBing Update ${{ github.ref_name }}"
+          releaseBody: "Bản cập nhật sinh tự động. Tải file .msi hoặc zip để tiến hành!"
+          releaseDraft: false
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc
+
+      - name: Checkout Main Branch to Push update.json
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: update-repo
+
+      - name: Update update.json
+        shell: pwsh
+        run: |
+          $VERSION = ("${{ github.ref_name }}" -replace "^v", "")
+          $JSON_PATH = "update-repo/update.json"
+          
+          # Read signature 
+          $SIG_PATH = "autobing-app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/autobing-app_${VERSION}_x64_en-US.msi.zip.sig"
+          if (Test-Path $SIG_PATH) {
+             $SIGNATURE = Get-Content -Path $SIG_PATH -Raw
+          } else {
+             $SIGNATURE = "ERROR: Signature not built"
+          }
+
+          $URL = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/autobing-app_${VERSION}_x64_en-US.msi.zip"
+
+          $UPDATE_PAYLOAD = @{
+              version = $VERSION
+              notes = "Update $VERSION automatically published."
+              pub_date = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
+              platforms = @{
+                  "windows-x86_64" = @{
+                      signature = $SIGNATURE.Trim()
+                      url = $URL
+                  }
+              }
+          }
+          
+          $UPDATE_PAYLOAD | ConvertTo-Json -Depth 5 > $JSON_PATH
+
+      - name: Commit and Push update.json
+        run: |
+          cd update-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          git commit -m "chore(release): auto update update.json for ${{ github.ref_name }}"
+          git push

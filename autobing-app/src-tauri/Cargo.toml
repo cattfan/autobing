@@ -26,3 +26,8 @@ tauri-plugin-log = "2"
 autobing-control-plane = { path = "../../crates/autobing-control-plane" }
 autobing-protocol = { path = "../../crates/autobing-protocol" }
 notify = "8.2.0"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
