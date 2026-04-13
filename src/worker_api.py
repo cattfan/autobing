@@ -119,6 +119,18 @@ def cli(argv: list[str] | None = None) -> int:
         print(json.dumps(command.to_dict(), ensure_ascii=False))
         return 0
 
+    try:
+        from src.crypto import load_encrypted_accounts
+        import os
+        accounts = load_encrypted_accounts()
+        for email in command.target_emails:
+            for acc in accounts:
+                if acc.get("email") == email and acc.get("password"):
+                    os.environ["REWARDS_BOT_PASSWORD"] = acc["password"]
+                    break
+    except Exception:
+        pass
+
     result = start_job_process(job)
     result["public_request"] = command.to_dict()
     result["run_request"] = {

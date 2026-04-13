@@ -544,6 +544,7 @@ def _build_profile_views(accounts_snapshot: dict, account_logs_snapshot: dict) -
                 if progress_total > 0 else 0
             ),
             "points": points,
+            "daily_streak": int(item.get("streak", 0) or 0),
             "updated_at": item.get("updated_at", ""),
             "last_log_time": last_log_time,
             "last_message": last_message,
@@ -1026,14 +1027,28 @@ _gpm_lifecycle_lock = asyncio.Lock()
 
 
 async def _check_gpm_online(api_url: str) -> bool:
-    """Quick check if GPM Login app is running. Caches result per api_url."""
+    """Quick check if AntiDetect Login app is running. Caches result per api_url."""
     global _gpm_available_cache
     if _gpm_available_cache.get(api_url) is not None:
         return _gpm_available_cache[api_url]
     import httpx
     try:
+        from src.utils import load_settings
+        settings = load_settings()
+        platform = settings.get("browser_type", "gpm")
+        
         async with httpx.AsyncClient(timeout=3.0) as client:
-            r = await client.get(f"{api_url}/api/v1/profiles", follow_redirects=True)
+            if platform == "genlogin":
+                r = await client.get(f"{api_url}/profiles", follow_redirects=True)
+            elif platform == "adspower":
+                r = await client.get(f"{api_url}/status", follow_redirects=True)
+            elif platform == "dolphin":
+                r = await client.get(f"{api_url}/v1.0/browser_profiles", follow_redirects=True)
+            elif platform == "vmlogin":
+                r = await client.get(f"{api_url}/api/v1/profile/list", follow_redirects=True)
+            else:
+                r = await client.get(f"{api_url}/api/v1/profiles", follow_redirects=True)
+            
             _gpm_available_cache[api_url] = r.status_code < 500
     except Exception:
         _gpm_available_cache[api_url] = False
@@ -1043,32 +1058,73 @@ async def _check_gpm_online(api_url: str) -> bool:
 
 
 async def _start_gpm_profile(gpm_profile_id: str, api_url: str) -> str:
-    """Start GPM profile and return CDP url. Raises on failure.
+    """Start AntiDetect profile and return CDP url. Raises on failure.
 
     Uses httpx async to avoid blocking the event loop.
-    Pre-checks GPM is online (cached) to avoid long timeout per account.
+    Pre-checks GPM/AntiDetect is online (cached) to avoid long timeout per account.
     """
     global _gpm_available_cache
+    
+    from src.utils import load_settings
+    settings = load_settings()
+    platform = settings.get("browser_type", "gpm")
+    
+
     # Fast-fail: if GPM was already confirmed offline this run, don't retry
     if not await _check_gpm_online(api_url):
         raise RuntimeError(
-            f"GPM Login app is not running at {api_url}. "
-            "Please start GPM Login before running the bot."
+            f"AntiDetect Login app is not running at {api_url} for platform {platform}. "
+            "Please start the Application before running the bot."
         )
+
     import httpx
     import re
     import subprocess
     async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(f"{api_url}/api/v1/profiles/start/{gpm_profile_id}")
+        req_url = f"{api_url}/api/v1/profiles/start/{gpm_profile_id}"
+        if platform == "genlogin":
+            req_url = f"{api_url}/profiles/start/{gpm_profile_id}"
+        elif platform == "adspower":
+            req_url = f"{api_url}/api/v1/browser/start?user_id={gpm_profile_id}"
+        elif platform == "dolphin":
+            req_url = f"{api_url}/v1.0/browser_profiles/{gpm_profile_id}/start?automation=1"
+        elif platform == "vmlogin":
+            req_url = f"{api_url}/api/v1/profile/start?profileId={gpm_profile_id}"
+            
+        resp = await client.get(req_url)
         resp.raise_for_status()
         data = resp.json()
-        if data.get("success"):
-            _gpm_available_cache[api_url] = True
-            return f"http://127.0.0.1:{data['data']['remote_debugging_port']}"
         
-        # If profile is already in use, GPM Login won't return the port via start API.
+        # Mark as online
+        _gpm_available_cache[api_url] = True
+        
+        # Recursively search for port in dict
+        def extract_port(d):
+            if not isinstance(d, dict): return None
+            # Common keys: remote_debugging_port, port, debug_port, ws
+            if "remote_debugging_port" in d: return d["remote_debugging_port"]
+            if "debug_port" in d: return d["debug_port"]
+            if "port" in d: return d["port"]
+            if "ws" in d and isinstance(d["ws"], dict):
+                ws_url = d["ws"].get("puppeteer")
+                if ws_url:
+                    # extract port from ws://127.0.0.1:PORT/
+                    m = re.search(r"ws://[0-9\.]+:(?P<port>\d+)", str(ws_url))
+                    if m: return int(m.group("port"))
+            # recursive
+            for v in d.values():
+                if isinstance(v, dict):
+                    res = extract_port(v)
+                    if res: return res
+            return None
+
+        port = extract_port(data)
+        if port:
+            return f"http://127.0.0.1:{port}"
+        
+        # If profile is already in use, Login app won't return the port via start API.
         # We can extract the port by parsing the command line of running processes.
-        if "ProfileInUse" in data.get("message", ""):
+        if isinstance(data.get("message"), str) and "ProfileInUse" in data.get("message", ""):
             try:
                 # Use powershell via subprocess to dump command lines of all processes
                 cmd = ['powershell', '-NoProfile', '-Command', 'Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine']
@@ -1082,7 +1138,8 @@ async def _start_gpm_profile(gpm_profile_id: str, api_url: str) -> str:
             except Exception as subprocess_err:
                 pass
                 
-        raise RuntimeError(data.get("message", "Unknown GPM API error"))
+        raise RuntimeError(str(data.get("message", "Unknown AntiDetect API error")))
+
 
 
 def _stop_gpm_profile(gpm_profile_id: str, api_url: str):
@@ -3083,9 +3140,11 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                     try:
                         points_info = await points_tracker.read_points(page)
                         pts = points_info.get("total_points", 0)
+                        streak_val = points_info.get("streak", 0)
                         state["total_points"] = pts
-                        _update_account_state(account_key, points=pts)
-                        add_log("info", f"💰 Points: {state['total_points']:,}")
+                        state["streak"] = streak_val
+                        _update_account_state(account_key, points=pts, streak=streak_val)
+                        add_log("info", f"💰 Points: {state['total_points']:,} | 🔥 Streak: {streak_val}")
                     except Exception as _e:
                         logger.debug(f"Points read suppressed: {_e}")
 
