@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AutoBing - Pro Version</title>
+  </head>
+  <body>
+    <div id="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="icon">💻</span>
+                    <h1>AutoBing Pro</h1>
+                </div>
+                <div class="version-badge">v2.0 Desktop</div>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-target="dashboard-view" data-i18n="navDashboard">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+                    Dashboard 
+                </button>
+                <button class="nav-item" data-target="logs-view" data-i18n="navLogs">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                    System Logs
+                </button>
+                <button class="nav-item" data-target="settings-view" data-i18n="navSettings">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    Settings
+                </button>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="status-indicator online">
+                    <span class="dot"></span>
+                    Ready
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Topbar -->
+            <header class="topbar">
+                <div class="search-wrap">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <input type="text" placeholder="Search profiles..." id="search-input" />
+                </div>
+                
+                <div class="actions">
+                    <button id="add-profile-btn" class="btn outline-btn" data-i18n="addProfileBtn">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        Add Profile
+                    </button>
+                    <button id="delete-selected-btn" class="btn danger-btn" data-i18n="deleteSelectedBtn" style="display: none;">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                        Delete
+                    </button>
+                    <button id="start-all-btn" class="btn primary-btn" data-i18n="startSelectedBtn">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                        Start Selected
+                    </button>
+                </div>
+            </header>
+
+            <!-- Views -->
+            <div class="view-container">
+                <!-- Dashboard View -->
+                <section id="dashboard-view" class="view active">
+                    <h2 class="section-title" data-i18n="profilesManagementTitle">Profiles Management</h2>
+                    <div class="accounts-grid" id="jobs-grid">
+                        <!-- Dynamic accounts render here -->
+                    </div>
+                </section>
+                
+                <!-- Logs View -->
+                <section id="logs-view" class="view">
+                    <h2 class="section-title" data-i18n="navLogs">System Logs</h2>
+                    <div class="logs-grid" id="logs-grid">
+                        <!-- Dynamic per-account logs render here -->
+                    </div>
+                </section>
+
+                <!-- Settings View -->
+                <section id="settings-view" class="view">
+                    <h2 class="section-title" data-i18n="navSettings">Application Settings</h2>
+                        <div class="settings-card">
+                            <h3 data-i18n="appSettingsTitle">App Settings</h3>
+                            <div class="form-group" style="margin-top: 16px;">
+                                <label data-i18n="langLabel">Language / Ngôn ngữ</label>
+                                <select id="setting-language" class="form-select">
+                                    <option value="vi">Tiếng Việt</option>
+                                    <option value="en">English</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="settings-card">
+                            <h3 data-i18n="appUpdateTitle">Cập nhật phần mềm</h3>
+                            <p style="margin-bottom: 12px; color: var(--text-secondary);"><span data-i18n="currentVersion">Phiên bản hiện tại: </span> <strong id="app-version">v0.1.0</strong></p>
+                            <button class="btn primary-btn" id="check-update-btn" style="width: max-content;">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" style="margin-right: 6px;"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                                <span data-i18n="checkUpdateBtn">Kiểm tra bản cập nhật</span>
+                            </button>
+                            <p id="update-status-msg" style="margin-top: 12px; font-size: 0.9em; display: none;"></p>
+                        </div>
+
+                        <div class="settings-card" style="margin-top: 24px;">
+                            <h3 data-i18n="antiDetectSettingsTitle">Anti-Detect Browser Integration</h3>
+                            <div class="form-group" style="margin-top: 16px;">
+                                <label data-i18n="platformLabel">Browser Platform</label>
+                                <select id="setting-browser-type" class="form-select">
+                                    <option value="gpm">GPM Login / GPMLogin (Local API)</option>
+                                    <option value="genlogin">Genlogin (Local API)</option>
+                                    <option value="adspower">AdsPower (Local API)</option>
+                                    <option value="dolphin">Dolphin Anty (Local API)</option>
+                                    <option value="vmlogin">VMLogin (Local API)</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="margin-top: 16px;">
+                                <label data-i18n="apiUrlLabel">Browser API URL (Required for Local APIs)</label>
+                                <input type="text" id="setting-api-url" placeholder="http://127.0.0.1:9495" />
+                            </div>
+                            <div class="form-group" style="margin-top: 16px;">
+                                <button class="btn primary-btn" id="save-settings-btn" style="width: max-content;" data-i18n="saveSettingsBtn">Save Settings</button>
+                            </div>
+                            <p id="settings-status-msg" style="margin-top: 12px; font-size: 0.9em; color: var(--success); display: none;" data-i18n="savedSuccessMsg">Saved successfully!</p>
+                        </div>
+                </section>
+            </div>
+        </main>
+        
+        <!-- Edit Account Modal Overlay -->
+        <div id="edit-modal" class="modal-overlay">
+            <div class="modal">
+                <div class="modal-header">
+                    <h3 data-i18n="editProfileTitle">Edit Profile</h3>
+                    <button class="close-modal-btn">
+                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label data-i18n="editEmailLabel">Account / Email</label>
+                        <input type="text" id="edit-email" disabled />
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="editPasswordLabel">Password</label>
+                        <input type="text" id="edit-password" />
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="editGpmPcLabel">GPM PC Profile</label>
+                        <select id="edit-gpm-pc" class="form-select">
+                            <option value="" data-i18n="loadingProfiles">Loading profiles...</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="editGpmMobileLabel">GPM Mobile Profile</label>
+                        <select id="edit-gpm-mobile" class="form-select">
+                            <option value="" data-i18n="loadingProfiles">Loading profiles...</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn cancel-modal-btn" data-i18n="cancelBtn">Cancel</button>
+                    <button class="btn primary-btn" id="save-account-btn" data-i18n="saveChangesBtn">Save Changes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
