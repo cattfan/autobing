@@ -84,17 +84,29 @@ def start_job_process(job: JobSpec, root: str | None = None) -> dict[str, Any]:
     stdout = paths["stdout"].open("a", encoding="utf-8")
     stderr = paths["stderr"].open("a", encoding="utf-8")
 
-    command = [
-        sys.executable,
-        "-m",
-        "src.worker_runtime",
-        "--job-file",
-        str(paths["spec"]),
-        "--state-file",
-        str(paths["state"]),
-        "--events-file",
-        str(paths["events"]),
-    ]
+    if getattr(sys, "frozen", False):
+        command = [
+            sys.executable,
+            "internal-runtime",
+            "--job-file",
+            str(paths["spec"]),
+            "--state-file",
+            str(paths["state"]),
+            "--events-file",
+            str(paths["events"]),
+        ]
+    else:
+        command = [
+            sys.executable,
+            "-m",
+            "src.worker_runtime",
+            "--job-file",
+            str(paths["spec"]),
+            "--state-file",
+            str(paths["state"]),
+            "--events-file",
+            str(paths["events"]),
+        ]
 
     popen_kwargs: dict[str, Any] = {
         "stdout": stdout,

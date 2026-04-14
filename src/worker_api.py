@@ -55,7 +55,12 @@ def _load_json_payload(raw_json: str | None, file_path: str | None, args=None) -
 
 
 def cli(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m src.worker_api")
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "internal-runtime":
+        from src.worker_runtime import main as runtime_main
+        return runtime_main(sys.argv[2:])
+
+    parser = argparse.ArgumentParser(prog="python -m src.worker_api" if not getattr(sys, "frozen", False) else "autobing-worker.exe")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("health")
