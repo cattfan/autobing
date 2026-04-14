@@ -69,10 +69,10 @@ old_native*.py
 
 # Debug output files
 *.html
-!dashboard/index.html
+!autobing-app/index.html
 *.json
 !config/*.json
-!dashboard/*.json
+!autobing-app/*.json`n!autobing-app/src-tauri/*.json`n!update.json
 !package.json
 *.txt
 !requirements.txt
