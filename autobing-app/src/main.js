@@ -126,7 +126,7 @@ function translateLogNode(msgStr) {
     return newMsg;
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
     // Sync language from selection if stored
     const storedLang = localStorage.getItem('autobing_lang');
     if (storedLang) {
