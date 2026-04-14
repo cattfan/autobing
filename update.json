@@ -1,11 +1,11 @@
 {
-  "version": "0.1.0",
-  "notes": "First AutoBing release",
-  "pub_date": "2026-04-12T00:00:00Z",
+  "version": "0.1.1",
+  "notes": "Update 0.1.1 automatically published.",
   "platforms": {
     "windows-x86_64": {
-      "signature": "mock",
-      "url": "mock"
+      "url": "https://github.com/cattfan/autobing/releases/download/v0.1.1/autobing-app_0.1.1_x64_en-US.msi.zip",
+      "signature": "ERROR: Signature not built"
     }
-  }
+  },
+  "pub_date": "2026-04-14T04:14:38Z"
 }
