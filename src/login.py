@@ -1188,16 +1188,41 @@ window.location.replace(
         return False
 
     async def _open_login_entry(self, page: Page) -> None:
-        """Open the Microsoft sign-in page directly."""
+        """Open a stable Microsoft sign-in entrypoint without touching Rewards pages."""
         if page.is_closed():
             raise RuntimeError("Page closed unexpectedly during login")
 
-        await page.goto(
-            LOGIN_URL,
-            wait_until="domcontentloaded",
-            timeout=35000,
-        )
-        await asyncio.sleep(1.5)
+        try:
+            await page.goto(
+                BING_HOME_URL,
+                wait_until="domcontentloaded",
+                timeout=35000,
+            )
+            await asyncio.sleep(1)
+            await self._dismiss_messages(page)
+            clicked = await self._click_selector(
+                page,
+                "#id_l, #id_s, a[href*='login.live.com'], a[href*='signin']",
+            )
+            if clicked:
+                try:
+                    await page.wait_for_url("**login.live.com/**", timeout=5000)
+                except Exception:
+                    await asyncio.sleep(2)
+        except Exception:
+            pass
+
+        if page.is_closed():
+            raise RuntimeError("Page closed unexpectedly during login")
+
+        if "login.live.com" not in page.url.lower():
+            await page.goto(
+                LOGIN_URL,
+                wait_until="domcontentloaded",
+                timeout=35000,
+            )
+            await asyncio.sleep(1.5)
+
         await self._dismiss_messages(page)
 
     async def _login_inner(

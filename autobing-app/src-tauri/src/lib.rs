@@ -1,4 +1,4 @@
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, EventKind, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -55,6 +55,11 @@ fn read_system_status() -> serde_json::Value {
         }
     }
 
+    let global_state_path = workspace_root.join("data/dashboard_state.json");
+    let global_state: Option<Value> = File::open(&global_state_path)
+        .ok()
+        .and_then(|state_file| serde_json::from_reader(BufReader::new(state_file)).ok());
+
     // Look for data/account_daily_snapshots.jsonl to get latest stats
     let mut path = workspace_root.join("data/account_daily_snapshots.jsonl");
     if !path.exists() {
@@ -109,8 +114,14 @@ fn read_system_status() -> serde_json::Value {
             .and_then(|s| s.get("daily_streak"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        let mut edge_current: i64 = 0;
-        let mut edge_max: i64 = 0;
+        let mut edge_current = snapshot_opt
+            .and_then(|s| s.get("edge_current"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let mut edge_max = snapshot_opt
+            .and_then(|s| s.get("edge_max"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
 
         // --- Merge live progress from stdout.log ---
         let stdout_path = PathBuf::from(format!(
@@ -312,9 +323,102 @@ fn read_system_status() -> serde_json::Value {
                 }
             }
         }
-
+        let mut earned_today = snapshot_opt
+            .and_then(|s| s.get("earned_today"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         let mut status = "Stopped".to_string();
         let mut msg_override = None;
+
+        if let Some(glob_state) = &global_state {
+            if let Some(accounts_obj) = glob_state.get("accounts").and_then(|a| a.as_object()) {
+                for (k, v) in accounts_obj {
+                    if k == email || v.get("email").and_then(|e| e.as_str()) == Some(email) {
+                        if let Some(pts) = v.get("points").and_then(|p| p.as_i64()) {
+                            if pts > 0 && pts > points {
+                                points = pts;
+                            }
+                        }
+                        if let Some(st) = v.get("streak").and_then(|p| p.as_i64()) {
+                            if st > 0 && st > streak {
+                                streak = st;
+                            }
+                        }
+                        if let Some(earned) = v.get("earned_today").and_then(|p| p.as_i64()) {
+                            if earned > earned_today {
+                                earned_today = earned;
+                            }
+                        }
+                        if let Some(search_status) = v.get("search_status") {
+                            if let Some(v) = search_status.get("pc_current").and_then(|x| x.as_i64()) {
+                                pc_current = pc_current.max(v);
+                            }
+                            if let Some(v) = search_status.get("pc_max").and_then(|x| x.as_i64()) {
+                                if v > 0 {
+                                    pc_max = pc_max.max(v);
+                                }
+                            }
+                            if let Some(v) = search_status.get("mobile_current").and_then(|x| x.as_i64()) {
+                                mobile_current = mobile_current.max(v);
+                            }
+                            if let Some(v) = search_status.get("mobile_max").and_then(|x| x.as_i64()) {
+                                if v > 0 {
+                                    mobile_max = mobile_max.max(v);
+                                }
+                            }
+                            if let Some(v) = search_status.get("edge_current").and_then(|x| x.as_i64()) {
+                                edge_current = edge_current.max(v);
+                            }
+                            if let Some(v) = search_status.get("edge_max").and_then(|x| x.as_i64()) {
+                                if v > 0 {
+                                    edge_max = edge_max.max(v);
+                                }
+                            }
+                            if let Some(v) = search_status.get("total_points").and_then(|x| x.as_i64()) {
+                                if v > 0 {
+                                    points = points.max(v);
+                                }
+                            }
+                        }
+                        if let Some(task_overview) = v.get("task_overview") {
+                            if let Some(daily_set) = task_overview.get("daily_set") {
+                                if let Some(v) = daily_set.get("completed").and_then(|x| x.as_i64()) {
+                                    daily_current = daily_current.max(v);
+                                }
+                                if let Some(v) = daily_set.get("total").and_then(|x| x.as_i64()) {
+                                    if v > 0 {
+                                        daily_max = daily_max.max(v);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(state_status) = v.get("status").and_then(|s| s.as_str()) {
+                            status = match state_status {
+                                "running" | "accepted" | "pending" => "Running".to_string(),
+                                "error" | "failed" => "Error".to_string(),
+                                _ => state_status.to_string(),
+                            };
+                        }
+
+                        if msg_override.is_none() {
+                            if let Some(message) = v.get("last_message").and_then(|m| m.as_str()) {
+                                if !message.trim().is_empty() {
+                                    msg_override = Some(message.to_string());
+                                }
+                            }
+                        }
+
+                        if status == "Stopped" {
+                            if let Some(current_task) = v.get("task").and_then(|t| t.as_str()) {
+                                if !current_task.trim().is_empty() {
+                                    status = "Running".to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let state_path = PathBuf::from(format!(
             "C:\\Users\\CATTFAN\\Desktop\\autobing\\.omx\\worker-jobs\\{}\\state.json",
@@ -337,6 +441,17 @@ fn read_system_status() -> serde_json::Value {
                         } else {
                             msg_override = Some("Completed".to_string());
                         }
+                    }
+                }
+                
+                if let Some(pts) = state_json.get("points").and_then(|v| v.as_i64()) {
+                    if pts > 0 && pts > points {
+                        points = pts;
+                    }
+                }
+                if let Some(st) = state_json.get("streak").and_then(|v| v.as_i64()) {
+                    if st > 0 && st > streak {
+                        streak = st;
                     }
                 }
             }
@@ -375,6 +490,7 @@ fn read_system_status() -> serde_json::Value {
             "edge_current": edge_current,
             "edge_max": edge_max,
             "daily_streak": streak,
+            "earned_today": earned_today,
             "progress": progress,
             "msg": msg,
             "pid": 0
@@ -395,6 +511,7 @@ fn read_system_status() -> serde_json::Value {
             "daily_max": 3,
             "streak_current": 0,
             "streak_max": 3,
+            "earned_today": 0,
             "progress": 8, // (12 / 150) * 100
             "msg": "File not found, using pure mock...",
             "pid": 0
@@ -411,13 +528,15 @@ fn read_system_status() -> serde_json::Value {
 }
 
 #[tauri::command]
-fn start_job(app_handle: tauri::AppHandle, email: String) -> Result<String, String> {
+fn start_job(app_handle: tauri::AppHandle, email: String, task: Option<String>) -> Result<String, String> {
     let workspace_root = get_workspace_root();
 
     // Clean up old state so the worker starts fresh
     let job_dir = workspace_root.join(format!(".omx/worker-jobs/{}", email));
     let _ = std::fs::remove_file(job_dir.join("cancel.requested"));
     let _ = std::fs::remove_file(job_dir.join("state.json"));
+
+    let task_val = task.unwrap_or_else(|| "all".to_string());
 
     let mut cmd = if cfg!(debug_assertions) {
         let mut c = std::process::Command::new("python");
@@ -429,6 +548,8 @@ fn start_job(app_handle: tauri::AppHandle, email: String) -> Result<String, Stri
             &email,
             "--target-email",
             &email,
+            "--task",
+            &task_val,
         ]);
         c
     } else {
@@ -444,6 +565,8 @@ fn start_job(app_handle: tauri::AppHandle, email: String) -> Result<String, Stri
             &email,
             "--target-email",
             &email,
+            "--task",
+            &task_val,
         ]);
         c
     };

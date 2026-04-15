@@ -649,8 +649,9 @@ class BrowserManager:
         """Start Playwright and launch browser."""
         self.playwright = await async_playwright().start()
 
-        browser_type = self.settings.get("browser_type", "chromium")
-        launcher = getattr(self.playwright, browser_type)
+        browser_type = str(self.settings.get("browser_type", "chromium") or "chromium").lower()
+        if browser_type in {"gpm", "gologin", "ads"}:
+            browser_type = "chromium"
 
         launch_args = [
             # Core anti-detection (minimal footprint)

@@ -105,25 +105,35 @@ DASHBOARD_STATE_FILE = DATA_DIR / "dashboard_state.json"
 
 _last_state_hash = None
 
+def _flush_state_to_disk() -> None:
+    """Persist the current in-memory dashboard state immediately."""
+    global _last_state_hash
+    with _state_lock:
+        current_state_json = json.dumps(state, ensure_ascii=False)
+    current_hash = hash(current_state_json)
+    if current_hash == _last_state_hash:
+        return
+    tmp_path = DASHBOARD_STATE_FILE.with_suffix(".tmp")
+    tmp_path.write_text(current_state_json, encoding="utf-8")
+    tmp_path.replace(DASHBOARD_STATE_FILE)
+    _last_state_hash = current_hash
+
+
 def _state_sync_worker():
     """Background thread running inside the worker process to sync state to disk."""
-    global _last_state_hash
     while True:
         try:
-            with _state_lock:
-                current_state_json = json.dumps(state, ensure_ascii=False)
-            current_hash = hash(current_state_json)
-            if current_hash != _last_state_hash:
-                tmp_path = DASHBOARD_STATE_FILE.with_suffix(".tmp")
-                tmp_path.write_text(current_state_json, encoding="utf-8")
-                tmp_path.replace(DASHBOARD_STATE_FILE)
-                _last_state_hash = current_hash
+            _flush_state_to_disk()
         except Exception as e:
             logger.debug(f"State sync failed: {e}")
         time.sleep(1)
 
 def start_state_sync_for_worker():
     """Start the disk synchronization loop in a background thread."""
+    try:
+        _flush_state_to_disk()
+    except Exception as e:
+        logger.debug(f"Initial state sync failed: {e}")
     t = threading.Thread(target=_state_sync_worker, daemon=True)
     t.start()
 
@@ -149,7 +159,7 @@ def add_log(level: str, message: str):
         state["logs"].append(entry)
         if len(state["logs"]) > LOG_MAX:
             state["logs"] = state["logs"][-LOG_MAX:]
-            
+
         # Per-account in-memory log for dashboard
         _k = _current_log_key.get()
         if _k:
@@ -164,6 +174,10 @@ def add_log(level: str, message: str):
                 state["accounts"][_k]["last_level"] = level
                 state["accounts"][_k]["log_count"] = len(state["account_logs"][_k])
                 state["accounts"][_k]["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    try:
+        _flush_state_to_disk()
+    except Exception:
+        pass
 
     # Per-account file handler logging
     _h = _current_log_handler.get()
@@ -219,6 +233,10 @@ def _update_account_state(account_key: str, **kwargs) -> None:
             }
         state["accounts"][account_key].update(kwargs)
         state["accounts"][account_key]["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    try:
+        _flush_state_to_disk()
+    except Exception:
+        pass
 
 
 def _update_ai_state(**kwargs) -> None:
@@ -468,6 +486,7 @@ def _record_account_daily_snapshot(
     category_status: dict | None,
     verification_state: str,
     runtime_family: str,
+    daily_streak: int = 0,
 ) -> None:
     reset_key, _ = _current_reset_context()
     existing_today = next(
@@ -499,6 +518,7 @@ def _record_account_daily_snapshot(
         "mobile_max": _safe_int(search_status.get("mobile_max", 0)),
         "edge_current": _safe_int(search_status.get("edge_current", 0)),
         "edge_max": _safe_int(search_status.get("edge_max", 0)),
+        "daily_streak": _safe_int(daily_streak),
         "daily_set_completed": _safe_int(daily.get("completed", 0)),
         "daily_set_total": _safe_int(daily.get("total", 0)),
         "promos_completed": _safe_int(promos.get("completed", 0)),
@@ -2717,6 +2737,38 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
 
                 # Desktop session / session bootstrap / activities
 
+                if task == "sync":
+                    state["current_task"] = "Syncing"
+                    add_log("info", "🔄 Syncing latest points and streaks...")
+                    from src.browser import BrowserManager
+                    sync_bm = BrowserManager(settings)
+                    sync_bm.set_account(email)
+                    try:
+                        sync_cdp_url = await sync_bm.start_native_edge_default_profile()
+                        sync_ctx, sync_page = await _open_account_context(
+                            sync_bm,
+                            login_mgr,
+                            account,
+                            session_proxy,
+                            "desktop",
+                            storage_state_path,
+                            attach_existing_edge=True,
+                            attached_cdp_url=sync_cdp_url,
+                        )
+                        points_info = await points_tracker.read_points(sync_page)
+                        pts = points_info.get("total_points", 0)
+                        streak_val = points_info.get("streak", 0)
+                        state["total_points"] = pts
+                        state["streak"] = streak_val
+                        _update_account_state(account_key, points=pts, streak=streak_val)
+                        add_log("info", f"💰 Points: {pts:,} | 🔥 Streak: {streak_val}")
+                        await _persist_storage_state(sync_ctx, storage_state_path)
+                    except Exception as e:
+                        add_log("error", f"Sync failed: {e}")
+                    finally:
+                        await sync_bm.close()
+                    return
+
                 # ══ PRIORITY 0: Edge Session (Edge Streak + Edge Searches) ══
                 if task in ("all", "searches"):
                     state["current_task"] = "Edge Session"
@@ -3676,6 +3728,7 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None):
                             category_status=verification.get("category_status", {}),
                             verification_state=verification_state,
                             runtime_family=((desktop_runtime or {}).get("family") or (mobile_runtime or {}).get("family") or ""),
+                            daily_streak=state["accounts"].get(account_key, {}).get("streak", 0),
                         )
                         
                         # Google Sheets Webhook
