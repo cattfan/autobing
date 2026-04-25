@@ -24,8 +24,12 @@ env/
 data/
 profiles/
 output/
+.omx/
+config/settings.json
 config/accounts.json
 config/accounts.json.enc
+config/accounts.json.enc.bak
+config/*.local.json
 .playwright-cli/
 
 # OS
@@ -39,7 +43,6 @@ Desktop.ini
 # Local agent/runtime state
 .claude/
 .omc/
-.omx/
 vendor/
 config/accounts.json.enc.bak
 
@@ -71,8 +74,11 @@ old_native*.py
 *.html
 !autobing-app/index.html
 *.json
-!config/*.json
-!autobing-app/*.json`n!autobing-app/src-tauri/*.json`n!update.json
+!config/settings.example.json
+!autobing-app/package.json
+!autobing-app/package-lock.json
+!autobing-app/src-tauri/tauri.conf.json
+!update.json
 !package.json
 *.txt
 !requirements.txt

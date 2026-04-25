@@ -8,20 +8,33 @@ if (-Not (Test-Path -Path $TARGET_DIR)) {
     New-Item -ItemType Directory -Force -Path $TARGET_DIR
 }
 
+Write-Host "Dọn output cũ..."
+Remove-Item "$PSScriptRoot\dist" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$PSScriptRoot\build" -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Host "Biên dịch src/worker_api.py thành .exe..."
-# Build Worker API
 python -m PyInstaller --noconfirm --onefile --log-level ERROR --name worker_api $PSScriptRoot\src\worker_api.py
 
 Write-Host "Biên dịch src/browser_scanner.py thành .exe..."
-# Build Browser Scanner
 python -m PyInstaller --noconfirm --onefile --log-level ERROR --name browser_scanner $PSScriptRoot\src\browser_scanner.py
 
 Write-Host "Copy file .exe qua src-tauri/bin..."
-if (Test-Path "$PSScriptRoot\dist\worker_api.exe") {
-    Copy-Item "$PSScriptRoot\dist\worker_api.exe" -Destination $TARGET_DIR -Force
+$workerApiExe = "$PSScriptRoot\dist\worker_api.exe"
+$browserScannerExe = "$PSScriptRoot\dist\browser_scanner.exe"
+if (-Not (Test-Path $workerApiExe)) {
+    throw "worker_api.exe not found in dist"
 }
-if (Test-Path "$PSScriptRoot\dist\browser_scanner.exe") {
-    Copy-Item "$PSScriptRoot\dist\browser_scanner.exe" -Destination $TARGET_DIR -Force
+if (-Not (Test-Path $browserScannerExe)) {
+    throw "browser_scanner.exe not found in dist"
+}
+Copy-Item $workerApiExe -Destination $TARGET_DIR -Force
+Copy-Item $browserScannerExe -Destination $TARGET_DIR -Force
+
+if (-Not (Test-Path "$TARGET_DIR\worker_api.exe")) {
+    throw "worker_api.exe was not copied"
+}
+if (-Not (Test-Path "$TARGET_DIR\browser_scanner.exe")) {
+    throw "browser_scanner.exe was not copied"
 }
 
 Write-Host "Tiến hành đóng gói Tauri App Installer (Giao diện + Code + Trình duyệt)..."

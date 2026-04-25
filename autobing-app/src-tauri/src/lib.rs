@@ -25,12 +25,78 @@ fn get_workspace_root() -> std::path::PathBuf {
             return dir;
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(d) = exe.parent() {
-            return d.to_path_buf();
-        }
-    }
     std::path::PathBuf::from(".")
+}
+
+fn env_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+fn runtime_config_dir() -> std::path::PathBuf {
+    if let Some(path) = env_path("AUTOBING_CONFIG_DIR") {
+        return path;
+    }
+    if let Some(home) = env_path("AUTOBING_HOME") {
+        return home.join("config");
+    }
+    if cfg!(debug_assertions) {
+        return get_workspace_root().join("config");
+    }
+    let base = std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs_fallback_home().join("AppData").join("Roaming"));
+    base.join("AutoBing").join("config")
+}
+
+fn runtime_data_dir() -> std::path::PathBuf {
+    if let Some(path) = env_path("AUTOBING_DATA_DIR") {
+        return path;
+    }
+    if let Some(home) = env_path("AUTOBING_HOME") {
+        return home.join("data");
+    }
+    if cfg!(debug_assertions) {
+        return get_workspace_root().join("data");
+    }
+    let base = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs_fallback_home().join("AppData").join("Local"));
+    base.join("AutoBing").join("data")
+}
+
+fn dirs_fallback_home() -> std::path::PathBuf {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn settings_path() -> std::path::PathBuf {
+    runtime_config_dir().join("settings.json")
+}
+
+fn accounts_path() -> std::path::PathBuf {
+    runtime_config_dir().join("accounts.json.enc")
+}
+
+fn dashboard_state_path() -> std::path::PathBuf {
+    runtime_data_dir().join("dashboard_state.json")
+}
+
+fn snapshots_path() -> std::path::PathBuf {
+    runtime_data_dir().join("account_daily_snapshots.jsonl")
+}
+
+fn worker_jobs_dir() -> std::path::PathBuf {
+    runtime_data_dir().join(".omx").join("worker-jobs")
+}
+
+fn apply_runtime_env(cmd: &mut std::process::Command) {
+    let config_dir = runtime_config_dir();
+    let data_dir = runtime_data_dir();
+    cmd.env("AUTOBING_CONFIG_DIR", &config_dir)
+        .env("AUTOBING_DATA_DIR", &data_dir)
+        .env("AUTOBING_WORKER_JOBS_DIR", worker_jobs_dir());
 }
 
 #[tauri::command]
@@ -41,7 +107,6 @@ fn get_system_status() -> serde_json::Value {
 fn read_system_status() -> serde_json::Value {
     let mut jobs = Vec::new();
 
-    let workspace_root = get_workspace_root();
     let today_key = std::process::Command::new("python")
         .args(["-c", "from datetime import datetime; print(datetime.now().date().isoformat())"])
         .output()
@@ -52,7 +117,7 @@ fn read_system_status() -> serde_json::Value {
         .unwrap_or_default();
 
     // First, read all configured accounts
-    let acc_path = workspace_root.join("config/accounts.json.enc");
+    let acc_path = accounts_path();
     let acc_data = std::fs::read_to_string(&acc_path).unwrap_or_else(|_| "[]".to_string());
     let accounts: Vec<Value> = serde_json::from_str(&acc_data).unwrap_or_default();
 
@@ -63,16 +128,13 @@ fn read_system_status() -> serde_json::Value {
         }
     }
 
-    let global_state_path = workspace_root.join("data/dashboard_state.json");
+    let global_state_path = dashboard_state_path();
     let global_state: Option<Value> = File::open(&global_state_path)
         .ok()
         .and_then(|state_file| serde_json::from_reader(BufReader::new(state_file)).ok());
 
-    // Look for data/account_daily_snapshots.jsonl to get latest stats
-    let mut path = workspace_root.join("data/account_daily_snapshots.jsonl");
-    if !path.exists() {
-        path = PathBuf::from("../../data/account_daily_snapshots.jsonl");
-    }
+    // Look for local account snapshots to get latest stats
+    let path = snapshots_path();
 
     let mut latest_snapshots: std::collections::HashMap<String, Value> =
         std::collections::HashMap::new();
@@ -277,10 +339,7 @@ fn read_system_status() -> serde_json::Value {
             bing_streak_target = fallback_bing_streak_target;
         }
 
-        let state_path = workspace_root.join(format!(
-            ".omx/worker-jobs/{}/state.json",
-            email
-        ));
+        let state_path = worker_jobs_dir().join(email).join("state.json");
 
         let sanitize_earned_today = |earned: i64, total_points: i64| -> i64 {
             if earned < 0 {
@@ -578,7 +637,7 @@ fn start_job(app_handle: tauri::AppHandle, email: String, task: Option<String>) 
     let workspace_root = get_workspace_root();
 
     // Clean up old state so the worker starts fresh
-    let job_dir = workspace_root.join(format!(".omx/worker-jobs/{}", email));
+    let job_dir = worker_jobs_dir().join(&email);
     let _ = std::fs::remove_file(job_dir.join("cancel.requested"));
     let _ = std::fs::remove_file(job_dir.join("state.json"));
 
@@ -619,6 +678,7 @@ fn start_job(app_handle: tauri::AppHandle, email: String, task: Option<String>) 
 
     cmd.current_dir(&workspace_root)
         .env("REWARDS_BOT_PASSWORD", "tauri-managed");
+    apply_runtime_env(&mut cmd);
 
     #[cfg(target_os = "windows")]
     {
@@ -649,6 +709,7 @@ fn stop_job(email: String) -> Result<String, String> {
     let mut cmd = std::process::Command::new("python");
     cmd.args(&["-m", "src.worker_api", "cancel-job", "--job-id", &email])
         .current_dir(&workspace_root);
+    apply_runtime_env(&mut cmd);
 
     #[cfg(target_os = "windows")]
     {
@@ -673,8 +734,7 @@ fn stop_job(email: String) -> Result<String, String> {
 
 #[tauri::command]
 fn get_job_logs(email: String) -> Vec<serde_json::Value> {
-    let workspace_root = get_workspace_root();
-    let log_path = workspace_root.join(format!(".omx/worker-jobs/{}/stdout.log", email));
+    let log_path = worker_jobs_dir().join(email).join("stdout.log");
 
     let mut logs = Vec::new();
     if let Ok(file) = File::open(&log_path) {
@@ -714,8 +774,7 @@ fn get_job_logs(email: String) -> Vec<serde_json::Value> {
 
 #[tauri::command]
 fn get_account(email: String) -> Result<serde_json::Value, String> {
-    let workspace_root = get_workspace_root();
-    let acc_path = workspace_root.join("config/accounts.json.enc");
+    let acc_path = accounts_path();
     let data = std::fs::read_to_string(&acc_path).map_err(|e| e.to_string())?;
     let accounts: Vec<serde_json::Value> =
         serde_json::from_str(&data).map_err(|e| e.to_string())?;
@@ -732,8 +791,7 @@ fn get_account(email: String) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn update_account(email: String, data: serde_json::Value) -> Result<String, String> {
-    let workspace_root = get_workspace_root();
-    let acc_path = workspace_root.join("config/accounts.json.enc");
+    let acc_path = accounts_path();
     let file_data = std::fs::read_to_string(&acc_path).map_err(|e| e.to_string())?;
     let mut accounts: Vec<serde_json::Value> =
         serde_json::from_str(&file_data).map_err(|e| e.to_string())?;
@@ -757,6 +815,9 @@ fn update_account(email: String, data: serde_json::Value) -> Result<String, Stri
     }
 
     if found {
+        if let Some(parent) = acc_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
         let new_json = serde_json::to_string_pretty(&accounts).map_err(|e| e.to_string())?;
         std::fs::write(&acc_path, new_json).map_err(|e| e.to_string())?;
         Ok("Account updated successfully".into())
@@ -782,6 +843,7 @@ fn scan_gpm_profiles(app_handle: tauri::AppHandle) -> Result<serde_json::Value, 
         std::process::Command::new(exe_path)
     };
     cmd.current_dir(&workspace_root);
+    apply_runtime_env(&mut cmd);
 
     #[cfg(target_os = "windows")]
     {
@@ -803,16 +865,17 @@ fn scan_gpm_profiles(app_handle: tauri::AppHandle) -> Result<serde_json::Value, 
 
 #[tauri::command]
 fn get_settings() -> Result<serde_json::Value, String> {
-    let workspace_root = get_workspace_root();
-    let settings_path = workspace_root.join("config/settings.json");
-    let data = std::fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+    let settings_path = settings_path();
+    let data = std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string());
     serde_json::from_str(&data).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn update_settings(data: serde_json::Value) -> Result<String, String> {
-    let workspace_root = get_workspace_root();
-    let settings_path = workspace_root.join("config/settings.json");
+    let settings_path = settings_path();
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
 
     // Read current
     let file_data = std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string());
@@ -836,8 +899,10 @@ fn update_settings(data: serde_json::Value) -> Result<String, String> {
 
 #[tauri::command]
 fn add_account(email: String, data: serde_json::Value) -> Result<String, String> {
-    let workspace_root = get_workspace_root();
-    let acc_path = workspace_root.join("config/accounts.json.enc");
+    let acc_path = accounts_path();
+    if let Some(parent) = acc_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     let file_data = std::fs::read_to_string(&acc_path).unwrap_or_else(|_| "[]".to_string());
     let mut accounts: Vec<serde_json::Value> = serde_json::from_str(&file_data).unwrap_or_default();
 
@@ -866,8 +931,7 @@ fn add_account(email: String, data: serde_json::Value) -> Result<String, String>
 
 #[tauri::command]
 fn delete_accounts(emails: Vec<String>) -> Result<String, String> {
-    let workspace_root = get_workspace_root();
-    let acc_path = workspace_root.join("config/accounts.json.enc");
+    let acc_path = accounts_path();
     let file_data = std::fs::read_to_string(&acc_path).map_err(|e| e.to_string())?;
     let mut accounts: Vec<serde_json::Value> = serde_json::from_str(&file_data).unwrap_or_default();
 
@@ -880,6 +944,9 @@ fn delete_accounts(emails: Vec<String>) -> Result<String, String> {
         }
     });
 
+    if let Some(parent) = acc_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     let new_json = serde_json::to_string_pretty(&accounts).map_err(|e| e.to_string())?;
     std::fs::write(&acc_path, new_json).map_err(|e| e.to_string())?;
 
@@ -919,9 +986,8 @@ pub fn run() {
                 let (tx, rx) = mpsc::channel();
                 let mut watcher = notify::RecommendedWatcher::new(tx, Config::default()).unwrap();
 
-                let workspace_root = get_workspace_root();
-                let snapshot_path = workspace_root.join("data/account_daily_snapshots.jsonl");
-                let worker_jobs_root = workspace_root.join(".omx/worker-jobs");
+                let snapshot_path = snapshots_path();
+                let worker_jobs_root = worker_jobs_dir();
 
                 loop {
                     let _ = watcher.watch(&worker_jobs_root, RecursiveMode::Recursive);

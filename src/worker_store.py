@@ -33,7 +33,17 @@ from tempfile import mkstemp
 from src.job_protocol import JobSpec
 
 
-DEFAULT_JOBS_ROOT = Path(".omx") / "worker-jobs"
+def _default_jobs_root() -> Path:
+    if explicit := os.getenv("AUTOBING_WORKER_JOBS_DIR", "").strip():
+        return Path(explicit).expanduser()
+    if home := os.getenv("AUTOBING_HOME", "").strip():
+        return Path(home).expanduser() / ".omx" / "worker-jobs"
+    if data_dir := os.getenv("AUTOBING_DATA_DIR", "").strip():
+        return Path(data_dir).expanduser() / ".omx" / "worker-jobs"
+    return Path(".omx") / "worker-jobs"
+
+
+DEFAULT_JOBS_ROOT = _default_jobs_root()
 
 
 def _utcnow() -> str:

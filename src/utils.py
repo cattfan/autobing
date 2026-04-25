@@ -17,10 +17,57 @@ from typing import Any, Callable, Optional
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
 ROOT_DIR = Path(__file__).parent.parent
-CONFIG_DIR = ROOT_DIR / "config"
-DATA_DIR = ROOT_DIR / "data"
-PROFILES_DIR = DATA_DIR / "profiles"
 DASHBOARD_DIR = ROOT_DIR / "dashboard"
+
+
+def _user_config_base() -> Path:
+    if os.name == "nt":
+        return Path(os.getenv("APPDATA") or Path.home() / "AppData" / "Roaming") / "AutoBing"
+    return Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config") / "autobing"
+
+
+def _user_data_base() -> Path:
+    if os.name == "nt":
+        return Path(os.getenv("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AutoBing"
+    return Path(os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "autobing"
+
+
+def _env_path(name: str) -> Path | None:
+    value = os.getenv(name, "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def _runtime_home() -> Path | None:
+    return _env_path("AUTOBING_HOME")
+
+
+def get_config_dir() -> Path:
+    if explicit := _env_path("AUTOBING_CONFIG_DIR"):
+        return explicit
+    if home := _runtime_home():
+        return home / "config"
+    if os.getenv("AUTOBING_USE_USER_DIRS", "").strip().lower() in {"1", "true", "yes"}:
+        return _user_config_base() / "config"
+    return ROOT_DIR / "config"
+
+
+def get_data_dir() -> Path:
+    if explicit := _env_path("AUTOBING_DATA_DIR"):
+        return explicit
+    if home := _runtime_home():
+        return home / "data"
+    if os.getenv("AUTOBING_USE_USER_DIRS", "").strip().lower() in {"1", "true", "yes"}:
+        return _user_data_base() / "data"
+    return ROOT_DIR / "data"
+
+
+def get_profiles_dir() -> Path:
+    return get_data_dir() / "profiles"
+
+
+CONFIG_DIR = get_config_dir()
+DATA_DIR = get_data_dir()
+PROFILES_DIR = get_profiles_dir()
 
 # Ensure directories exist
 for d in [CONFIG_DIR, DATA_DIR, PROFILES_DIR]:
@@ -106,7 +153,7 @@ ENV_SETTING_OVERRIDES = {
 
 
 def load_settings() -> dict:
-    """Load settings from config/settings.json."""
+    """Load settings from the local runtime config directory."""
     settings_path = CONFIG_DIR / "settings.json"
     settings = get_default_settings()
     if not settings_path.exists():
@@ -120,8 +167,9 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict) -> None:
-    """Save settings to config/settings.json."""
+    """Save settings to the local runtime config directory."""
     settings_path = CONFIG_DIR / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_to_save = get_default_settings()
     settings_to_save.update(settings)
 

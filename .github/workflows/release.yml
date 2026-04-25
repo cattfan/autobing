@@ -40,11 +40,34 @@ jobs:
           pip install -r requirements.txt
 
       - name: Compile Python Code to Sidecars
+        shell: pwsh
         run: |
+          Remove-Item dist -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item build -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path "autobing-app/src-tauri/bin"
           python -m PyInstaller --noconfirm --onefile --log-level ERROR --name worker_api src/worker_api.py
           python -m PyInstaller --noconfirm --onefile --log-level ERROR --name browser_scanner src/browser_scanner.py
-          Copy-Item dist\*.exe -Destination autobing-app\src-tauri\bin\ -Force
+          if (-Not (Test-Path "dist/worker_api.exe")) { throw "worker_api.exe not built" }
+          if (-Not (Test-Path "dist/browser_scanner.exe")) { throw "browser_scanner.exe not built" }
+          Copy-Item "dist/worker_api.exe" -Destination "autobing-app/src-tauri/bin/worker_api.exe" -Force
+          Copy-Item "dist/browser_scanner.exe" -Destination "autobing-app/src-tauri/bin/browser_scanner.exe" -Force
+
+      - name: Verify no local runtime data is packaged
+        shell: pwsh
+        run: |
+          $forbidden = @(
+            "config/settings.json",
+            "config/accounts.json",
+            "config/accounts.json.enc",
+            "data",
+            "profiles",
+            ".omx"
+          )
+          foreach ($path in $forbidden) {
+            if (Test-Path $path) {
+              throw "Refusing release with local runtime data present: $path"
+            }
+          }
 
       - name: Build Tauri and Create Release
         uses: tauri-apps/tauri-action@v0
@@ -76,30 +99,52 @@ jobs:
         run: |
           $VERSION = ("${{ github.ref_name }}" -replace "^v", "")
           $JSON_PATH = "update-repo/update.json"
-          
-          # Read signature 
-          $SIG_PATH = "autobing-app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/autobing-app_${VERSION}_x64_en-US.msi.zip.sig"
-          if (Test-Path $SIG_PATH) {
-             $SIGNATURE = Get-Content -Path $SIG_PATH -Raw
-          } else {
-             $SIGNATURE = "ERROR: Signature not built"
+
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.TAURI_PRIVATE_KEY }}")) {
+            throw "TAURI_PRIVATE_KEY secret is required for signed updater releases"
           }
 
-          $URL = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/autobing-app_${VERSION}_x64_en-US.msi.zip"
+          $bundleRoot = "autobing-app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
+          $artifact = Get-ChildItem -Path $bundleRoot -Recurse -Filter "*.msi.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($null -eq $artifact) {
+            Get-ChildItem -Path $bundleRoot -Recurse | Select-Object FullName
+            throw "No .msi.zip updater artifact found"
+          }
+
+          $sigPath = "$($artifact.FullName).sig"
+          if (-Not (Test-Path $sigPath)) {
+            Get-ChildItem -Path $bundleRoot -Recurse | Select-Object FullName
+            throw "Updater signature file missing: $sigPath"
+          }
+          $SIGNATURE = (Get-Content -Path $sigPath -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($SIGNATURE)) {
+            throw "Updater signature is empty"
+          }
+          if ($SIGNATURE -match "ERROR:") {
+            throw "Updater signature contains error placeholder"
+          }
+
+          $assetName = $artifact.Name
+          $URL = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$assetName"
 
           $UPDATE_PAYLOAD = @{
               version = $VERSION
               notes = "Update $VERSION automatically published."
-              pub_date = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
+              pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
               platforms = @{
                   "windows-x86_64" = @{
-                      signature = $SIGNATURE.Trim()
+                      signature = $SIGNATURE
                       url = $URL
                   }
               }
           }
-          
+
           $UPDATE_PAYLOAD | ConvertTo-Json -Depth 5 > $JSON_PATH
+          $generated = Get-Content -Path $JSON_PATH -Raw
+          if ($generated -match "ERROR:" -or $generated -notmatch "https://github.com/") {
+            throw "Generated update.json failed validation"
+          }
+          $null = $generated | ConvertFrom-Json
 
       - name: Commit and Push update.json
         run: |
