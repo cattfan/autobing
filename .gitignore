@@ -87,3 +87,6 @@ old_native*.py
 *.jpg
 *.webp
 log.md
+
+# Tauri generated sidecars
+autobing-app/src-tauri/bin/*.exe
