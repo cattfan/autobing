@@ -18,8 +18,12 @@ from src.dashboard import (
     _profile_lock_keys_for_account,
     _read_search_status_with_mobile_recheck,
     _read_search_status_for_runtime_descriptor,
+    _resolve_account_current_points,
+    _calculate_account_earned_today,
+    _merge_search_status_preserving_progress,
     _resolve_desktop_search_requirement,
     _select_mobile_runtime_strategy,
+    _upsert_account_daily_snapshot,
     _wait_for_mobile_credit_update,
 )
 from src.runtime_identity import (
@@ -28,9 +32,65 @@ from src.runtime_identity import (
     describe_search_remaining_items,
     invalidate_runtime_attachment,
 )
+from src.universal_task import RewardsTask
 
 
 class DashboardStatusTests(unittest.TestCase):
+    def test_account_current_points_ignore_global_dashboard_total(self):
+        self.assertEqual(
+            _resolve_account_current_points(500, {"total_points": 520}),
+            520,
+        )
+        self.assertEqual(
+            _resolve_account_current_points(500, {}),
+            500,
+        )
+
+    def test_account_earned_today_uses_account_baseline(self):
+        self.assertEqual(_calculate_account_earned_today(520, 500), 20)
+        self.assertEqual(_calculate_account_earned_today(490, 500), 0)
+
+    def test_search_status_merge_preserves_verified_counters_when_page_read_is_ambiguous(self):
+        merged = _merge_search_status_preserving_progress(
+            {"pc_current": 0, "pc_max": 0, "mobile_current": 0, "mobile_max": 0, "total_points": 0},
+            {"pc_current": 90, "pc_max": 90, "mobile_current": 60, "mobile_max": 60, "total_points": 14428},
+        )
+        self.assertEqual(merged["pc_current"], 90)
+        self.assertEqual(merged["pc_max"], 90)
+        self.assertEqual(merged["mobile_current"], 60)
+        self.assertEqual(merged["mobile_max"], 60)
+        self.assertEqual(merged["total_points"], 14428)
+
+    def test_search_status_merge_keeps_current_nonzero_track(self):
+        merged = _merge_search_status_preserving_progress(
+            {"pc_current": 24, "pc_max": 90, "total_points": 100},
+            {"pc_current": 90, "pc_max": 90, "total_points": 200},
+        )
+        self.assertEqual(merged["pc_current"], 24)
+        self.assertEqual(merged["pc_max"], 90)
+        self.assertEqual(merged["total_points"], 100)
+
+    def test_account_daily_snapshot_upsert_uses_file_lock(self):
+        entered = []
+
+        class FakeLock:
+            def __enter__(self):
+                entered.append(True)
+
+            def __exit__(self, exc_type, exc, tb):
+                entered.append(False)
+
+        records = []
+        with patch("src.dashboard._snapshot_file_lock", return_value=FakeLock()), \
+             patch("src.dashboard._read_account_daily_snapshots_unlocked", return_value=records), \
+             patch("src.dashboard._write_account_daily_snapshots_unlocked") as write_snapshots:
+            _upsert_account_daily_snapshot({"account_key": "acct:a", "date": "2026-04-24", "points_now": 100})
+
+        self.assertEqual(entered, [True, False])
+        written = write_snapshots.call_args.args[0]
+        self.assertEqual(written[0]["account_key"], "acct:a")
+        self.assertEqual(written[0]["points_now"], 100)
+
     def test_mobile_runtime_strategy_marks_missing_gpm_profile_as_native_fallback(self):
         fallback, reason = _select_mobile_runtime_strategy(True, "")
 
@@ -121,9 +181,9 @@ class DashboardStatusTests(unittest.TestCase):
         self.assertEqual(reason, "")
 
     def test_account_timeout_seconds_adds_budget_for_later_batches(self):
-        self.assertEqual(_account_timeout_seconds(0, 2), 4500.0)
-        self.assertEqual(_account_timeout_seconds(1, 2), 4500.0)
-        self.assertEqual(_account_timeout_seconds(2, 2), 9000.0)
+        self.assertEqual(_account_timeout_seconds(0, 2), 7200.0)
+        self.assertEqual(_account_timeout_seconds(1, 2), 7200.0)
+        self.assertEqual(_account_timeout_seconds(2, 2), 14400.0)
 
     def test_dashboard_bind_stays_local_when_no_dashboard_password_is_configured(self):
         with self.assertRaisesRegex(RuntimeError, "Refusing to bind"):
@@ -279,6 +339,42 @@ class DashboardStatusTests(unittest.TestCase):
 
         self.assertEqual(_describe_remaining_items(snapshot), [])
 
+    def test_dashboard_remaining_items_ignores_missing_daily_set_when_no_actionable_daily_task_is_scanned(self):
+        snapshot = {
+            "search_status": {},
+            "task_overview": {"daily_set": {"completed": 2, "total": 3}},
+            "category_status": {"more_promo": {"completed": 0, "total": 1}},
+            "pending_by_category": {"more_promo": ["Montreal's Winter Glow"]},
+            "pending_tasks": ["Montreal's Winter Glow"],
+        }
+
+        self.assertEqual(_describe_remaining_items(snapshot), ["Task: Montreal's Winter Glow"])
+
+    def test_dashboard_remaining_items_reports_daily_set_when_actionable_daily_task_is_scanned(self):
+        snapshot = {
+            "search_status": {},
+            "task_overview": {"daily_set": {"completed": 2, "total": 3}},
+            "category_status": {"daily_set": {"completed": 0, "total": 1}},
+            "pending_by_category": {"daily_set": ["King of Rock?"]},
+            "pending_tasks": ["King of Rock?"],
+        }
+
+        self.assertEqual(
+            _describe_remaining_items(snapshot),
+            ["Daily Set 2/3", "Task: King of Rock?"],
+        )
+
+    def test_dashboard_remaining_items_ignores_implausible_daily_set_counts(self):
+        snapshot = {
+            "search_status": {},
+            "task_overview": {"daily_set": {"completed": 24, "total": 999}},
+            "category_status": {"daily_set": {"completed": 0, "total": 1}},
+            "pending_by_category": {"daily_set": ["Bogus"]},
+            "pending_tasks": ["Bogus"],
+        }
+
+        self.assertEqual(_describe_remaining_items(snapshot), ["Task: Bogus"])
+
     def test_dashboard_reconcile_applies_reporting_overrides_without_daily_set_proof(self):
         snapshot = {"task_overview": {}, "pending_tasks": []}
         reconciled = _reconcile_verification_with_session_proof(
@@ -291,6 +387,107 @@ class DashboardStatusTests(unittest.TestCase):
 
         self.assertTrue(reconciled["reporting_overrides"]["ignore_bing_app_checkin"])
         self.assertTrue(reconciled["reporting_overrides"]["ignore_edge_streak"])
+
+    def test_dashboard_reconcile_applies_partial_daily_set_progress(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": ["Task A", "Task B", "Task C"],
+            "pending_by_category": {"daily_set": ["Task A", "Task B", "Task C"]},
+        }
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "daily_set_progress_completed": 2,
+                "daily_set_progress_total": 3,
+                "daily_set_titles": ["Task A"],
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 2)
+        self.assertEqual(reconciled["category_status"]["daily_set"]["completed"], 2)
+        self.assertEqual(reconciled["pending_tasks"], ["Task B", "Task C"])
+        self.assertEqual(reconciled["pending_by_category"]["daily_set"], ["Task B", "Task C"])
+
+    def test_dashboard_reconcile_full_daily_set_progress_clears_category(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": ["Task A", "Task B"],
+            "pending_by_category": {"daily_set": ["Task A", "Task B"]},
+        }
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "daily_set_complete": True,
+                "daily_set_progress_completed": 3,
+                "daily_set_progress_total": 3,
+                "daily_set_titles": ["Task A", "Task B"],
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["category_status"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["pending_tasks"], [])
+        self.assertEqual(reconciled["pending_by_category"]["daily_set"], [])
+
+    def test_dashboard_reconcile_can_upgrade_counts_from_progress_only(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": [],
+            "pending_by_category": {"daily_set": []},
+        }
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "daily_set_progress_completed": 3,
+                "daily_set_progress_total": 3,
+                "daily_set_titles": [],
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["category_status"]["daily_set"]["completed"], 3)
+
+    def test_dashboard_reconcile_merges_stronger_edge_streak_proof(self):
+        snapshot = {
+            "task_overview": {"streaks": {"edge": {"exists": True, "minutes": 10, "target": 30, "done": False}}},
+            "pending_tasks": [],
+            "pending_by_category": {},
+        }
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "edge_streak_verified_exists": True,
+                "edge_streak_verified_minutes": 24,
+                "edge_streak_verified_target": 30,
+                "edge_streak_verified_done": False,
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["streaks"]["edge"]["minutes"], 24)
+        self.assertEqual(reconciled["task_overview"]["streaks"]["edge"]["target"], 30)
+        self.assertFalse(reconciled["task_overview"]["streaks"]["edge"]["done"])
+
+    def test_dashboard_reconcile_marks_edge_done_from_verified_proof(self):
+        snapshot = {
+            "task_overview": {"streaks": {"edge": {"exists": True, "minutes": 15, "target": 30, "done": False}}},
+            "pending_tasks": [],
+            "pending_by_category": {},
+        }
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "edge_streak_verified_exists": True,
+                "edge_streak_verified_minutes": 30,
+                "edge_streak_verified_target": 30,
+                "edge_streak_verified_done": True,
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["streaks"]["edge"]["minutes"], 30)
+        self.assertTrue(reconciled["task_overview"]["streaks"]["edge"]["done"])
 
 
 class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
@@ -730,6 +927,153 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["search_status"]["pc_max"], 90)
         self.assertEqual(snapshot["search_status"]["mobile_current"], 57)
         self.assertEqual(snapshot["search_status"]["mobile_max"], 60)
+        evidence = snapshot["verification_evidence"]
+        self.assertEqual(evidence["search_status"]["source"], "override")
+        self.assertEqual(evidence["task_overview"]["source"], "rewards_api")
+        self.assertEqual(evidence["dom_scan"]["source"], "dashboard_dom")
+        self.assertEqual(evidence["dom_scan"]["selector_health"]["task_count"], 0)
+
+    async def test_collect_final_verification_keeps_stronger_override_counters(self):
+        page = object()
+        scanner = SimpleNamespace(_fetch_all_tasks=AsyncMock(return_value=[]))
+
+        with patch(
+            "src.dashboard.TaskDetector.get_all_tasks",
+            new=AsyncMock(return_value={
+                "searches": {
+                    "pc_current": 87,
+                    "pc_max": 90,
+                    "mobile_current": 60,
+                    "mobile_max": 60,
+                },
+                "total_points": 14593,
+                "daily_set": {"completed": 3, "total": 3},
+                "streaks": {},
+            }),
+        ), patch("src.dashboard.UniversalTaskScanner", return_value=scanner):
+            snapshot = await _collect_final_verification(
+                page,
+                AsyncMock(),
+                SimpleNamespace(),
+                {},
+                search_status_override={
+                    "pc_current": 90,
+                    "pc_max": 90,
+                    "mobile_current": 60,
+                    "mobile_max": 60,
+                    "edge_current": 0,
+                    "edge_max": 0,
+                    "total_points": 14603,
+                },
+            )
+
+        self.assertEqual(snapshot["search_status"]["pc_current"], 90)
+        self.assertEqual(snapshot["search_status"]["pc_max"], 90)
+        self.assertEqual(snapshot["search_status"]["total_points"], 14603)
+
+    def test_dashboard_remaining_items_can_ignore_non_actionable_daily_set_gap(self):
+        snapshot = {
+            "search_status": {},
+            "task_overview": {"daily_set": {"completed": 2, "total": 3}},
+            "category_status": {"daily_set": {"completed": 2, "total": 3}},
+            "pending_by_category": {"daily_set": []},
+            "pending_tasks": [],
+            "reporting_overrides": {"ignore_daily_set_gap": True},
+        }
+
+        self.assertEqual(_describe_remaining_items(snapshot), [])
+
+    async def test_final_daily_set_repair_updates_session_proof(self):
+        from src.dashboard import _repair_daily_set_gap_from_final_verification
+
+        page = object()
+        snapshot = {"task_overview": {"daily_set": {"completed": 2, "total": 3}}}
+        session_proofs = {}
+        completer = SimpleNamespace(
+            complete_daily_set=AsyncMock(return_value={
+                "progress_completed": 3,
+                "progress_total": 3,
+                "category_proven": True,
+            }),
+            _read_daily_set_progress=AsyncMock(return_value={"completed": 3, "total": 3, "category_proven": True}),
+        )
+
+        with patch("src.daily_set.DailySetCompleter", return_value=completer):
+            repaired = await _repair_daily_set_gap_from_final_verification(
+                page,
+                SimpleNamespace(),
+                {},
+                snapshot,
+                session_proofs,
+            )
+
+        self.assertTrue(repaired)
+        self.assertTrue(session_proofs["daily_set_complete"])
+        self.assertEqual(session_proofs["daily_set_progress_completed"], 3)
+        self.assertEqual(session_proofs["daily_set_progress_total"], 3)
+
+    async def test_final_daily_set_repair_marks_no_target_gap_non_actionable(self):
+        from src.dashboard import _repair_daily_set_gap_from_final_verification
+
+        page = object()
+        snapshot = {"task_overview": {"daily_set": {"completed": 2, "total": 3}}}
+        session_proofs = {}
+        completer = SimpleNamespace(
+            complete_daily_set=AsyncMock(return_value={
+                "completed": 0,
+                "total": 0,
+                "progress_completed": 2,
+                "progress_total": 3,
+                "category_proven": False,
+                "panel_control_failed": True,
+            }),
+            _read_daily_set_progress=AsyncMock(return_value={"completed": 2, "total": 3, "category_proven": False}),
+        )
+
+        with patch("src.daily_set.DailySetCompleter", return_value=completer):
+            repaired = await _repair_daily_set_gap_from_final_verification(
+                page,
+                SimpleNamespace(),
+                {},
+                snapshot,
+                session_proofs,
+            )
+
+        self.assertTrue(repaired)
+        self.assertTrue(session_proofs["ignore_daily_set_gap"])
+        self.assertFalse(session_proofs.get("daily_set_complete", False))
+
+    async def test_collect_final_verification_honors_recent_verified_task_cache(self):
+        page = object()
+        task = RewardsTask(
+            id="winter-dublin",
+            title="Winter in Dublin",
+            category="more_promo",
+            task_type="search",
+            is_complete=False,
+        )
+        scanner = SimpleNamespace(_fetch_all_tasks=AsyncMock(return_value=[task]))
+
+        with patch(
+            "src.dashboard.TaskDetector.get_all_tasks",
+            new=AsyncMock(return_value={"searches": {}, "total_points": 100, "streaks": {}}),
+        ), patch("src.dashboard.UniversalTaskScanner", return_value=scanner), patch(
+            "src.dashboard._load_task_state",
+            return_value={"test@example.com": {"visited_tasks": {"winter-dublin": "2026-04-25T12:00:00"}}},
+        ), patch("src.dashboard.datetime") as fake_datetime:
+            fake_datetime.now.return_value = fake_datetime.fromisoformat("2026-04-25T12:30:00")
+            fake_datetime.fromisoformat.side_effect = __import__("datetime").datetime.fromisoformat
+            snapshot = await _collect_final_verification(
+                page,
+                AsyncMock(),
+                SimpleNamespace(),
+                {},
+                account_email="test@example.com",
+                search_status_override={"total_points": 100},
+            )
+
+        self.assertEqual(snapshot["pending_tasks"], [])
+        self.assertEqual(snapshot["category_status"]["more_promo"], {"completed": 1, "total": 1})
 
     async def test_dead_desktop_page_reacquires_from_live_cdp(self):
         dead_page = SimpleNamespace(
@@ -775,8 +1119,11 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "src.dashboard._open_account_context",
             new=AsyncMock(side_effect=RuntimeError("boom")),
+        ), patch(
+            "src.dashboard._start_gpm_profile_serialized",
+            new=AsyncMock(side_effect=RuntimeError("restart boom")),
         ):
-            with self.assertRaisesRegex(RuntimeError, "could not be reacquired from http://127.0.0.1:9555"):
+            with self.assertRaisesRegex(RuntimeError, "could not be recovered"):
                 await _ensure_usable_desktop_search_page(
                     {"diagnostic_logging": True},
                     object(),

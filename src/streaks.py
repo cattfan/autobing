@@ -55,7 +55,7 @@ class TaskDetector:
     def _parse_card_progress(page_text: str) -> dict[str, tuple[int, int] | None]:
         """Extract streak and daily-set progress from rendered card text."""
         if not page_text:
-            return {"daily_set": None, "edge": None, "bing_app": None}
+            return {"daily_set": None, "edge": None, "bing_app": None, "bing_search": None}
 
         edge_match = re.search(
             r"Edge(?:\s+Browsing(?:\s+Streak)?)?.*?Minutes:\s*(\d+)\s*/\s*(\d+)",
@@ -72,16 +72,32 @@ class TaskDetector:
             page_text,
             re.IGNORECASE | re.DOTALL,
         )
+        bing_search_match = re.search(
+            r"Bing\s+Search\s+Streak\s+(\d+)\s+(\d+)\s+(\d+)\s+Search:\s*(\d+)\s*/\s*(\d+)",
+            page_text,
+            re.IGNORECASE | re.DOTALL,
+        )
 
         def _pair(match):
             if not match:
                 return None
             return int(match.group(1)), int(match.group(2))
 
+        bing_search = None
+        if bing_search_match:
+            bing_search = {
+                "current": int(bing_search_match.group(1)),
+                "target": int(bing_search_match.group(2)),
+                "reward": int(bing_search_match.group(3)),
+                "searches": int(bing_search_match.group(4)),
+                "search_target": int(bing_search_match.group(5)),
+            }
+
         return {
             "daily_set": _pair(daily_set_match),
             "edge": _pair(edge_match),
             "bing_app": _pair(bing_app_match),
+            "bing_search": bing_search,
         }
 
     @staticmethod
@@ -127,6 +143,7 @@ class TaskDetector:
             "daily_set": {"completed": 0, "total": 0},
             "streaks": {
                 "bing_app": {"current": 0, "done": False},
+                "bing_search": {"current": 0, "target": 100, "reward": 0, "searches": 0, "search_target": 3, "done": False, "exists": False},
                 "edge": {"minutes": 0, "target": 30, "done": False, "exists": False},
             },
             "more_activities": {"completed": 0, "total": 0},
@@ -246,6 +263,8 @@ class TaskDetector:
                 pages_to_probe = [page.url]
                 if "https://rewards.bing.com/" not in pages_to_probe:
                     pages_to_probe.append("https://rewards.bing.com/")
+                if "https://rewards.bing.com/earn" not in pages_to_probe:
+                    pages_to_probe.append("https://rewards.bing.com/earn")
 
                 for rewards_url in pages_to_probe:
                     try:
@@ -263,24 +282,20 @@ class TaskDetector:
                     card_progress = TaskDetector._parse_card_progress(page_text)
 
                     daily_set_progress = card_progress.get("daily_set")
-                    if daily_set_progress:
+                    if daily_set_progress and (
+                        result["daily_set"]["total"] == 0 or result["daily_set"]["completed"] == 0
+                    ):
                         current, total = daily_set_progress
-                        result["daily_set"]["completed"] = max(
-                            result["daily_set"]["completed"], current
-                        )
-                        result["daily_set"]["total"] = max(
-                            result["daily_set"]["total"], total
-                        )
+                        result["daily_set"]["completed"] = max(result["daily_set"]["completed"], current)
+                        result["daily_set"]["total"] = max(result["daily_set"]["total"], total)
 
                     daily_set_cards_progress = TaskDetector._parse_daily_set_completed_cards(page_text)
-                    if daily_set_cards_progress:
+                    if daily_set_cards_progress and (
+                        result["daily_set"]["total"] == 0 or result["daily_set"]["completed"] == 0
+                    ):
                         current, total = daily_set_cards_progress
-                        result["daily_set"]["completed"] = max(
-                            result["daily_set"]["completed"], current
-                        )
-                        result["daily_set"]["total"] = max(
-                            result["daily_set"]["total"], total
-                        )
+                        result["daily_set"]["completed"] = max(result["daily_set"]["completed"], current)
+                        result["daily_set"]["total"] = max(result["daily_set"]["total"], total)
 
                     edge_progress = card_progress.get("edge")
                     if edge_progress:
@@ -308,6 +323,28 @@ class TaskDetector:
                             result["streaks"]["bing_app"]["current"] >= target
                         )
 
+                    bing_search_progress = card_progress.get("bing_search")
+                    if bing_search_progress:
+                        result["streaks"]["bing_search"]["exists"] = True
+                        result["streaks"]["bing_search"]["current"] = max(
+                            result["streaks"]["bing_search"]["current"], bing_search_progress.get("current", 0)
+                        )
+                        result["streaks"]["bing_search"]["target"] = max(
+                            result["streaks"]["bing_search"]["target"], bing_search_progress.get("target", 100)
+                        )
+                        result["streaks"]["bing_search"]["reward"] = max(
+                            result["streaks"]["bing_search"]["reward"], bing_search_progress.get("reward", 0)
+                        )
+                        result["streaks"]["bing_search"]["searches"] = max(
+                            result["streaks"]["bing_search"]["searches"], bing_search_progress.get("searches", 0)
+                        )
+                        result["streaks"]["bing_search"]["search_target"] = max(
+                            result["streaks"]["bing_search"]["search_target"], bing_search_progress.get("search_target", 3)
+                        )
+                        result["streaks"]["bing_search"]["done"] = (
+                            result["streaks"]["bing_search"]["searches"] >= result["streaks"]["bing_search"]["search_target"]
+                        )
+
                     if (
                         result["daily_set"]["total"] > 0
                         and (
@@ -318,6 +355,10 @@ class TaskDetector:
                             result["streaks"]["bing_app"]["done"]
                             or result["streaks"]["bing_app"]["current"] > 0
                         )
+                        and (
+                            result["streaks"]["bing_search"]["done"]
+                            or result["streaks"]["bing_search"]["searches"] > 0
+                        )
                     ):
                         break
 
@@ -326,11 +367,16 @@ class TaskDetector:
                 f"Mobile: {result['searches']['mobile_current']}/{result['searches']['mobile_max']}, "
                 f"Daily: {result['daily_set']['completed']}/{result['daily_set']['total']}, "
                 f"BingApp: {'' if result['streaks']['bing_app']['done'] else (str(result['streaks']['bing_app']['current']) + '/1' if result['streaks']['bing_app'].get('exists', False) else '-')}, "
+                f"BingSearch: {'' if result['streaks']['bing_search']['done'] else (str(result['streaks']['bing_search']['searches']) + '/' + str(result['streaks']['bing_search']['search_target']) if result['streaks']['bing_search'].get('exists', False) else '-')}, "
                 f"Edge: {'' if result['streaks']['edge']['done'] else (str(result['streaks']['edge']['minutes']) + '/' + str(result['streaks']['edge']['target']) if result['streaks']['edge'].get('exists', False) else '-')}"
             )
 
         except Exception as e:
-            logger.warning(f"Task detection failed: {e}")
+            message = str(e)
+            if "Target page, context or browser has been closed" in message:
+                logger.debug(f"Task detection skipped because page was already closed: {e}")
+            else:
+                logger.warning(f"Task detection failed: {e}")
 
         return result
 

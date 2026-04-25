@@ -43,6 +43,8 @@ def _resolve_password(secret_ref: str | None) -> tuple[str, str | None]:
         value = os.environ.get(env_name, "").strip()
         if value:
             return value, None
+        if env_name == "REWARDS_BOT_PASSWORD":
+            return "", None
         return "", f"secret_ref env variable is missing: {env_name}"
 
     if ref.startswith("file:"):
@@ -117,15 +119,55 @@ async def _run_job(job_payload: dict, state_file: Path, events_file: Path) -> in
 
     try:
         start_state_sync_for_worker()
-        await _run_bot_async(task, password, target_emails)
+        run_summary = await _run_bot_async(task, password, target_emails)
         if cancel_marker.exists():
             message = "job cancelled during execution"
             write_state("cancelled", completed_at=_utcnow(), error=message)
             emit("job_cancelled", error=message)
             return 0
 
-        write_state("completed", completed_at=_utcnow())
-        emit("job_completed")
+        overall_complete = bool(run_summary.get("overall_complete", False))
+        accounts_total = int(run_summary.get("accounts_total", 0) or 0)
+        accounts_completed = int(run_summary.get("accounts_completed", 0) or 0)
+        accounts_incomplete = int(run_summary.get("accounts_incomplete", 0) or 0)
+        accounts_failed = int(run_summary.get("accounts_failed", 0) or 0)
+        accounts_payload = run_summary.get("accounts", {})
+
+        if overall_complete:
+            write_state(
+                "completed",
+                completed_at=_utcnow(),
+                accounts_total=accounts_total,
+                accounts_completed=accounts_completed,
+                accounts_incomplete=accounts_incomplete,
+                accounts_failed=accounts_failed,
+                accounts=accounts_payload,
+            )
+            emit(
+                "job_completed",
+                accounts_total=accounts_total,
+                accounts_completed=accounts_completed,
+                accounts_incomplete=accounts_incomplete,
+                accounts_failed=accounts_failed,
+            )
+            return 0
+
+        write_state(
+            "incomplete",
+            completed_at=_utcnow(),
+            accounts_total=accounts_total,
+            accounts_completed=accounts_completed,
+            accounts_incomplete=accounts_incomplete,
+            accounts_failed=accounts_failed,
+            accounts=accounts_payload,
+        )
+        emit(
+            "job_incomplete",
+            accounts_total=accounts_total,
+            accounts_completed=accounts_completed,
+            accounts_incomplete=accounts_incomplete,
+            accounts_failed=accounts_failed,
+        )
         return 0
     except Exception as exc:
         message = str(exc)
@@ -133,6 +175,54 @@ async def _run_job(job_payload: dict, state_file: Path, events_file: Path) -> in
         emit("job_failed", error=message)
         return 1
 
+async def _run_job_with_polling(job_payload: dict, state_file: Path, events_file: Path) -> int:
+    task_task = asyncio.create_task(_run_job(job_payload, state_file, events_file))
+    
+    # We will poll `src.dashboard.state` to inject real-time values into `state.json` continuously
+    async def poller():
+        from src.dashboard import state as dashboard_state
+        import json
+        import hashlib
+        target_emails = [
+            email.strip()
+            for email in job_payload.get("target_emails", [])
+            if isinstance(email, str) and email.strip()
+        ]
+        while not task_task.done():
+            if state_file.exists():
+                try:
+                    loaded = json.loads(state_file.read_text(encoding="utf-8"))
+                    changed = False
+                    for email in target_emails:
+                        # Compute the exact account key used by dashboard.py
+                        text_lower = str(email).strip().lower()
+                        account_key = f"acct:{hashlib.md5(text_lower.encode('utf-8')).hexdigest()[:10]}"
+                        
+                        legacy_key = email.replace("@", "_at_").replace(".", "_")
+                        safe_email = email.replace("@", "_at_")
+                        for k in [account_key, legacy_key, safe_email, email]:
+                            if k in dashboard_state.get("accounts", {}):
+                                acc_data = dashboard_state["accounts"][k]
+                                pts = int(acc_data.get("points", 0) or 0)
+                                st = int(acc_data.get("streak", 0) or 0)
+                                if pts > int(loaded.get("points", 0) or 0):
+                                    loaded["points"] = pts
+                                    changed = True
+                                if st > int(loaded.get("streak", 0) or 0):
+                                    loaded["streak"] = st
+                                    changed = True
+                                break # Stop searching keys if found
+                    
+                    if changed:
+                        state_file.write_text(json.dumps(loaded, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+            await asyncio.sleep(2)
+
+    polling_task = asyncio.create_task(poller())
+    result = await task_task
+    polling_task.cancel()
+    return result
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m src.worker_runtime")
@@ -143,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
 
     job_payload = json.loads(Path(args.job_file).read_text(encoding="utf-8"))
     return asyncio.run(
-        _run_job(
+        _run_job_with_polling(
             job_payload,
             Path(args.state_file),
             Path(args.events_file),

@@ -927,44 +927,61 @@ def _reconcile_verification_with_session_proof(
     if session_proofs.get("ignore_edge_streak", False):
         reporting_overrides["ignore_edge_streak"] = True
 
-    if not session_proofs.get("daily_set_complete", False):
-        return snapshot
-
     task_overview = snapshot.setdefault("task_overview", {})
     daily_overview = task_overview.setdefault("daily_set", {})
     daily_total = int(daily_overview.get("total", 0))
-    if daily_total > 0:
-        daily_overview["completed"] = daily_total
+    daily_completed = int(daily_overview.get("completed", 0))
+
+    proof_completed = int(session_proofs.get("daily_set_progress_completed", 0) or 0)
+    proof_total = int(session_proofs.get("daily_set_progress_total", 0) or 0)
+    if proof_total > daily_total:
+        daily_total = proof_total
+    if proof_completed > daily_completed:
+        daily_completed = proof_completed
+    daily_overview["total"] = daily_total
+    daily_overview["completed"] = daily_completed
 
     category_status = snapshot.setdefault("category_status", {})
     daily_category = category_status.setdefault(
         "daily_set",
         {"completed": 0, "total": daily_total},
     )
-    daily_category_total = int(daily_category.get("total", 0))
-    if daily_category_total > 0:
-        daily_category["completed"] = daily_category_total
+    daily_category["total"] = max(int(daily_category.get("total", 0)), daily_total)
+    daily_category["completed"] = max(int(daily_category.get("completed", 0)), daily_completed)
 
     pending_by_category = snapshot.setdefault("pending_by_category", {})
-    stale_daily_titles = [
-        _normalize_reward_title(title)
-        for title in pending_by_category.get("daily_set", [])
-        if title
-    ]
     proof_titles = [
         _normalize_reward_title(title)
         for title in session_proofs.get("daily_set_titles", [])
         if title
     ]
-    stale_title_set = set(stale_daily_titles or proof_titles)
 
-    if stale_title_set:
+    if session_proofs.get("daily_set_complete", False):
+        if daily_total > 0:
+            daily_overview["completed"] = daily_total
+            daily_category["completed"] = max(int(daily_category.get("completed", 0)), daily_total)
+        pending_by_category["daily_set"] = []
+        if proof_titles:
+            title_set = set(proof_titles)
+            snapshot["pending_tasks"] = [
+                title
+                for title in snapshot.get("pending_tasks", [])
+                if _normalize_reward_title(title) not in title_set
+            ]
+        return snapshot
+
+    if proof_titles:
+        title_set = set(proof_titles)
         snapshot["pending_tasks"] = [
             title
             for title in snapshot.get("pending_tasks", [])
-            if _normalize_reward_title(title) not in stale_title_set
+            if _normalize_reward_title(title) not in title_set
         ]
-    pending_by_category["daily_set"] = []
+        pending_by_category["daily_set"] = [
+            title
+            for title in pending_by_category.get("daily_set", [])
+            if _normalize_reward_title(title) not in title_set
+        ]
 
     return snapshot
 

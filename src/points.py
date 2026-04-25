@@ -48,6 +48,7 @@ class PointsTracker:
         info = {
             "total_points": 0,
             "available_points": 0,
+            "earned_today": 0,
             "streak": 0,
             "level": "",
         }
@@ -68,6 +69,24 @@ class PointsTracker:
                 if numbers:
                     info["total_points"] = int(numbers[0].replace(",", ""))
 
+            # Read Today's points directly from the dashboard tile when present
+            today_points_selectors = [
+                "xpath=//*[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), \"today's points\")]/following::*[self::span or self::div][1]",
+                "xpath=//*[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), \"today’s points\")]/following::*[self::span or self::div][1]",
+                "xpath=//*[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'today points')]/following::*[self::span or self::div][1]",
+            ]
+            for selector in today_points_selectors:
+                try:
+                    today_points_el = page.locator(selector)
+                    if await today_points_el.count() > 0:
+                        today_text = await today_points_el.first.inner_text()
+                        today_numbers = re.findall(r"\d+", today_text.replace(",", ""))
+                        if today_numbers:
+                            info["earned_today"] = int(today_numbers[0])
+                            break
+                except Exception:
+                    continue
+
             # Try to get streak info
             streak_el = page.locator(
                 '[class*="streak"] span, .streak-count, '
@@ -79,11 +98,13 @@ class PointsTracker:
                 if numbers:
                     info["streak"] = int(numbers[0])
 
-            if info["total_points"] <= 0:
+            if True: # ALWAYS call to dump
                 api_info = await self._read_points_from_api(page)
                 info["total_points"] = api_info.get("total_points", info["total_points"])
                 info["available_points"] = api_info.get("available_points", info["available_points"])
+                info["earned_today"] = api_info.get("earned_today", info["earned_today"])
                 info["level"] = api_info.get("level", info["level"])
+                info["streak"] = api_info.get("streak") or info.get("streak", 0)
 
             self.current_points = info["total_points"]
             self.streak_count = info["streak"]
@@ -95,6 +116,49 @@ class PointsTracker:
             logger.warning(f"Failed to read points: {e}")
 
         return info
+
+    async def _read_todays_points_from_earn_page(self, page: Page) -> int:
+        """Read the Earn page 'Today's points' value from the /earn HTML payload."""
+        try:
+            data = await page.evaluate(r'''
+                async () => {
+                    const response = await fetch('https://rewards.bing.com/earn', { credentials: 'include' });
+                    const html = await response.text();
+                    const patterns = [
+                        /\\"type\\":\\"pointbreakdown\\"[\s\S]*?\\"totalPoints\\":(\d+)/,
+                        /"type":\s*"pointbreakdown"[\s\S]*?"totalPoints":\s*(\d+)/,
+                    ];
+                    for (const pattern of patterns) {
+                        const match = html.match(pattern);
+                        if (match) {
+                            return Number(match[1] || 0);
+                        }
+                    }
+                    return 0;
+                }
+            ''')
+            return int(data or 0)
+        except Exception:
+            return 0
+
+    async def _read_todays_points_from_earn_dom(self, page: Page) -> int:
+        """Best-effort DOM fallback when the current page is already the Earn surface."""
+        try:
+            data = await page.evaluate(r'''
+                () => {
+                    const candidates = Array.from(document.querySelectorAll('button, div, p'));
+                    for (const node of candidates) {
+                        const text = (node.innerText || '').trim();
+                        if (!text || !text.includes("Today's points")) continue;
+                        const match = text.match(/Today's points\s+(\d+)/s);
+                        if (match) return Number(match[1] || 0);
+                    }
+                    return 0;
+                }
+            ''')
+            return int(data or 0)
+        except Exception:
+            return 0
 
     async def _read_points_from_api(self, page: Page) -> dict:
         """Fallback to the Rewards API when the DOM selectors fail or lag behind."""
@@ -116,10 +180,37 @@ class PointsTracker:
             dashboard = (data or {}).get("dashboard", {})
             user_status = dashboard.get("userStatus", {})
             level_info = user_status.get("levelInfo", {})
+            
+            import json
+            logger.info(f"[DIAGNOSTIC] API Payload Dump: {json.dumps(data)}")
+
+            streak = 0
+            streak_promo = dashboard.get("streakProtectionPromo", {})
+            if "streakCount" in streak_promo:
+                try:
+                    streak = int(streak_promo["streakCount"])
+                except Exception:
+                    pass
+            elif "streakInfo" in user_status:
+                streak = user_status["streakInfo"].get("currentDay", 0)
+            elif "streak" in user_status:
+                streak = user_status.get("streak", 0)
+
+            counters = user_status.get("counters", {})
+            earned_today = await self._read_todays_points_from_earn_page(page)
+            if earned_today <= 0 and "earn" in (page.url or ""):
+                earned_today = await self._read_todays_points_from_earn_dom(page)
+            if earned_today <= 0:
+                daily_point = counters.get("dailyPoint") or []
+                daily_point_entry = daily_point[0] if isinstance(daily_point, list) and daily_point else {}
+                if isinstance(daily_point_entry, dict):
+                    earned_today = int(daily_point_entry.get("pointProgress", 0) or 0)
 
             return {
                 "total_points": user_status.get("availablePoints", 0),
                 "available_points": user_status.get("availablePoints", 0),
+                "earned_today": earned_today,
+                "streak": streak,
                 "level": (
                     level_info.get("activeLevel")
                     or level_info.get("levelName")
@@ -131,6 +222,7 @@ class PointsTracker:
             return {
                 "total_points": 0,
                 "available_points": 0,
+                "streak": 0,
                 "level": "",
             }
 

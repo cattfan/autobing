@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from src.dashboard import app, state
+from src.dashboard import app, state, _state_lock
 from src.crypto import hash_password
 
 
@@ -108,13 +108,12 @@ class DashboardRouteTests(unittest.TestCase):
         finally:
             response.close()
 
-    @patch("src.dashboard.threading.Thread")
-    def test_run_route_rejects_second_launch_while_first_run_is_active(self, thread_cls):
+    def test_run_route_rejects_second_launch_while_first_run_is_active(self):
         first = self.client.post("/api/run", json={"task": "all"})
         try:
             self.assertEqual(first.status_code, 200)
-            thread_cls.assert_called_once()
-            thread_cls.return_value.start.assert_called_once()
+            payload = first.get_json()
+            self.assertEqual(payload["status"], "started")
         finally:
             first.close()
 
@@ -123,9 +122,24 @@ class DashboardRouteTests(unittest.TestCase):
             self.assertEqual(second.status_code, 409)
             payload = second.get_json()
             self.assertEqual(payload["error"], "Bot is already running")
-            thread_cls.return_value.start.assert_called_once()
         finally:
             second.close()
+
+        with _state_lock:
+            state["status"] = "idle"
+            state["job_id"] = ""
+            state["current_task"] = ""
+            state["current_account"] = ""
+            state["progress"] = 0
+            state["progress_total"] = 0
+            state["accounts"] = {}
+            state["account_logs"] = {}
+            state["logs"] = []
+            state["total_points"] = 0
+            state["ai"] = {}
+            state["last_run"] = None
+            state["streak"] = 0
+            state["status"] = "idle"
 
     def test_dashboard_history_endpoint_returns_snapshots(self):
         with patch("src.dashboard._recent_account_snapshots", return_value=[{"date": "2026-04-11", "earned_today": 50}]):

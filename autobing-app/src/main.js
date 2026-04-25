@@ -1,9 +1,45 @@
 import './style.css';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { listen as tauriListen } from '@tauri-apps/api/event';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { getVersion } from '@tauri-apps/api/app';
+
+const isTauriRuntime = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+const browserMocks = {
+    get_system_status: async () => fetch('/mock-dashboard-state.json').then(r => r.json()),
+    get_settings: async () => fetch('/mock-settings.json').then(r => r.json()),
+    get_job_logs: async () => [],
+    scan_gpm_profiles: async () => [],
+    get_account: async () => ({ email: '', password: '', gpm_profile_id: '', gpm_mobile_profile_id: '' }),
+    add_account: async () => 'ok',
+    update_account: async () => 'ok',
+    delete_accounts: async () => 'ok',
+    start_job: async () => 'ok',
+    stop_job: async () => 'ok',
+};
+const invoke = async (command, args) => {
+    if (isTauriRuntime()) {
+        return tauriInvoke(command, args);
+    }
+    if (command in browserMocks) {
+        return browserMocks[command](args || {});
+    }
+    return null;
+};
+const listen = async (eventName, handler) => {
+    if (isTauriRuntime()) {
+        return tauriListen(eventName, handler);
+    }
+    return () => {};
+};
+const safeGetVersion = async () => (isTauriRuntime() ? getVersion() : 'web-test');
+const safeCheck = async () => (isTauriRuntime() ? check() : null);
+const safeRelaunch = async () => {
+    if (isTauriRuntime()) {
+        return relaunch();
+    }
+};
 
 const i18n = {
     vi: {
@@ -15,6 +51,9 @@ const i18n = {
         antiDetectSettingsTitle: "Tích hợp Anti-Detect Browser",
         platformLabel: "Tên trình duyệt (Platform)",
         apiUrlLabel: "URL API Trình duyệt",
+        aiEnabledLabel: "Bật AI Agent",
+        pageAgentEnabledLabel: "Bật Page Agent",
+        aiDisableHint: "Tắt 2 mục này để chạy thuần logic. Google Trends và nguồn từ khoá search vẫn hoạt động bình thường.",
         saveSettingsBtn: "Lưu cài đặt",
         savedSuccessMsg: "Đã lưu thành công!",
         profilesManagementTitle: "Quản lý Hồ sơ",
@@ -72,6 +111,9 @@ const i18n = {
         antiDetectSettingsTitle: "Anti-Detect Browser Integration",
         platformLabel: "Browser Platform",
         apiUrlLabel: "Browser API URL",
+        aiEnabledLabel: "Enable AI Agent",
+        pageAgentEnabledLabel: "Enable Page Agent",
+        aiDisableHint: "Turn both off to run logic-only mode. Google Trends and search keyword sources still work normally.",
         saveSettingsBtn: "Save Settings",
         savedSuccessMsg: "Saved successfully!",
         profilesManagementTitle: "Profiles Management",
@@ -193,9 +235,67 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     let currentJobs = [];
     let lastDashboardState = null;
+    let lastDashboardSignature = '';
+    let dashboardPollTimer = null;
     let selectedEmails = new Set();
     let isDragging = false;
     let dragSelectMode = true;
+
+    function normalizeTrack(track, fallbackCurrent = 0, fallbackMax = 0) {
+        const current = Number.isFinite(track?.current) ? track.current : fallbackCurrent;
+        const max = Number.isFinite(track?.max) ? track.max : fallbackMax;
+        let percent = Number.isFinite(track?.percent) ? track.percent : 0;
+        if (!Number.isFinite(track?.percent)) {
+            percent = max > 0 ? Math.round((current / max) * 100) : 0;
+        }
+        percent = Math.max(0, Math.min(100, percent));
+        return { current, max, percent };
+    }
+
+    function buildDashboardSignature(state) {
+        return JSON.stringify((state?.jobs || []).map(job => ({
+            email: job.email,
+            status: job.status,
+            points: job.points,
+            earned_today: job.earned_today,
+            daily_streak: job.daily_streak,
+            tracks: job.tracks,
+            pc_current: job.pc_current,
+            pc_max: job.pc_max,
+            mobile_current: job.mobile_current,
+            mobile_max: job.mobile_max,
+            daily_current: job.daily_current,
+            daily_max: job.daily_max,
+            edge_current: job.edge_current,
+            edge_max: job.edge_max,
+            bing_streak_searches: job.bing_streak_searches,
+            bing_streak_search_target: job.bing_streak_search_target,
+            yesterday_summary: job.yesterday_summary,
+        })));
+    }
+
+    function ensureDashboardPolling() {
+        const hasRunningJobs = currentJobs.some(job => job.status === 'Running');
+        if (hasRunningJobs && !dashboardPollTimer) {
+            dashboardPollTimer = setInterval(initialLoad, 2000);
+        } else if (!hasRunningJobs && dashboardPollTimer) {
+            clearInterval(dashboardPollTimer);
+            dashboardPollTimer = null;
+        }
+    }
+
+    function applyDashboardState(state, { force = false } = {}) {
+        const nextSignature = buildDashboardSignature(state);
+        const shouldRender = force || nextSignature !== lastDashboardSignature;
+        lastDashboardState = state;
+        if (state.jobs) {
+            currentJobs = state.jobs;
+        }
+        ensureDashboardPolling();
+        if (!shouldRender) return;
+        lastDashboardSignature = nextSignature;
+        renderDashboard(state);
+    }
 
     function updateActionButtons() {
         const delBtn = document.getElementById('delete-selected-btn');
@@ -224,13 +324,14 @@ document.addEventListener("DOMContentLoaded", async () => {
             const t = i18n[currentLang] || i18n.vi;
             jobsGrid.innerHTML = state.jobs.map(job => {
                 const isRunning = job.status === 'Running';
-                const statusClass = isRunning ? 'status-running' : 'status-stopped';
-                const statusText = isRunning ? t.statusRunning : t.statusStopped;
-                const pcPct = job.pc_max > 0 ? Math.round((job.pc_current / job.pc_max) * 100) : 0;
-                const mobPct = job.mobile_max > 0 ? Math.round((job.mobile_current / job.mobile_max) * 100) : 0;
-                const dailyPct = job.daily_max > 0 ? Math.round((job.daily_current / job.daily_max) * 100) : 0;
-                const streakPct = job.streak_max > 0 ? Math.round((job.streak_current / job.streak_max) * 100) : 0;
-                const edgePct = job.edge_max > 0 ? Math.round((job.edge_current / job.edge_max) * 100) : 0;
+                const isError = job.status === 'Error';
+                const statusClass = isRunning ? 'status-running' : isError ? 'status-error' : 'status-stopped';
+                const statusText = isRunning ? t.statusRunning : isError ? (t.errorLabel || 'Error') : t.statusStopped;
+                const pcTrack = normalizeTrack(job.tracks?.pc_search, job.pc_current, job.pc_max);
+                const mobileTrack = normalizeTrack(job.tracks?.mobile_search, job.mobile_current, job.mobile_max);
+                const dailyTrack = normalizeTrack(job.tracks?.daily_set, job.daily_current || 0, job.daily_max || 3);
+                const edgeTrack = normalizeTrack(job.tracks?.edge, job.edge_current || 0, job.edge_max || 30);
+                const bingTrack = normalizeTrack(job.tracks?.bing_search_streak, job.bing_streak_searches || 0, job.bing_streak_search_target || 3);
                 const animClass = isRunning ? 'animated' : '';
                 const isSelected = selectedEmails.has(job.email) ? 'selected' : '';
 
@@ -248,14 +349,49 @@ document.addEventListener("DOMContentLoaded", async () => {
                     
                     <div class="acc-body">
                         <div class="points-row">
-                            <span class="points-label">${currentLang === 'vi' ? 'Tổng điểm' : 'Total Points'}</span>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span class="points-label">${currentLang === 'vi' ? 'Tổng điểm' : 'Total Points'}</span>
+                                <div class="info-tooltip">
+                                    <span class="info-tooltip-trigger" title="${currentLang === 'vi' ? 'Hôm qua' : 'Yesterday'}">
+                                        <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" aria-hidden="true">
+                                            <path d="M3 12a9 9 0 1 0 9-9"></path>
+                                            <path d="M12 7v5l3 3"></path>
+                                        </svg>
+                                    </span>
+                                    <div class="info-tooltip-content yesterday-card">
+                                        <div class="yesterday-header-row">
+                                            <strong>${currentLang === 'vi' ? 'Hôm qua' : 'Yesterday'}</strong>
+                                            <span class="yesterday-total">${(job.yesterday_summary?.total_points ?? 0).toLocaleString()}</span>
+                                        </div>
+                                        <div class="yesterday-subtitle">${currentLang === 'vi' ? 'Tổng điểm hôm qua' : 'Yesterday total points'}</div>
+                                        <div class="yesterday-grid">
+                                            <div class="yesterday-item">
+                                                <span class="yesterday-item-label">PC</span>
+                                                <span class="yesterday-item-value">${(job.yesterday_summary?.pc?.current ?? 0)}/${(job.yesterday_summary?.pc?.max ?? 0)}</span>
+                                            </div>
+                                            <div class="yesterday-item">
+                                                <span class="yesterday-item-label">Mobile</span>
+                                                <span class="yesterday-item-value">${(job.yesterday_summary?.mobile?.current ?? 0)}/${(job.yesterday_summary?.mobile?.max ?? 0)}</span>
+                                            </div>
+                                            <div class="yesterday-item">
+                                                <span class="yesterday-item-label">Daily Set</span>
+                                                <span class="yesterday-item-value">${(job.yesterday_summary?.daily_set?.current ?? 0)}/${(job.yesterday_summary?.daily_set?.max ?? 0)}</span>
+                                            </div>
+                                            <div class="yesterday-item">
+                                                <span class="yesterday-item-label">Edge</span>
+                                                <span class="yesterday-item-value">${(job.yesterday_summary?.edge?.current ?? 0)}/${(job.yesterday_summary?.edge?.max ?? 0)}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             <div style="display: flex; align-items: center; gap: 12px;">
                                 <div style="display: flex; align-items: baseline; gap: 8px;">
                                     <span class="points-val">${(job.points || 0).toLocaleString()}</span>
                                     ${job.earned_today ? `<span class="earned-today" title="${currentLang === 'vi' ? 'Điểm kiếm được hôm nay' : 'Points earned today'}" style="font-size: 0.8rem; background: #dcfce7; color: #166534; padding: 2px 6px; border-radius: 4px; font-weight: 600;">+${job.earned_today}</span>` : ''}
                                 </div>
                                 <div class="daily-streak-badge" title="${currentLang === 'vi' ? 'Chuỗi ngày liên tục' : 'Daily Streak'}">
-                                    <span>🔥 ${job.daily_streak || 0}</span>
+                                    <span>${currentLang === 'vi' ? 'Chuỗi' : 'Streak'} ${job.daily_streak || 0}</span>
                                 </div>
                             </div>
                         </div>
@@ -264,37 +400,46 @@ document.addEventListener("DOMContentLoaded", async () => {
                             <div class="metric">
                                 <div class="metric-header">
                                     <span class="metric-label">PC Search</span>
-                                    <span class="metric-value">${job.pc_current}/${job.pc_max}</span>
+                                    <span class="metric-value">${pcTrack.current}/${pcTrack.max}</span>
                                 </div>
                                 <div class="progress-container">
-                                    <div class="progress-bar ${animClass}" style="width: ${pcPct}%;"></div>
+                                    <div class="progress-bar ${animClass}" style="width: ${pcTrack.percent}%;"></div>
                                 </div>
                             </div>
                             <div class="metric">
                                 <div class="metric-header">
                                     <span class="metric-label">Mobile Search</span>
-                                    <span class="metric-value">${job.mobile_current}/${job.mobile_max}</span>
+                                    <span class="metric-value">${mobileTrack.current}/${mobileTrack.max}</span>
                                 </div>
                                 <div class="progress-container">
-                                    <div class="progress-bar mobile-bar ${animClass}" style="width: ${mobPct}%;"></div>
+                                    <div class="progress-bar mobile-bar ${animClass}" style="width: ${mobileTrack.percent}%;"></div>
                                 </div>
                             </div>
                             <div class="metric">
                                 <div class="metric-header">
                                     <span class="metric-label">Daily Set</span>
-                                    <span class="metric-value">${job.daily_current || 0}/${job.daily_max || 3}</span>
+                                    <span class="metric-value">${dailyTrack.current}/${dailyTrack.max}</span>
                                 </div>
                                 <div class="progress-container">
-                                    <div class="progress-bar ${animClass}" style="background: linear-gradient(90deg, #8b5cf6, #a78bfa); width: ${dailyPct}%;"></div>
+                                    <div class="progress-bar ${animClass}" style="background: linear-gradient(90deg, #8b5cf6, #a78bfa); width: ${dailyTrack.percent}%;"></div>
                                 </div>
                             </div>
                             <div class="metric">
                                 <div class="metric-header">
-                                    <span class="metric-label">Edge Browsing</span>
-                                    <span class="metric-value">${job.edge_current || 0}/${job.edge_max || 30}</span>
+                                    <span class="metric-label">Bing Search Streak</span>
+                                    <span class="metric-value">${bingTrack.current}/${bingTrack.max}</span>
                                 </div>
                                 <div class="progress-container">
-                                    <div class="progress-bar ${animClass}" style="background: linear-gradient(90deg, #3b82f6, #60a5fa); width: ${edgePct}%;"></div>
+                                    <div class="progress-bar ${animClass}" style="background: linear-gradient(90deg, #f97316, #fb923c); width: ${bingTrack.percent}%;"></div>
+                                </div>
+                            </div>
+                            <div class="metric metric-span-2">
+                                <div class="metric-header">
+                                    <span class="metric-label">Edge Browsing</span>
+                                    <span class="metric-value">${edgeTrack.current}/${edgeTrack.max}</span>
+                                </div>
+                                <div class="progress-container">
+                                    <div class="progress-bar ${animClass}" style="background: linear-gradient(90deg, #3b82f6, #60a5fa); width: ${edgeTrack.percent}%;"></div>
                                 </div>
                             </div>
                         </div>
@@ -347,7 +492,11 @@ document.addEventListener("DOMContentLoaded", async () => {
                     // Update status badge
                     const statusEl = document.getElementById(`log-status-${safeEmail}`);
                     if (statusEl) {
-                        statusEl.textContent = job.status;
+                        statusEl.textContent = job.status === 'Running'
+                            ? (i18n[currentLang] || i18n.vi).statusRunning
+                            : job.status === 'Error'
+                                ? ((i18n[currentLang] || i18n.vi).errorLabel || 'Error')
+                                : (i18n[currentLang] || i18n.vi).statusStopped;
                     }
                 }
             });
@@ -364,7 +513,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     async function initialLoad() {
         try {
             const state = await invoke('get_system_status');
-            renderDashboard(state);
+            applyDashboardState(state);
         } catch (e) {
             console.error("Failed to fetch initial state:", e);
         }
@@ -446,7 +595,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Start event listener for structural updates
     listen('system_status_update', (event) => {
         console.log("Received status update:", event);
-        renderDashboard(event.payload);
+        applyDashboardState(event.payload);
     });
 
     async function loadSettings() {
@@ -462,6 +611,14 @@ document.addEventListener("DOMContentLoaded", async () => {
             } else if (urlInput && settings.gpm_api_url) { // Backwards compat
                 urlInput.value = settings.gpm_api_url;
             }
+            const aiEnabledInput = document.getElementById('setting-ai-enabled');
+            if (aiEnabledInput) {
+                aiEnabledInput.checked = Boolean(settings.ai_enabled);
+            }
+            const pageAgentEnabledInput = document.getElementById('setting-page-agent-enabled');
+            if (pageAgentEnabledInput) {
+                pageAgentEnabledInput.checked = Boolean(settings.page_agent_enabled);
+            }
         } catch (e) {
             console.error("Failed to load settings:", e);
         }
@@ -472,8 +629,15 @@ document.addEventListener("DOMContentLoaded", async () => {
         saveSettingsBtn.addEventListener('click', async () => {
             const browserType = document.getElementById('setting-browser-type').value;
             const apiUrl = document.getElementById('setting-api-url').value;
+            const aiEnabled = document.getElementById('setting-ai-enabled')?.checked ?? false;
+            const pageAgentEnabled = document.getElementById('setting-page-agent-enabled')?.checked ?? false;
             try {
-                await invoke('update_settings', { data: { browser_type: browserType, browser_api_url: apiUrl } });
+                await invoke('update_settings', { data: {
+                    browser_type: browserType,
+                    browser_api_url: apiUrl,
+                    ai_enabled: aiEnabled,
+                    page_agent_enabled: pageAgentEnabled,
+                } });
                 const msg = document.getElementById('settings-status-msg');
                 msg.style.display = 'block';
                 setTimeout(() => msg.style.display = 'none', 3000);
@@ -485,7 +649,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     initialLoad();
     loadSettings();
-    setInterval(initialLoad, 2000);
     setInterval(updateLogs, 1000);
 
     // Start drag select event listeners
@@ -735,7 +898,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Auto Updater Setup
     try {
-        const appVersion = await getVersion();
+        const appVersion = await safeGetVersion();
         const verEl = document.getElementById('app-version');
         if (verEl) verEl.textContent = "v" + appVersion;
     } catch (e) {
@@ -753,7 +916,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             checkUpdateBtn.disabled = true;
 
             try {
-                const update = await check();
+                const update = await safeCheck();
                 if (update) {
                     let downloaded = 0;
                     let contentLength = 0;
@@ -782,7 +945,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                     updateMsg.style.color = 'var(--success)';
                     updateMsg.textContent = 'Cập nhật thành công! Ứng dụng sẽ khởi động lại trong 3 giây...';
                     setTimeout(async () => {
-                        await relaunch();
+                        await safeRelaunch();
                     }, 3000);
 
                 } else {

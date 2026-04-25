@@ -143,10 +143,13 @@ def describe_search_remaining_items(snapshot: dict) -> list[str]:
         current_value = int(search_status.get(current_key, 0) or 0)
         max_value = int(search_status.get(max_key, 0) or 0)
 
+        if max_value <= 0:
+            continue
+
         # Prefer concrete counters only when we have observed non-zero progress.
         # This preserves the explicit "unverified" message for 0/N cases while
         # preventing regressions like 24/60 being reported as unverified.
-        if max_value > 0 and current_value > 0:
+        if current_value > 0:
             if current_value < max_value:
                 items.append(f"{label} {current_value}/{max_value}")
             continue
@@ -155,7 +158,7 @@ def describe_search_remaining_items(snapshot: dict) -> list[str]:
             items.append(f"{label} unverified from original runtime")
             continue
 
-        if max_value > 0 and current_value < max_value:
+        if current_value < max_value:
             items.append(f"{label} {current_value}/{max_value}")
             continue
 

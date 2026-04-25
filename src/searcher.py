@@ -217,6 +217,7 @@ class Searcher:
         count: int,
         mode: str = "desktop",
         credit_probe_fn: Optional[Callable] = None,
+        recover_page_fn: Optional[Callable] = None,
     ) -> dict:
         """Perform searches with variable timing and patterns.
         
@@ -341,7 +342,23 @@ class Searcher:
                 ))
                 if is_closed_err:
                     _consecutive_closed += 1
-                    if _consecutive_closed >= 5:
+                    recovered = False
+                    if recover_page_fn is not None:
+                        try:
+                            logger.warning(
+                                f"{mode} search page became unusable; attempting recovery "
+                                f"({_consecutive_closed}/5)"
+                            )
+                            replacement_page = await recover_page_fn()
+                            if replacement_page is not None:
+                                page = replacement_page
+                                recovered = True
+                                _consecutive_closed = 0
+                                logger.info(f"Recovered {mode} search page and will retry current query")
+                                continue
+                        except Exception as recover_err:
+                            logger.warning(f"{mode} search page recovery failed: {recover_err}")
+                    if _consecutive_closed >= 5 and not recovered:
                         msg = (
                             f"Aborting {mode} searches: browser context closed "
                             f"for 5+ consecutive searches (page is gone). "
@@ -354,6 +371,14 @@ class Searcher:
                         break
                 else:
                     _consecutive_closed = 0  # Reset on non-closed error
+
+                if not is_closed_err:
+                    _consecutive_failures += 1
+                    if _consecutive_failures >= 2 and not self._slow_human_mode:
+                        self._slow_human_mode = True
+                        logger.warning(
+                            "2+ consecutive search errors — activating slow_human mode (doubling delays)"
+                        )
 
                 logger.error(f"Search {i + 1}/{count} failed: {e}")
                 stats["failed"] += 1

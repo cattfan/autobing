@@ -15,7 +15,7 @@ from main import (
     _run_mobile_search_pass,
 )
 from src.daily_set import DailySetCompleter
-from src.dashboard_scraper import NON_ACTIONABLE_CARD_TITLES, scan_dashboard_dom
+from src.dashboard_scraper import NON_ACTIONABLE_CARD_TITLES, build_task_fingerprint, scan_dashboard_dom, summarize_selector_health
 from src.humanizer import Humanizer
 from src.searcher import Searcher
 from src.streaks import TaskDetector
@@ -58,6 +58,21 @@ class RewardsTrustTests(unittest.TestCase):
             ),
             "pc=90/90, mobile=27/60, edge=0/0, total=9036",
         )
+
+    def test_dom_fingerprint_and_selector_health_are_stable(self):
+        first = build_task_fingerprint("  Explore Space  ", "https://bing.com/search?q=space&form=x", 10, "more_promo", "Earn more")
+        second = build_task_fingerprint("Explore   Space", "https://bing.com/search?q=space&form=y", 10, "more_promo", "Earn more")
+        self.assertEqual(first, second)
+
+        health = summarize_selector_health([
+            {"selector_strategy": "href", "fingerprint": first},
+            {"selector_strategy": "broad", "fingerprint": ""},
+        ])
+        self.assertEqual(health["task_count"], 2)
+        self.assertEqual(health["stable_selector_count"], 1)
+        self.assertEqual(health["fallback_selector_count"], 1)
+        self.assertEqual(health["missing_fingerprint_count"], 1)
+        self.assertEqual(health["scan_version"], "dashboard-dom-v2")
 
     def test_targeted_categories_require_strict_completion(self):
         self.assertTrue(_requires_strict_completion("daily_set"))
@@ -798,6 +813,926 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(scanner.daily_set_execution_proofs["daily_set"]["progress_total"], 3)
 
+    async def test_daily_set_execution_proof_merge_does_not_downgrade_stronger_state(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        task = RewardsTask(id="daily-1", title="Gaudi's Masterpiece?", category="daily_set", task_type="visit")
+
+        scanner._record_daily_set_execution_proof(
+            task,
+            {
+                "state": "target_proven",
+                "target_proven": True,
+                "proof_titles": ["Gaudi's Masterpiece?"],
+                "progress_completed": 1,
+                "progress_total": 3,
+            },
+        )
+        scanner._record_daily_set_execution_proof(
+            task,
+            {
+                "state": "attempted_only",
+                "attempted_only": True,
+                "proof_titles": [],
+                "progress_completed": 1,
+                "progress_total": 3,
+            },
+        )
+
+        proof = scanner._get_daily_set_execution_proof(task)
+        self.assertEqual(proof["state"], "target_proven")
+        self.assertIn("Gaudi's Masterpiece?", proof["proof_titles"])
+
+    async def test_daily_set_execution_proof_promotes_full_progress_to_category_proven(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        task = RewardsTask(id="daily-1", title="Gaudi's Masterpiece?", category="daily_set", task_type="visit")
+
+        proof = scanner._record_daily_set_execution_proof(
+            task,
+            {
+                "state": "target_proven",
+                "target_proven": True,
+                "proof_titles": ["Gaudi's Masterpiece?"],
+                "progress_completed": 3,
+                "progress_total": 3,
+            },
+        )
+
+        self.assertEqual(proof["state"], "category_proven")
+        self.assertEqual(scanner.daily_set_execution_proofs["daily_set"]["state"], "category_proven")
+
+    async def test_daily_set_execution_proof_returns_strongest_merged_proof(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        task = RewardsTask(id="daily-1", title="Gaudi's Masterpiece?", category="daily_set", task_type="visit")
+
+        scanner.daily_set_execution_proofs["daily-1"] = {
+            "state": "attempted_only",
+            "proof_titles": [],
+            "progress_completed": 0,
+            "progress_total": 3,
+            "source": "task-id",
+        }
+        scanner.daily_set_execution_proofs["gaudi s masterpiece"] = {
+            "state": "target_proven",
+            "proof_titles": ["Gaudi's Masterpiece?"],
+            "progress_completed": 1,
+            "progress_total": 3,
+            "source": "title",
+        }
+        scanner.daily_set_execution_proofs["daily_set"] = {
+            "state": "attempted_only",
+            "proof_titles": ["Gaudi's Masterpiece?"],
+            "progress_completed": 2,
+            "progress_total": 3,
+            "source": "category",
+        }
+
+        proof = scanner._get_daily_set_execution_proof(task)
+        self.assertEqual(proof["state"], "target_proven")
+        self.assertEqual(proof["progress_completed"], 2)
+        self.assertEqual(proof["progress_total"], 3)
+        self.assertIn("Gaudi's Masterpiece?", proof["proof_titles"])
+
+    async def test_daily_set_execution_proof_prefers_category_when_merged_progress_is_full(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        task = RewardsTask(id="daily-1", title="Gaudi's Masterpiece?", category="daily_set", task_type="visit")
+
+        scanner.daily_set_execution_proofs["daily-1"] = {
+            "state": "target_proven",
+            "proof_titles": ["Gaudi's Masterpiece?"],
+            "progress_completed": 1,
+            "progress_total": 3,
+            "source": "task-id",
+        }
+        scanner.daily_set_execution_proofs["daily_set"] = {
+            "state": "attempted_only",
+            "proof_titles": ["Gaudi's Masterpiece?", "Second task", "Third task"],
+            "progress_completed": 3,
+            "progress_total": 3,
+            "source": "category",
+        }
+
+        proof = scanner._get_daily_set_execution_proof(task)
+        self.assertEqual(proof["state"], "category_proven")
+        self.assertEqual(proof["progress_completed"], 3)
+        self.assertEqual(proof["progress_total"], 3)
+        self.assertIn("Gaudi's Masterpiece?", proof["proof_titles"])
+
+    async def test_daily_set_proof_carrier_tracks_partial_progress_across_multiple_tasks(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        first = RewardsTask(id="daily-1", title="Jupiter's moons", category="daily_set", task_type="visit")
+        second = RewardsTask(id="daily-2", title="Renaissance Genius?", category="daily_set", task_type="visit")
+
+        scanner._record_daily_set_execution_proof(
+            first,
+            {
+                "state": "target_proven",
+                "target_proven": True,
+                "proof_titles": ["Jupiter's moons"],
+                "progress_completed": 1,
+                "progress_total": 3,
+            },
+        )
+        scanner._record_daily_set_execution_proof(
+            second,
+            {
+                "state": "target_proven",
+                "target_proven": True,
+                "proof_titles": ["Renaissance Genius?"],
+                "progress_completed": 2,
+                "progress_total": 3,
+            },
+        )
+
+        daily_set_proof = scanner.daily_set_execution_proofs["daily_set"]
+        self.assertEqual(daily_set_proof["progress_completed"], 2)
+        self.assertEqual(daily_set_proof["progress_total"], 3)
+        self.assertIn("Jupiter's moons", daily_set_proof["proof_titles"])
+        self.assertIn("Renaissance Genius?", daily_set_proof["proof_titles"])
+
+    async def test_daily_set_verification_accepts_partial_progress_proof_for_matching_title(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._log = lambda *_args, **_kwargs: None
+        scanner._dom_check_single_task_done = AsyncMock(return_value=False)
+        scanner._dom_check_task_done_across_rewards_pages = AsyncMock(return_value=False)
+        scanner._fetch_all_tasks = AsyncMock(side_effect=AssertionError("API polling should not run"))
+        scanner.daily_set_execution_proofs["daily-1"] = {
+            "state": "attempted_only",
+            "proof_titles": ["Parrot intelligence"],
+            "progress_completed": 2,
+            "progress_total": 3,
+            "source": "test",
+        }
+        task = RewardsTask(
+            id="daily-1",
+            title="Parrot intelligence",
+            category="daily_set",
+            task_type="visit",
+        )
+
+        verified = await scanner._verify_task_completion(None, task)
+
+        self.assertTrue(verified)
+        scanner._fetch_all_tasks.assert_not_awaited()
+
+    async def test_daily_set_reconcile_applies_partial_session_progress(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": ["Task A", "Task B", "Task C"],
+            "pending_by_category": {"daily_set": ["Task A", "Task B", "Task C"]},
+        }
+
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "daily_set_progress_completed": 2,
+                "daily_set_progress_total": 3,
+                "daily_set_titles": ["Task A"],
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 2)
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["total"], 3)
+        self.assertEqual(reconciled["category_status"]["daily_set"]["completed"], 2)
+        self.assertEqual(reconciled["pending_by_category"]["daily_set"], ["Task B", "Task C"])
+        self.assertEqual(reconciled["pending_tasks"], ["Task B", "Task C"])
+
+    async def test_daily_set_reconcile_full_completion_still_clears_category(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": ["Task A", "Task B"],
+            "pending_by_category": {"daily_set": ["Task A", "Task B"]},
+        }
+
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "daily_set_complete": True,
+                "daily_set_progress_completed": 3,
+                "daily_set_progress_total": 3,
+                "daily_set_titles": ["Task A", "Task B"],
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["category_status"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["pending_by_category"]["daily_set"], [])
+        self.assertEqual(reconciled["pending_tasks"], [])
+
+    async def test_daily_set_progress_reader_prefers_root_before_dashboard_and_earn(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/"
+                self.visits = []
+                self._signals = {
+                    "https://rewards.bing.com": {"completed": 3, "total": 3, "signals": ["Daily Set Activity: 3/3"]},
+                    "https://rewards.bing.com/dashboard": {"completed": 1, "total": 3, "signals": ["Daily Set Activity: 1/3"]},
+                    "https://rewards.bing.com/earn": {"completed": 1, "total": 3, "signals": ["Daily Set Activity: 1/3"]},
+                }
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+                self.visits.append(url)
+
+            async def evaluate(self, _script):
+                return self._signals.get(self.url, {"completed": 0, "total": 0, "signals": []})
+
+        page = FakePage()
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            proof = await completer._read_daily_set_progress(page)
+
+        self.assertEqual(proof["completed"], 3)
+        self.assertEqual(proof["total"], 3)
+        self.assertTrue(proof["category_proven"])
+        self.assertEqual(page.visits[0], "https://rewards.bing.com")
+
+    async def test_daily_set_progress_reader_ignores_implausible_fraction(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/"
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+
+            async def evaluate(self, _script):
+                return {"completed": 24, "total": 999, "signals": ["Daily Set Activity: 24/999"]}
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            proof = await completer._read_daily_set_progress(FakePage())
+
+        self.assertEqual(proof["completed"], 0)
+        self.assertEqual(proof["total"], 0)
+        self.assertFalse(proof["category_proven"])
+
+    async def test_daily_set_uses_alternate_surface_when_expected_title_disappears(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakeContext:
+            def __init__(self, page):
+                self.pages = [page]
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = FakeContext(self)
+                self.visits = []
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+                self.visits.append(url)
+
+            async def wait_for_load_state(self, *_args, **_kwargs):
+                return None
+
+            def locator(self, *_args, **_kwargs):
+                class _Loc:
+                    async def count(self): return 1
+                    async def is_visible(self, timeout=None): return True
+                    async def scroll_into_view_if_needed(self, timeout=None): return None
+                    async def click(self, timeout=None): return None
+                    @property
+                    def first(self): return self
+                return _Loc()
+
+        page = FakePage()
+        targets = [
+            [{"id": "1", "title": "Expected title"}],
+            [{"id": "2", "title": "Fallback title"}],
+            [],
+        ]
+        completer._click_daily_set_card = AsyncMock(return_value=True)
+        completer._collect_daily_set_activity_targets = AsyncMock(side_effect=targets)
+        completer._handle_task = AsyncMock(return_value=None)
+        completer._read_daily_set_progress = AsyncMock(side_effect=[
+            {"completed": 1, "total": 3, "category_proven": False, "signals": ["1/3"]},
+            {"completed": 3, "total": 3, "category_proven": True, "signals": ["3/3"]},
+            {"completed": 3, "total": 3, "category_proven": True, "signals": ["3/3"]},
+        ])
+        completer.captcha.solve_if_present = AsyncMock(return_value=None)
+        completer.humanizer.short_delay = AsyncMock(return_value=None)
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            result = await completer.complete_daily_set(page, expected_title="Expected title")
+
+        self.assertTrue(result["category_proven"])
+        self.assertEqual(result["progress_completed"], 3)
+        self.assertEqual(result["progress_total"], 3)
+        self.assertIn("Expected title", result["proof_titles"])
+        self.assertGreaterEqual(len(result["proof_titles"]), 1)
+
+    async def test_daily_set_reopen_tries_multiple_surfaces_after_same_page_task(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakeContext:
+            def __init__(self, page):
+                self.pages = [page]
+
+        class FakeLoc:
+            async def count(self): return 1
+            async def is_visible(self, timeout=None): return True
+            async def scroll_into_view_if_needed(self, timeout=None): return None
+            async def click(self, timeout=None): return None
+            @property
+            def first(self): return self
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = FakeContext(self)
+                self.visits = []
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+                self.visits.append(url)
+
+            async def wait_for_load_state(self, *_args, **_kwargs):
+                return None
+
+            def locator(self, *_args, **_kwargs):
+                return FakeLoc()
+
+        page = FakePage()
+        completer._collect_daily_set_activity_targets = AsyncMock(side_effect=[
+            [{"id": "1", "title": "Task A"}],
+            [],
+        ])
+        completer._click_daily_set_card = AsyncMock(side_effect=[True, False, True])
+        completer._handle_task = AsyncMock(return_value=None)
+        completer._read_daily_set_progress = AsyncMock(return_value={"completed": 1, "total": 3, "category_proven": False, "signals": ["1/3"]})
+        completer.captcha.solve_if_present = AsyncMock(return_value=None)
+        completer.humanizer.short_delay = AsyncMock(return_value=None)
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            await completer.complete_daily_set(page)
+
+        self.assertIn("https://rewards.bing.com", page.visits)
+        self.assertIn("https://rewards.bing.com/dashboard", page.visits)
+
+    async def test_daily_set_progress_breaks_loop_when_full_completion_observed(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakeContext:
+            def __init__(self, page):
+                self.pages = [page]
+
+        class FakeLoc:
+            async def count(self): return 1
+            async def is_visible(self, timeout=None): return True
+            async def scroll_into_view_if_needed(self, timeout=None): return None
+            async def click(self, timeout=None): return None
+            @property
+            def first(self): return self
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = FakeContext(self)
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+
+            async def wait_for_load_state(self, *_args, **_kwargs):
+                return None
+
+            def locator(self, *_args, **_kwargs):
+                return FakeLoc()
+
+        page = FakePage()
+        completer._click_daily_set_card = AsyncMock(return_value=True)
+        completer._collect_daily_set_activity_targets = AsyncMock(side_effect=[
+            [{"id": "1", "title": "Task A"}],
+            [{"id": "2", "title": "Task B"}],
+        ])
+        completer._handle_task = AsyncMock(return_value=None)
+        completer._read_daily_set_progress = AsyncMock(side_effect=[
+            {"completed": 1, "total": 3, "category_proven": False, "signals": ["1/3"]},
+            {"completed": 3, "total": 3, "category_proven": True, "signals": ["3/3"]},
+            {"completed": 3, "total": 3, "category_proven": True, "signals": ["3/3"]},
+        ])
+        completer.captcha.solve_if_present = AsyncMock(return_value=None)
+        completer.humanizer.short_delay = AsyncMock(return_value=None)
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            result = await completer.complete_daily_set(page)
+
+        self.assertTrue(result["category_proven"])
+        self.assertEqual(completer._handle_task.await_count, 1)
+        self.assertEqual(result["progress_completed"], 3)
+        self.assertEqual(result["progress_total"], 3)
+
+    async def test_daily_set_progress_updates_even_when_target_proof_is_only_partial(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        task = RewardsTask(id="daily-1", title="Gaudi's Masterpiece?", category="daily_set", task_type="visit")
+
+        scanner._record_daily_set_execution_proof(
+            task,
+            {
+                "state": "attempted_only",
+                "attempted_only": True,
+                "proof_titles": ["Gaudi's Masterpiece?"],
+                "progress_completed": 2,
+                "progress_total": 3,
+            },
+        )
+
+        proof = scanner._get_daily_set_execution_proof(task)
+        self.assertEqual(proof["progress_completed"], 2)
+        self.assertEqual(proof["progress_total"], 3)
+        self.assertEqual(proof["state"], "attempted_only")
+
+    async def test_daily_set_complete_reconciliation_still_clears_titles(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 0, "total": 3}},
+            "category_status": {"daily_set": {"completed": 0, "total": 3}},
+            "pending_tasks": ["Task A", "Task B"],
+            "pending_by_category": {"daily_set": ["Task A", "Task B"]},
+        }
+
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "daily_set_complete": True,
+                "daily_set_titles": ["Task A", "Task B"],
+                "daily_set_progress_completed": 3,
+                "daily_set_progress_total": 3,
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["pending_tasks"], [])
+        self.assertEqual(reconciled["pending_by_category"]["daily_set"], [])
+
+    async def test_daily_set_partial_reconciliation_does_not_clear_unproven_titles(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": ["Task A", "Task B", "Task C"],
+            "pending_by_category": {"daily_set": ["Task A", "Task B", "Task C"]},
+        }
+
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "daily_set_progress_completed": 2,
+                "daily_set_progress_total": 3,
+                "daily_set_titles": ["Task A"],
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 2)
+        self.assertEqual(reconciled["pending_tasks"], ["Task B", "Task C"])
+        self.assertEqual(reconciled["pending_by_category"]["daily_set"], ["Task B", "Task C"])
+
+    async def test_daily_set_reconcile_can_upgrade_dashboard_counts_from_partial_progress(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": [],
+            "pending_by_category": {"daily_set": []},
+        }
+
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "daily_set_progress_completed": 3,
+                "daily_set_progress_total": 3,
+                "daily_set_titles": [],
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["category_status"]["daily_set"]["completed"], 3)
+
+    async def test_daily_set_execution_proof_category_merge_keeps_strongest_titles(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        first = RewardsTask(id="daily-1", title="Task A", category="daily_set", task_type="visit")
+        second = RewardsTask(id="daily-2", title="Task B", category="daily_set", task_type="visit")
+
+        scanner._record_daily_set_execution_proof(
+            first,
+            {
+                "state": "target_proven",
+                "proof_titles": ["Task A"],
+                "progress_completed": 1,
+                "progress_total": 3,
+            },
+        )
+        scanner._record_daily_set_execution_proof(
+            second,
+            {
+                "state": "target_proven",
+                "proof_titles": ["Task B"],
+                "progress_completed": 2,
+                "progress_total": 3,
+            },
+        )
+
+        category_proof = scanner.daily_set_execution_proofs["daily_set"]
+        self.assertIn("Task A", category_proof["proof_titles"])
+        self.assertIn("Task B", category_proof["proof_titles"])
+        self.assertEqual(category_proof["progress_completed"], 2)
+        self.assertEqual(category_proof["progress_total"], 3)
+
+    async def test_daily_set_strongest_proof_survives_later_weaker_category_write(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        task = RewardsTask(id="daily-1", title="Task A", category="daily_set", task_type="visit")
+
+        scanner._record_daily_set_execution_proof(
+            task,
+            {
+                "state": "category_proven",
+                "proof_titles": ["Task A", "Task B", "Task C"],
+                "progress_completed": 3,
+                "progress_total": 3,
+            },
+        )
+        scanner._record_daily_set_execution_proof(
+            task,
+            {
+                "state": "attempted_only",
+                "proof_titles": [],
+                "progress_completed": 1,
+                "progress_total": 3,
+            },
+        )
+
+        proof = scanner._get_daily_set_execution_proof(task)
+        self.assertEqual(proof["state"], "category_proven")
+        self.assertEqual(proof["progress_completed"], 3)
+        self.assertEqual(proof["progress_total"], 3)
+
+    async def test_daily_set_partial_progress_can_verify_matching_task_before_api(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._log = lambda *_args, **_kwargs: None
+        scanner._dom_check_single_task_done = AsyncMock(return_value=False)
+        scanner._dom_check_task_done_across_rewards_pages = AsyncMock(return_value=False)
+        scanner._fetch_all_tasks = AsyncMock(side_effect=AssertionError("API polling should not run"))
+        scanner.daily_set_execution_proofs["daily-1"] = {
+            "state": "attempted_only",
+            "proof_titles": ["Task A"],
+            "progress_completed": 2,
+            "progress_total": 3,
+            "source": "test",
+        }
+
+        verified = await scanner._verify_task_completion(
+            None,
+            RewardsTask(id="daily-1", title="Task A", category="daily_set", task_type="visit"),
+        )
+
+        self.assertTrue(verified)
+        scanner._fetch_all_tasks.assert_not_awaited()
+
+    async def test_daily_set_panel_recovery_retries_remaining_surfaces(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakeContext:
+            def __init__(self, page):
+                self.pages = [page]
+
+        class FakeLoc:
+            async def count(self): return 1
+            async def is_visible(self, timeout=None): return True
+            async def scroll_into_view_if_needed(self, timeout=None): return None
+            async def click(self, timeout=None): return None
+            @property
+            def first(self): return self
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = FakeContext(self)
+                self.visits = []
+
+            async def goto(self, url, **_kwargs):
+                self.url = url
+                self.visits.append(url)
+
+            async def wait_for_load_state(self, *_args, **_kwargs): return None
+            def locator(self, *_args, **_kwargs): return FakeLoc()
+
+        page = FakePage()
+        completer._collect_daily_set_activity_targets = AsyncMock(side_effect=[
+            [{"id": "1", "title": "Task A"}],
+            [],
+        ])
+        completer._click_daily_set_card = AsyncMock(side_effect=[True, False, True])
+        completer._handle_task = AsyncMock(return_value=None)
+        completer._read_daily_set_progress = AsyncMock(return_value={"completed": 1, "total": 3, "category_proven": False, "signals": ["1/3"]})
+        completer.captcha.solve_if_present = AsyncMock(return_value=None)
+        completer.humanizer.short_delay = AsyncMock(return_value=None)
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            await completer.complete_daily_set(page)
+
+        self.assertGreaterEqual(completer._click_daily_set_card.await_count, 3)
+        self.assertIn("https://rewards.bing.com", page.visits)
+        self.assertIn("https://rewards.bing.com/dashboard", page.visits)
+
+    async def test_daily_set_expected_title_missing_continues_with_remaining_target(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakeContext:
+            def __init__(self, page): self.pages = [page]
+
+        class FakeLoc:
+            async def count(self): return 1
+            async def is_visible(self, timeout=None): return True
+            async def scroll_into_view_if_needed(self, timeout=None): return None
+            async def click(self, timeout=None): return None
+            @property
+            def first(self): return self
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = FakeContext(self)
+            async def goto(self, url, **_kwargs): self.url = url
+            async def wait_for_load_state(self, *_args, **_kwargs): return None
+            def locator(self, *_args, **_kwargs): return FakeLoc()
+
+        page = FakePage()
+        completer._click_daily_set_card = AsyncMock(return_value=True)
+        completer._collect_daily_set_activity_targets = AsyncMock(side_effect=[
+            [{"id": "1", "title": "Fallback title"}],
+            [],
+        ])
+        completer._handle_task = AsyncMock(return_value=None)
+        completer._read_daily_set_progress = AsyncMock(return_value={"completed": 1, "total": 3, "category_proven": False, "signals": ["1/3"]})
+        completer.captcha.solve_if_present = AsyncMock(return_value=None)
+        completer.humanizer.short_delay = AsyncMock(return_value=None)
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            result = await completer.complete_daily_set(page, expected_title="Expected title")
+
+        self.assertEqual(result["completed"], 1)
+        self.assertIn("Fallback title", result["proof_titles"])
+
+    async def test_daily_set_progress_reader_marks_full_completion_from_root_signal(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/"
+                self.visits = []
+                self._signals = {
+                    "https://rewards.bing.com": {"completed": 3, "total": 3, "signals": ["Daily Set Activity: 3/3"]},
+                    "https://rewards.bing.com/dashboard": {"completed": 1, "total": 3, "signals": ["Daily Set Activity: 1/3"]},
+                    "https://rewards.bing.com/earn": {"completed": 1, "total": 3, "signals": ["Daily Set Activity: 1/3"]},
+                }
+            async def goto(self, url, **_kwargs):
+                self.url = url
+                self.visits.append(url)
+            async def evaluate(self, _script):
+                return self._signals.get(self.url, {"completed": 0, "total": 0, "signals": []})
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            proof = await completer._read_daily_set_progress(FakePage())
+
+        self.assertTrue(proof["category_proven"])
+        self.assertEqual(proof["completed"], 3)
+        self.assertEqual(proof["total"], 3)
+
+    async def test_daily_set_loop_breaks_once_full_progress_observed(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakeContext:
+            def __init__(self, page): self.pages = [page]
+
+        class FakeLoc:
+            async def count(self): return 1
+            async def is_visible(self, timeout=None): return True
+            async def scroll_into_view_if_needed(self, timeout=None): return None
+            async def click(self, timeout=None): return None
+            @property
+            def first(self): return self
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = FakeContext(self)
+            async def goto(self, url, **_kwargs): self.url = url
+            async def wait_for_load_state(self, *_args, **_kwargs): return None
+            def locator(self, *_args, **_kwargs): return FakeLoc()
+
+        page = FakePage()
+        completer._click_daily_set_card = AsyncMock(return_value=True)
+        completer._collect_daily_set_activity_targets = AsyncMock(side_effect=[
+            [{"id": "1", "title": "Task A"}],
+            [{"id": "2", "title": "Task B"}],
+        ])
+        completer._handle_task = AsyncMock(return_value=None)
+        completer._read_daily_set_progress = AsyncMock(side_effect=[
+            {"completed": 3, "total": 3, "category_proven": True, "signals": ["3/3"]},
+            {"completed": 3, "total": 3, "category_proven": True, "signals": ["3/3"]},
+        ])
+        completer.captcha.solve_if_present = AsyncMock(return_value=None)
+        completer.humanizer.short_delay = AsyncMock(return_value=None)
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            result = await completer.complete_daily_set(page)
+
+        self.assertTrue(result["category_proven"])
+        self.assertEqual(completer._handle_task.await_count, 1)
+
+    async def test_daily_set_target_titles_are_preserved_across_partial_runs(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        first = RewardsTask(id="daily-1", title="Task A", category="daily_set", task_type="visit")
+        second = RewardsTask(id="daily-2", title="Task B", category="daily_set", task_type="visit")
+
+        scanner._record_daily_set_execution_proof(
+            first,
+            {"state": "target_proven", "proof_titles": ["Task A"], "progress_completed": 1, "progress_total": 3},
+        )
+        scanner._record_daily_set_execution_proof(
+            second,
+            {"state": "attempted_only", "proof_titles": ["Task B"], "progress_completed": 2, "progress_total": 3},
+        )
+
+        proof = scanner.daily_set_execution_proofs["daily_set"]
+        self.assertIn("Task A", proof["proof_titles"])
+        self.assertIn("Task B", proof["proof_titles"])
+        self.assertEqual(proof["progress_completed"], 2)
+
+    async def test_daily_set_partial_progress_is_reflected_in_reconciliation_counts(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": ["Task A", "Task B", "Task C"],
+            "pending_by_category": {"daily_set": ["Task A", "Task B", "Task C"]},
+        }
+
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {"daily_set_progress_completed": 2, "daily_set_progress_total": 3, "daily_set_titles": ["Task A"]},
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 2)
+        self.assertEqual(reconciled["category_status"]["daily_set"]["completed"], 2)
+        self.assertEqual(reconciled["pending_tasks"], ["Task B", "Task C"])
+        self.assertEqual(reconciled["pending_by_category"]["daily_set"], ["Task B", "Task C"])
+
+    async def test_daily_set_complete_reconciliation_still_clears_everything(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": ["Task A", "Task B"],
+            "pending_by_category": {"daily_set": ["Task A", "Task B"]},
+        }
+
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {"daily_set_complete": True, "daily_set_progress_completed": 3, "daily_set_progress_total": 3, "daily_set_titles": ["Task A", "Task B"]},
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["category_status"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["pending_tasks"], [])
+        self.assertEqual(reconciled["pending_by_category"]["daily_set"], [])
+
+    async def test_daily_set_progress_full_reconcile_can_upgrade_dashboard_counts(self):
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 1, "total": 3}},
+            "category_status": {"daily_set": {"completed": 1, "total": 3}},
+            "pending_tasks": [],
+            "pending_by_category": {"daily_set": []},
+        }
+
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {"daily_set_progress_completed": 3, "daily_set_progress_total": 3, "daily_set_titles": []},
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"]["completed"], 3)
+        self.assertEqual(reconciled["category_status"]["daily_set"]["completed"], 3)
+
+    async def test_daily_set_strongest_proof_survives_later_weaker_write(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        task = RewardsTask(id="daily-1", title="Task A", category="daily_set", task_type="visit")
+
+        scanner._record_daily_set_execution_proof(
+            task,
+            {"state": "category_proven", "proof_titles": ["Task A", "Task B", "Task C"], "progress_completed": 3, "progress_total": 3},
+        )
+        scanner._record_daily_set_execution_proof(
+            task,
+            {"state": "attempted_only", "proof_titles": [], "progress_completed": 1, "progress_total": 3},
+        )
+
+        proof = scanner._get_daily_set_execution_proof(task)
+        self.assertEqual(proof["state"], "category_proven")
+        self.assertEqual(proof["progress_completed"], 3)
+        self.assertEqual(proof["progress_total"], 3)
+
+    async def test_daily_set_partial_progress_proof_can_verify_matching_task(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._log = lambda *_args, **_kwargs: None
+        scanner._dom_check_single_task_done = AsyncMock(return_value=False)
+        scanner._dom_check_task_done_across_rewards_pages = AsyncMock(return_value=False)
+        scanner._fetch_all_tasks = AsyncMock(side_effect=AssertionError("API polling should not run"))
+        scanner.daily_set_execution_proofs["daily-1"] = {
+            "state": "attempted_only",
+            "proof_titles": ["Task A"],
+            "progress_completed": 2,
+            "progress_total": 3,
+            "source": "test",
+        }
+
+        verified = await scanner._verify_task_completion(None, RewardsTask(id="daily-1", title="Task A", category="daily_set", task_type="visit"))
+        self.assertTrue(verified)
+        scanner._fetch_all_tasks.assert_not_awaited()
+
+    async def test_daily_set_fallback_expected_title_missing_keeps_progressing(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakeContext:
+            def __init__(self, page): self.pages = [page]
+
+        class FakeLoc:
+            async def count(self): return 1
+            async def is_visible(self, timeout=None): return True
+            async def scroll_into_view_if_needed(self, timeout=None): return None
+            async def click(self, timeout=None): return None
+            @property
+            def first(self): return self
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = FakeContext(self)
+                self.visits = []
+            async def goto(self, url, **_kwargs):
+                self.url = url
+                self.visits.append(url)
+            async def wait_for_load_state(self, *_args, **_kwargs): return None
+            def locator(self, *_args, **_kwargs): return FakeLoc()
+
+        page = FakePage()
+        completer._click_daily_set_card = AsyncMock(return_value=True)
+        completer._collect_daily_set_activity_targets = AsyncMock(side_effect=[
+            [{"id": "1", "title": "Fallback title"}],
+            [],
+        ])
+        completer._handle_task = AsyncMock(return_value=None)
+        completer._read_daily_set_progress = AsyncMock(return_value={"completed": 1, "total": 3, "category_proven": False, "signals": ["1/3"]})
+        completer.captcha.solve_if_present = AsyncMock(return_value=None)
+        completer.humanizer.short_delay = AsyncMock(return_value=None)
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            result = await completer.complete_daily_set(page, expected_title="Expected title")
+
+        self.assertEqual(result["completed"], 1)
+        self.assertIn("Fallback title", result["proof_titles"])
+
+    async def test_daily_set_full_progress_breaks_loop_after_first_success(self):
+        completer = DailySetCompleter(Humanizer())
+
+        class FakeContext:
+            def __init__(self, page): self.pages = [page]
+
+        class FakeLoc:
+            async def count(self): return 1
+            async def is_visible(self, timeout=None): return True
+            async def scroll_into_view_if_needed(self, timeout=None): return None
+            async def click(self, timeout=None): return None
+            @property
+            def first(self): return self
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://rewards.bing.com/earn"
+                self.context = FakeContext(self)
+            async def goto(self, url, **_kwargs): self.url = url
+            async def wait_for_load_state(self, *_args, **_kwargs): return None
+            def locator(self, *_args, **_kwargs): return FakeLoc()
+
+        page = FakePage()
+        completer._click_daily_set_card = AsyncMock(return_value=True)
+        completer._collect_daily_set_activity_targets = AsyncMock(side_effect=[
+            [{"id": "1", "title": "Task A"}],
+            [{"id": "2", "title": "Task B"}],
+        ])
+        completer._handle_task = AsyncMock(return_value=None)
+        completer._read_daily_set_progress = AsyncMock(side_effect=[
+            {"completed": 3, "total": 3, "category_proven": True, "signals": ["3/3"]},
+            {"completed": 3, "total": 3, "category_proven": True, "signals": ["3/3"]},
+        ])
+        completer.captcha.solve_if_present = AsyncMock(return_value=None)
+        completer.humanizer.short_delay = AsyncMock(return_value=None)
+
+        with patch("src.daily_set.asyncio.sleep", new=AsyncMock()):
+            result = await completer.complete_daily_set(page)
+
+        self.assertTrue(result["category_proven"])
+        self.assertEqual(completer._handle_task.await_count, 1)
+        self.assertEqual(result["progress_completed"], 3)
+        self.assertEqual(result["progress_total"], 3)
+
     async def test_daily_set_verification_checks_execution_proof_before_api_polling(self):
         scanner = UniversalTaskScanner(Humanizer())
         scanner._log = lambda *_args, **_kwargs: None
@@ -1131,6 +2066,27 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("daily_set", scanner._session_completed_categories)
         self.assertTrue(result["session_proofs"]["daily_set_complete"])
         scanner._execute_task.assert_not_awaited()
+
+    async def test_scan_runs_daily_set_fallback_when_overview_has_gap_but_inventory_omits_daily_set(self):
+        scanner = UniversalTaskScanner(Humanizer())
+        scanner._log = lambda *_args, **_kwargs: None
+        scanner._fetch_all_tasks = AsyncMock(return_value=[])
+        scanner._dom_verify_task_status = AsyncMock(return_value=set())
+        scanner._complete_visible_daily_set_gap = AsyncMock(return_value={
+            "progress_completed": 3,
+            "progress_total": 3,
+            "category_proven": True,
+        })
+
+        with patch("src.universal_task._load_state", return_value={}), \
+             patch("src.universal_task._save_state"):
+            result = await scanner.scan_and_complete(object(), account_email="test@example.com")
+
+        scanner._complete_visible_daily_set_gap.assert_awaited_once()
+        self.assertIn("daily_set", scanner._session_completed_categories)
+        self.assertTrue(result["session_proofs"]["daily_set_complete"])
+        self.assertEqual(result["session_proofs"]["daily_set_progress_completed"], 3)
+        self.assertEqual(result["session_proofs"]["daily_set_progress_total"], 3)
 
     async def test_mobile_credit_recheck_returns_resolved_status(self):
         settings = {

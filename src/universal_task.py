@@ -423,6 +423,27 @@ class UniversalTaskScanner:
                 proofs=live_category_proofs,
             )
 
+        if not any(task.category == "daily_set" for task in tasks):
+            daily_set_result = await self._complete_visible_daily_set_gap(page)
+            if daily_set_result:
+                completed = int(daily_set_result.get("progress_completed", 0) or daily_set_result.get("completed", 0) or 0)
+                total = int(daily_set_result.get("progress_total", 0) or daily_set_result.get("total", 0) or 0)
+                stats["by_category"]["daily_set"] = {
+                    "total": total,
+                    "completed": completed if daily_set_result.get("category_proven") else 0,
+                    "deferred": 0,
+                    "skipped_done": completed if not daily_set_result.get("category_proven") else 0,
+                    "skipped_locked": 0,
+                    "failed": 0 if daily_set_result.get("category_proven") else max(0, total - completed),
+                }
+                if daily_set_result.get("category_proven"):
+                    self._session_completed_categories.add("daily_set")
+                self._diag(
+                    "Handled visible Daily Set gap outside task inventory",
+                    scope="task-scan",
+                    result=daily_set_result,
+                )
+
         # 2. Load state for time-gated task tracking
         state = _load_state()
         account_state = state.get(account_email, {})
@@ -759,6 +780,8 @@ class UniversalTaskScanner:
         stats["session_proofs"] = {
             "daily_set_complete": "daily_set" in self._session_completed_categories or (daily_total > 0 and daily_completed >= daily_total),
             "daily_set_titles": sorted(self._session_daily_set_titles),
+            "daily_set_progress_completed": daily_completed,
+            "daily_set_progress_total": daily_total,
         }
         self._diag(
             "Task scan completed",
@@ -848,6 +871,22 @@ class UniversalTaskScanner:
                         **self._task_diag_payload(task),
                     )
                     return True
+                if (
+                    proof_state == "attempted_only"
+                    and int(execution_proof.get("progress_completed", 0) or 0) > 0
+                    and self._normalized_task_title_key(task.title or "") in {
+                        self._normalized_task_title_key(title)
+                        for title in execution_proof.get("proof_titles", [])
+                        if (title or "").strip()
+                    }
+                ):
+                    self._diag(
+                        "Daily Set verification satisfied from partial progress proof",
+                        scope="task-verify",
+                        proof=execution_proof,
+                        **self._task_diag_payload(task),
+                    )
+                    return True
 
         # Layer 1: URL/visit tasks — optimistic pass (they always count)
         if task.task_type in ("urlreward", "visit") and not strict_completion:
@@ -901,6 +940,16 @@ class UniversalTaskScanner:
                 if proof_state in {"target_proven", "category_proven"}:
                     if proof_state == "category_proven":
                         self._session_completed_categories.add("daily_set")
+                    return True
+                if (
+                    proof_state == "attempted_only"
+                    and int(daily_set_proof.get("progress_completed", 0) or 0) > 0
+                    and self._normalized_task_title_key(task.title or "") in {
+                        self._normalized_task_title_key(title)
+                        for title in daily_set_proof.get("proof_titles", [])
+                        if (title or "").strip()
+                    }
+                ):
                     return True
 
         # Layer 3: API verification (slowest, may lag)
@@ -1055,6 +1104,23 @@ class UniversalTaskScanner:
                     )
                     continue
 
+                if (
+                    task.category == "more_promo"
+                    and task.task_type == "search"
+                    and task.raw_data.get("_interaction_fired")
+                    and task.raw_data.get("_interaction_url")
+                    and task.destination_url
+                ):
+                    self._diag(
+                        "Keep-earning search verification accepted live interaction proof after API lag",
+                        scope="task-verify",
+                        refreshed=self._task_diag_payload(refreshed),
+                        interaction_url=task.raw_data.get("_interaction_url", ""),
+                        interaction_destination_url=task.destination_url,
+                        **self._task_diag_payload(task),
+                    )
+                    return True
+
                 self._log(
                     "info",
                     f"  ⚠️ Task did not verify as complete: {task.title[:40]}",
@@ -1185,6 +1251,53 @@ class UniversalTaskScanner:
         except Exception:
             return False
 
+    async def _complete_visible_daily_set_gap(self, page: Page) -> dict | None:
+        try:
+            from src.daily_set import DailySetCompleter
+            from src.streaks import TaskDetector
+
+            overview = await TaskDetector().get_all_tasks(page)
+            daily_set = overview.get("daily_set", {})
+            completed = int(daily_set.get("completed", 0) or 0)
+            total = int(daily_set.get("total", 0) or 0)
+            if total <= 0 or total > 7 or completed < 0 or completed > total:
+                return None
+            if completed >= total:
+                return None
+
+            self._log("info", f"🎯 Daily Set overview gap detected ({completed}/{total}); running fallback executor")
+            daily_set_completer = DailySetCompleter(
+                self.humanizer,
+                settings=self.settings,
+                ai_agent=self.ai_agent,
+            )
+            result = await self._run_with_timeout(
+                "Daily Set overview gap executor",
+                daily_set_completer.complete_daily_set(page),
+                self._task_quiz_timeout_seconds,
+                default={"state": "timed_out", "progress_completed": completed, "progress_total": total},
+                scope="task-run",
+            )
+            refreshed = await daily_set_completer._read_daily_set_progress(page)
+            result = dict(result or {})
+            result["progress_completed"] = max(
+                int(result.get("progress_completed", 0) or 0),
+                int(refreshed.get("completed", 0) or 0),
+                completed,
+            )
+            result["progress_total"] = max(
+                int(result.get("progress_total", 0) or 0),
+                int(refreshed.get("total", 0) or 0),
+                total,
+            )
+            result["category_proven"] = bool(result.get("category_proven", False)) or bool(refreshed.get("category_proven", False)) or (
+                result["progress_total"] > 0 and result["progress_completed"] >= result["progress_total"]
+            )
+            return result
+        except Exception as e:
+            logger.debug(f"Daily Set overview gap fallback failed: {e}")
+            return None
+
     async def _apply_live_category_completion_proofs(self, page: Page, tasks: list[RewardsTask]) -> dict[str, dict]:
         """Use live Rewards overview to short-circuit categories already complete on-page."""
         proofs: dict[str, dict] = {}
@@ -1206,7 +1319,14 @@ class UniversalTaskScanner:
         daily_set = overview.get("daily_set", {})
         daily_completed = int(daily_set.get("completed", 0) or 0)
         daily_total = int(daily_set.get("total", 0) or 0)
-        if daily_total <= 0 or daily_completed < daily_total:
+        api_daily_total = sum(1 for task in tasks if task.category == "daily_set")
+        if daily_total <= 0 or daily_completed < daily_total or api_daily_total <= 0:
+            return proofs
+        if daily_total != api_daily_total:
+            logger.debug(
+                "Ignoring live Daily Set overview proof because totals differ: "
+                f"overview={daily_completed}/{daily_total}, api_total={api_daily_total}"
+            )
             return proofs
 
         for task in tasks:
@@ -1347,7 +1467,7 @@ class UniversalTaskScanner:
 
                 for dt in dom_tasks:
                     task = RewardsTask()
-                    task.id = dt["title"]
+                    task.id = dt.get("semantic_id") or dt.get("match_key") or dt["title"]
                     task.title = dt["title"]
                     task.description = dt["description"]
                     task.points = 0
@@ -1365,6 +1485,20 @@ class UniversalTaskScanner:
                     task.raw_data = {
                         "element_index": dt["element_index"],
                         "scan_url": scan_url,
+                        "semantic_id": dt.get("semantic_id", ""),
+                        "match_key": dt.get("match_key", ""),
+                        "section_heading": dt.get("section_heading", ""),
+                        "aria_label": dt.get("aria_label", ""),
+                        "element_title": dt.get("element_title", ""),
+                        "data_bi_id": dt.get("data_bi_id", ""),
+                        "tag_name": dt.get("tag_name", ""),
+                        "role_hint": dt.get("role_hint", ""),
+                        "text_content": dt.get("text_content", ""),
+                        "scan_version": dt.get("scan_version", ""),
+                        "fingerprint": dt.get("fingerprint", ""),
+                        "selector_strategy": dt.get("selector_strategy", ""),
+                        "selector": dt.get("selector", ""),
+                        "dom_shape": dt.get("dom_shape", {}),
                     }
 
                     task_key = (
@@ -1382,7 +1516,11 @@ class UniversalTaskScanner:
                         task_map[task_key] = task
 
         except Exception as e:
-            logger.error(f"Failed to fetch visual tasks from DOM: {e}")
+            message = str(e)
+            if "Target page, context or browser has been closed" in message:
+                logger.debug(f"Visual task scan skipped because page was already closed: {e}")
+            else:
+                logger.error(f"Failed to fetch visual tasks from DOM: {e}")
 
         tasks.extend(task_map.values())
         return tasks
@@ -1515,6 +1653,34 @@ class UniversalTaskScanner:
                         pass
                     return True
                 if proof.get("state") in {"attempted_only", "panel_control_failed"}:
+                    surface_fallback = await daily_set.attempt_surface_fallback(page, expected_title=task.title)
+                    if surface_fallback.get("clicked"):
+                        refreshed_stats = await daily_set._read_daily_set_progress(page)
+                        refreshed_completed = int(refreshed_stats.get("completed", 0) or 0)
+                        refreshed_total = int(refreshed_stats.get("total", 0) or 0)
+                        if refreshed_stats.get("category_proven", False) or refreshed_completed > 0:
+                            self._session_completed_categories.add("daily_set")
+                            if (task.title or "").strip():
+                                self._session_daily_set_titles.add(task.title.strip())
+                            self._log("info", "  ✅ Daily Set surface fallback established proof")
+                            try:
+                                await page.goto(
+                                    REWARDS_URL,
+                                    wait_until="domcontentloaded",
+                                    timeout=35000,
+                                )
+                                await asyncio.sleep(2)
+                            except Exception:
+                                pass
+                            return True
+                        debug_texts = surface_fallback.get("debug_texts", [])
+                        if debug_texts:
+                            self._log("info", "  ℹ️ Daily Set surface debug: " + " | ".join(debug_texts[:5]))
+                        self._log(
+                            "info",
+                            f"  ⚠️ Daily Set surface fallback clicked but no proof ({refreshed_completed}/{refreshed_total})",
+                        )
+                    daily_set_fallback_allowed = True
                     self._log("info", f"  ↪️ Daily Set executor yielded {proof.get('state')}, allowing bounded generic fallback")
                 else:
                     self._log("info", "  ⚠️ Daily Set executor did not establish proof")
@@ -1865,21 +2031,56 @@ class UniversalTaskScanner:
             for title in proof_result.get("proof_titles", [])
             if (title or "").strip()
         ]
+        progress_completed = int(proof_result.get("progress_completed", 0) or 0)
+        progress_total = int(proof_result.get("progress_total", 0) or 0)
+        if progress_total > 0 and progress_completed >= progress_total:
+            state = "category_proven"
         record = {
             "state": state,
             "proof_titles": proof_titles,
-            "progress_completed": int(proof_result.get("progress_completed", 0) or 0),
-            "progress_total": int(proof_result.get("progress_total", 0) or 0),
+            "progress_completed": progress_completed,
+            "progress_total": progress_total,
             "source": str(proof_result.get("source") or source),
         }
 
+        state_rank = {
+            "panel_control_failed": 0,
+            "attempted_only": 1,
+            "target_proven": 2,
+            "category_proven": 3,
+        }
+
+        def merge_record(existing: dict | None, incoming: dict) -> dict:
+            if not existing:
+                return dict(incoming)
+            existing_state = str(existing.get("state", "") or "")
+            incoming_state = str(incoming.get("state", "") or "")
+            merged_state = incoming_state if state_rank.get(incoming_state, -1) >= state_rank.get(existing_state, -1) else existing_state
+            merged_titles = []
+            for title in list(existing.get("proof_titles", []) or []) + list(incoming.get("proof_titles", []) or []):
+                clean = str(title or "").strip()
+                if clean and clean not in merged_titles:
+                    merged_titles.append(clean)
+            merged = {
+                "state": merged_state,
+                "proof_titles": merged_titles,
+                "progress_completed": max(int(existing.get("progress_completed", 0) or 0), int(incoming.get("progress_completed", 0) or 0)),
+                "progress_total": max(int(existing.get("progress_total", 0) or 0), int(incoming.get("progress_total", 0) or 0)),
+                "source": str(incoming.get("source") or existing.get("source") or source),
+            }
+            if merged["progress_total"] > 0 and merged["progress_completed"] >= merged["progress_total"]:
+                merged["state"] = "category_proven"
+            return merged
+
         if task.id:
-            self.daily_set_execution_proofs[task.id] = dict(record)
+            self.daily_set_execution_proofs[task.id] = merge_record(self.daily_set_execution_proofs.get(task.id), record)
         normalized_title = self._normalized_task_title_key(task.title)
         if normalized_title:
-            self.daily_set_execution_proofs[normalized_title] = dict(record)
-        self.daily_set_execution_proofs["daily_set"] = dict(record)
-        return record
+            self.daily_set_execution_proofs[normalized_title] = merge_record(self.daily_set_execution_proofs.get(normalized_title), record)
+        self.daily_set_execution_proofs["daily_set"] = merge_record(self.daily_set_execution_proofs.get("daily_set"), record)
+        return self.daily_set_execution_proofs.get("daily_set") if state == "category_proven" else (
+            self.daily_set_execution_proofs.get(task.id) if task.id else self.daily_set_execution_proofs.get(normalized_title, record)
+        )
 
     @staticmethod
     def _resolve_daily_set_proof_state(result: dict | None) -> str:
@@ -1910,11 +2111,40 @@ class UniversalTaskScanner:
         return proof
 
     def _get_daily_set_execution_proof(self, task: RewardsTask) -> dict | None:
-        """Look up Daily Set proof, preferring category-level proof when it exists."""
+        """Look up the strongest merged Daily Set proof across task, title, and category keys."""
         if task.category != "daily_set":
             return None
 
-        proofs: list[dict] = []
+        state_rank = {
+            "panel_control_failed": 0,
+            "attempted_only": 1,
+            "target_proven": 2,
+            "category_proven": 3,
+        }
+
+        def merge_record(existing: dict | None, incoming: dict) -> dict:
+            if not existing:
+                return dict(incoming)
+            existing_state = str(existing.get("state", "") or "")
+            incoming_state = str(incoming.get("state", "") or "")
+            merged_state = incoming_state if state_rank.get(incoming_state, -1) >= state_rank.get(existing_state, -1) else existing_state
+            merged_titles = []
+            for title in list(existing.get("proof_titles", []) or []) + list(incoming.get("proof_titles", []) or []):
+                clean = str(title or "").strip()
+                if clean and clean not in merged_titles:
+                    merged_titles.append(clean)
+            merged = {
+                "state": merged_state,
+                "proof_titles": merged_titles,
+                "progress_completed": max(int(existing.get("progress_completed", 0) or 0), int(incoming.get("progress_completed", 0) or 0)),
+                "progress_total": max(int(existing.get("progress_total", 0) or 0), int(incoming.get("progress_total", 0) or 0)),
+                "source": str(incoming.get("source") or existing.get("source") or ""),
+            }
+            if merged["progress_total"] > 0 and merged["progress_completed"] >= merged["progress_total"]:
+                merged["state"] = "category_proven"
+            return merged
+
+        merged: dict | None = None
         keys: list[str] = []
         if task.id:
             keys.append(task.id)
@@ -1927,13 +2157,9 @@ class UniversalTaskScanner:
             proof = self.daily_set_execution_proofs.get(key)
             if not proof:
                 continue
-            if key == "daily_set" and proof.get("state") != "category_proven":
-                continue
-            if proof.get("state") == "category_proven":
-                return proof
-            proofs.append(proof)
+            merged = merge_record(merged, proof)
 
-        return proofs[0] if proofs else None
+        return merged
 
     @staticmethod
     def _tokenize_match_text(*values: str) -> list[str]:
@@ -1965,16 +2191,41 @@ class UniversalTaskScanner:
         primary_title = title_variants[0] if title_variants else task.title
         self._log("info", f"  🔍 Looking for: '{primary_title}' on {page.url}")
 
-        # Fast-path: use exact DOM index captured during the visual scan phase
+        # Fast-path: re-resolve the visual card and validate identity before any index fallback.
         elem_idx = task.raw_data.get("element_index")
         if elem_idx is not None and task.category != "daily_set":
-            self._log("info", f"  🖱️ Using native visual selector index {elem_idx} for task '{primary_title}'")
             import src.dashboard_scraper as scraper
-            clicked = await scraper.click_task_by_index(page, elem_idx)
-            if clicked:
-                self._log("info", "  ✅ Clicked task card visually via absolute target")
+            task_payload = {
+                "title": task.title or "",
+                "description": task.description or "",
+                "points": int(task.points_max or task.points or 0),
+                "url": task.destination_url or "",
+                "element_index": elem_idx,
+                "category": task.category or "unknown",
+                "is_quiz": task.task_type == "quiz",
+                "semantic_id": task.raw_data.get("semantic_id", task.id or ""),
+                "section_heading": task.raw_data.get("section_heading", ""),
+                "aria_label": task.raw_data.get("aria_label", ""),
+                "element_title": task.raw_data.get("element_title", ""),
+                "data_bi_id": task.raw_data.get("data_bi_id", ""),
+                "tag_name": task.raw_data.get("tag_name", ""),
+                "role_hint": task.raw_data.get("role_hint", ""),
+                "text_content": task.raw_data.get("text_content", ""),
+                "match_key": task.raw_data.get("match_key", ""),
+                "scan_version": task.raw_data.get("scan_version", ""),
+                "fingerprint": task.raw_data.get("fingerprint", ""),
+                "selector_strategy": task.raw_data.get("selector_strategy", ""),
+                "selector": task.raw_data.get("selector", ""),
+                "dom_shape": task.raw_data.get("dom_shape", {}),
+            }
+            self._log("info", f"  🖱️ Resolving visual task target for '{primary_title}'")
+            click_result = await scraper.click_task_by_metadata(page, task_payload)
+            if click_result.get("clicked"):
+                strategy = click_result.get("strategy", "validated")
+                self._log("info", f"  ✅ Clicked task card via {strategy}")
                 await asyncio.sleep(3)
                 return True
+            self._log("warning", f"  ⚠️ Visual task target drift: {click_result.get('reason', 'unknown')}; trying locator fallbacks")
 
         locators = []
 
@@ -2330,11 +2581,19 @@ class UniversalTaskScanner:
             "textarea[name='q']",
         ]
         query = "Microsoft Rewards bonus search"
+        if task.destination_url:
+            try:
+                parsed_destination = urlsplit(task.destination_url)
+                reward_query = parse_qs(parsed_destination.query).get("q", [""])[0].strip()
+                if reward_query:
+                    query = reward_query
+            except Exception:
+                pass
         candidate_urls = []
         current_url = (page.url or "").lower()
-        if "bing.com" not in current_url and task.destination_url:
+        if task.destination_url:
             candidate_urls.append(task.destination_url)
-        if "bing.com" not in current_url or not task.destination_url:
+        if not task.destination_url:
             candidate_urls.append("https://www.bing.com/")
 
         self._diag(
@@ -2418,6 +2677,27 @@ class UniversalTaskScanner:
                     **self._task_diag_payload(task),
                 )
                 continue
+
+        if task.destination_url:
+            try:
+                await page.goto(task.destination_url, wait_until="domcontentloaded", timeout=35000)
+                await asyncio.sleep(6)
+                await self.humanizer.simulate_reading(page, random.uniform(3, 5))
+                self._log("info", "  🔎 Visited promo reward search URL directly")
+                self._diag(
+                    "Visited promo reward search URL directly after selector fallback",
+                    scope="promo-search",
+                    direct_visit_url=task.destination_url,
+                    **self._task_diag_payload(task),
+                )
+                return True
+            except Exception:
+                self._diag(
+                    "Direct promo reward search URL visit failed",
+                    scope="promo-search",
+                    direct_visit_url=task.destination_url,
+                    **self._task_diag_payload(task),
+                )
 
         self._diag(
             "Promo search incentive flow could not find usable search box",
@@ -2716,27 +2996,11 @@ class UniversalTaskScanner:
             logger.warning(f"Quiz attempt failed: {e}")
             return False
 
-    # ── AI-Driven Earn Page Smart Scan ────────────────────────────────────
+    # ── Earn Page Heuristic Scan ──────────────────────────────────────────
 
     async def _scan_explore_on_bing(self, page: Page) -> int:
-        """Intelligently scan the /earn page for non-API task sections.
-
-        Microsoft keeps adding new sections (e.g. "Explore on Bing",
-        "Trending now", seasonal promotions) that are rendered client-side
-        via Next.js RSC and are **not** part of the ``getuserinfo`` API.
-
-        Strategy:
-          Phase 1 – AI Discovery (if AI agent is available):
-            Navigate to /earn, scroll to load everything, then ask the AI
-            to read the page snapshot and extract every uncompleted task
-            card / link it can find that looks like a points-earning card.
-          Phase 2 – Fallback DOM scrape (if AI is off or returns nothing):
-            Generic heuristic that looks for ``a[href*="bing.com/search"]``
-            links inside card-like containers with point badges (``+10`` etc.).
-          Phase 3 – Execute:
-            Visit each discovered URL to register task completion.
-        """
-        self._log("info", "🔎 AI Smart Scan – checking Rewards surfaces for Explore on Bing tasks...")
+        """Scan Rewards surfaces for non-API task sections using DOM heuristics first."""
+        self._log("info", "🔎 Rule scan – checking Rewards surfaces for Explore on Bing tasks...")
 
         scan_urls: list[str] = []
         current_url = page.url if "rewards.bing.com" in (page.url or "") else ""
@@ -3143,7 +3407,7 @@ class UniversalTaskScanner:
                 for (const container of cardContainers) {
                     const text = container.textContent || '';
                     // Must contain a point badge pattern (+5, +10, +15, etc.)
-                    if (!/\+\d+/.test(text)) continue;
+                    if (!/\\+\\d+/.test(text)) continue;
                     if (isCompleted(text)) continue;
 
                     container.querySelectorAll('a[href], mee-card').forEach(cb => {
@@ -3171,7 +3435,7 @@ class UniversalTaskScanner:
                             || cb.closest('[data-bi-area]')
                             || cb.parentElement;
                         const text = container ? (container.textContent || '') : '';
-                        if (/\+\d+/.test(text) && !isCompleted(text)) {
+                        if (/\\+\\d+/.test(text) && !isCompleted(text)) {
                             const href = cb.href || cb.getAttribute('href') || '';
                             if (href) {
                                 addCard(cb, container);

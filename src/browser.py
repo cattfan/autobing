@@ -37,6 +37,11 @@ from src.utils import (
     get_random_user_agent,
     get_random_viewport,
 )
+from src.worker_store import (
+    reserve_native_edge_port,
+    release_native_edge_port,
+    active_native_edge_port_for_account,
+)
 
 # Realistic fingerprint pools
 LOCALES = ["en-US", "en-GB", "en-CA", "en-AU"]
@@ -278,6 +283,7 @@ class BrowserManager:
         self._managed_edge_process: Optional[subprocess.Popen] = None
         self._managed_page_ids: set[int] = set()
         self._native_runtime_cdp_url: str = ""
+        self._native_port_reservation: Optional[dict] = None
         # Generate consistent fingerprint per session
         self._fp = self._gen_fingerprint()
 
@@ -337,16 +343,17 @@ class BrowserManager:
         safe_email = (account_email or "default").replace("@", "_at_").replace(".", "_")
         return DATA_DIR / "edge_runtime" / safe_email
 
-    def _native_edge_cdp_url(self, account_email: str) -> str:
+    def _native_edge_cdp_url(self, account_email: str, port: int | None = None) -> str:
         configured = str(self.settings.get("edge_cdp_url", "http://127.0.0.1:9222")).strip()
         parsed = urlparse(configured)
         host = parsed.hostname or "127.0.0.1"
-        base_port = int(self.settings.get("native_edge_runtime_port_base", parsed.port or 9322))
-        if account_email:
-            offset = int(md5(account_email.encode("utf-8")).hexdigest()[:4], 16) % 40
-        else:
-            offset = 0
-        port = base_port + offset
+        if port is None:
+            existing_port = active_native_edge_port_for_account(account_email)
+            if existing_port is not None:
+                port = existing_port
+            else:
+                base_port = int(self.settings.get("native_edge_runtime_port_base", parsed.port or 9322))
+                port = base_port
         return f"http://{host}:{port}"
 
     def _cdp_port(self, cdp_url: str) -> int:
@@ -528,7 +535,18 @@ class BrowserManager:
 
     async def start_native_edge_runtime(self, account_email: str) -> str:
         """Launch or attach to a dedicated Edge bot profile exposed via CDP."""
-        cdp_url = self._native_edge_cdp_url(account_email)
+        configured = str(self.settings.get("edge_cdp_url", "http://127.0.0.1:9222")).strip()
+        parsed = urlparse(configured)
+        base_port = int(self.settings.get("native_edge_runtime_port_base", parsed.port or 9322))
+
+        if self._native_port_reservation is None:
+            self._native_port_reservation = reserve_native_edge_port(
+                account_email,
+                base_port=base_port,
+                job_id=str(self.settings.get("job_id", "browser-local") or "browser-local"),
+            )
+        port = int(self._native_port_reservation.get("port"))
+        cdp_url = self._native_edge_cdp_url(account_email, port=port)
 
         if self._is_cdp_port_open(cdp_url):
             await self.start_connected_edge(cdp_url, owns_browser_process=False)
@@ -537,7 +555,6 @@ class BrowserManager:
         edge_exe = get_edge_executable_path()
         profile_dir = self._native_edge_profile_dir(account_email)
         profile_dir.mkdir(parents=True, exist_ok=True)
-        port = self._cdp_port(cdp_url)
 
         args = [
             edge_exe,
@@ -568,6 +585,8 @@ class BrowserManager:
                     except Exception:
                         pass
                     self.playwright = None
+        release_native_edge_port(self._native_port_reservation)
+        self._native_port_reservation = None
         raise RuntimeError(
             f"Could not start dedicated Edge runtime on {cdp_url}: {last_error}"
         )
@@ -1855,5 +1874,8 @@ class BrowserManager:
             except Exception:
                 pass
             self._managed_edge_process = None
+        if self._native_port_reservation is not None:
+            release_native_edge_port(self._native_port_reservation)
+            self._native_port_reservation = None
         self._owns_browser_process = False
         self._native_runtime_cdp_url = ""

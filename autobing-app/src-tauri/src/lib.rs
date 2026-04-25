@@ -42,6 +42,14 @@ fn read_system_status() -> serde_json::Value {
     let mut jobs = Vec::new();
 
     let workspace_root = get_workspace_root();
+    let today_key = std::process::Command::new("python")
+        .args(["-c", "from datetime import datetime; print(datetime.now().date().isoformat())"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
 
     // First, read all configured accounts
     let acc_path = workspace_root.join("config/accounts.json.enc");
@@ -68,19 +76,94 @@ fn read_system_status() -> serde_json::Value {
 
     let mut latest_snapshots: std::collections::HashMap<String, Value> =
         std::collections::HashMap::new();
+    let mut latest_today_snapshots: std::collections::HashMap<String, Value> =
+        std::collections::HashMap::new();
+    let mut snapshot_history: std::collections::HashMap<String, Vec<Value>> =
+        std::collections::HashMap::new();
     if let Ok(file) = File::open(&path) {
         let reader = BufReader::new(file);
         for line in reader.lines().flatten() {
             if let Ok(snapshot) = serde_json::from_str::<Value>(&line) {
                 if let Some(email) = snapshot.get("email").and_then(|v| v.as_str()) {
-                    latest_snapshots.insert(email.to_string(), snapshot);
+                    let date_key = snapshot.get("date").and_then(|v| v.as_str()).unwrap_or("");
+                    latest_snapshots.insert(email.to_string(), snapshot.clone());
+                    if date_key == today_key {
+                        latest_today_snapshots.insert(email.to_string(), snapshot.clone());
+                    }
+                    snapshot_history
+                        .entry(email.to_string())
+                        .or_default()
+                        .push(snapshot);
                 }
             }
         }
     }
 
+    fn build_yesterday_summary(record: Option<&Value>) -> Value {
+        let empty = json!({
+            "total_points": 0,
+            "earned_today": 0,
+            "pc": {"current": 0, "max": 0},
+            "mobile": {"current": 0, "max": 0},
+            "daily_set": {"current": 0, "max": 0},
+            "edge": {"current": 0, "max": 0}
+        });
+        let Some(record) = record else {
+            return empty;
+        };
+        json!({
+            "total_points": record.get("points_now").and_then(|v| v.as_i64()).unwrap_or(0),
+            "earned_today": record.get("earned_today").and_then(|v| v.as_i64()).unwrap_or(0),
+            "pc": {
+                "current": record.get("pc_current").and_then(|v| v.as_i64()).unwrap_or(0),
+                "max": record.get("pc_max").and_then(|v| v.as_i64()).unwrap_or(0)
+            },
+            "mobile": {
+                "current": record.get("mobile_current").and_then(|v| v.as_i64()).unwrap_or(0),
+                "max": record.get("mobile_max").and_then(|v| v.as_i64()).unwrap_or(0)
+            },
+            "daily_set": {
+                "current": record.get("daily_set_completed").and_then(|v| v.as_i64()).unwrap_or(0),
+                "max": record.get("daily_set_total").and_then(|v| v.as_i64()).unwrap_or(0)
+            },
+            "edge": {
+                "current": record.get("edge_streak_minutes").and_then(|v| v.as_i64()).or_else(|| record.get("edge_current").and_then(|v| v.as_i64())).unwrap_or(0),
+                "max": record.get("edge_streak_target").and_then(|v| v.as_i64()).or_else(|| record.get("edge_max").and_then(|v| v.as_i64())).unwrap_or(0)
+            },
+            "bing_search": {
+                "current": record.get("bing_search_current").and_then(|v| v.as_i64()).unwrap_or(0),
+                "max": record.get("bing_search_target").and_then(|v| v.as_i64()).unwrap_or(100),
+                "searches": record.get("bing_search_searches").and_then(|v| v.as_i64()).unwrap_or(0),
+                "search_target": record.get("bing_search_search_target").and_then(|v| v.as_i64()).unwrap_or(3),
+                "reward": record.get("bing_search_reward").and_then(|v| v.as_i64()).unwrap_or(0)
+            }
+        })
+    }
+
+    fn previous_snapshot_for_email<'a>(history: Option<&'a Vec<Value>>, today_key: &str) -> Option<&'a Value> {
+        let history = history?;
+        let today_index = history.iter().rposition(|record| {
+            record.get("date").and_then(|v| v.as_str()) == Some(today_key)
+        });
+        if let Some(index) = today_index {
+            if index > 0 {
+                history.get(index - 1)
+            } else {
+                None
+            }
+        } else {
+            history.last()
+        }
+    }
+
     for email in &configured_emails {
-        let snapshot_opt = latest_snapshots.get(email);
+        let snapshot_opt = latest_today_snapshots
+            .get(email)
+            .or_else(|| latest_snapshots.get(email).filter(|snapshot| {
+                snapshot.get("date").and_then(|v| v.as_str()) == Some(today_key.as_str())
+            }));
+        let previous_snapshot = previous_snapshot_for_email(snapshot_history.get(email), &today_key);
+        let yesterday_summary = build_yesterday_summary(previous_snapshot);
 
         let mut pc_current = snapshot_opt
             .and_then(|s| s.get("pc_current"))
@@ -98,14 +181,32 @@ fn read_system_status() -> serde_json::Value {
             .and_then(|s| s.get("mobile_max"))
             .and_then(|v| v.as_i64())
             .unwrap_or(60);
-        let mut daily_current = snapshot_opt
+        let verification_state = snapshot_opt
+            .and_then(|s| s.get("verification_state"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let daily_completed_raw = snapshot_opt
             .and_then(|s| s.get("daily_set_completed"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        let mut daily_max = snapshot_opt
+        let daily_total_raw = snapshot_opt
             .and_then(|s| s.get("daily_set_total"))
             .and_then(|v| v.as_i64())
             .unwrap_or(3);
+        let mut daily_current = daily_completed_raw;
+        let mut daily_max = daily_total_raw;
+        if verification_state == "incomplete" && (daily_max > 3 || daily_current > 3) {
+            daily_current = 0;
+            daily_max = 3;
+        }
+        let edge_minutes = snapshot_opt
+            .and_then(|s| s.get("edge_streak_minutes"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let edge_target = snapshot_opt
+            .and_then(|s| s.get("edge_streak_target"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(30);
         let mut points = snapshot_opt
             .and_then(|s| s.get("points_now"))
             .and_then(|v| v.as_i64())
@@ -122,211 +223,90 @@ fn read_system_status() -> serde_json::Value {
             .and_then(|s| s.get("edge_max"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
+        let mut bing_streak_current = snapshot_opt
+            .and_then(|s| s.get("bing_search_current"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let mut bing_streak_target = snapshot_opt
+            .and_then(|s| s.get("bing_search_target"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(100);
+        let mut bing_streak_searches = snapshot_opt
+            .and_then(|s| s.get("bing_search_searches"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let snapshot_bing_streak_search_target = snapshot_opt
+            .and_then(|s| s.get("bing_search_search_target"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(3);
+        let mut bing_streak_search_target = snapshot_bing_streak_search_target;
+        let fallback_bing_streak_search_target = if snapshot_bing_streak_search_target > 0 {
+            snapshot_bing_streak_search_target
+        } else {
+            3
+        };
+        let fallback_bing_streak_target = if bing_streak_target > 0 {
+            bing_streak_target
+        } else {
+            100
+        };
+        let is_running = |value: &str| value == "Running";
+        let normalize_bing_track = |searches: i64, search_target: i64, current: i64, _target: i64| {
+            if searches > 0 || current > 0 {
+                (
+                    searches.max(current),
+                    if search_target > 0 { search_target } else { fallback_bing_streak_search_target },
+                )
+            } else {
+                (0, fallback_bing_streak_search_target)
+            }
+        };
+        let mut bing_streak_reward = snapshot_opt
+            .and_then(|s| s.get("bing_search_reward"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let normalized_bing = normalize_bing_track(
+            bing_streak_searches,
+            bing_streak_search_target,
+            bing_streak_current,
+            bing_streak_target,
+        );
+        bing_streak_searches = normalized_bing.0;
+        bing_streak_search_target = normalized_bing.1;
+        if bing_streak_current > 0 && bing_streak_target <= 0 {
+            bing_streak_target = fallback_bing_streak_target;
+        }
 
-        // --- Merge live progress from stdout.log ---
-        let stdout_path = PathBuf::from(format!(
-            "C:\\Users\\CATTFAN\\Desktop\\autobing\\.omx\\worker-jobs\\{}\\stdout.log",
+        let state_path = workspace_root.join(format!(
+            ".omx/worker-jobs/{}/state.json",
             email
         ));
-        if let Ok(stdout_file) = File::open(&stdout_path) {
-            let stdout_reader = BufReader::new(stdout_file);
-            for log_line in stdout_reader.lines().flatten() {
-                // Parse "Search points: {'pc_current': 0, ...}"
-                if let Some(json_start) = log_line.find("Search points:") {
-                    let raw = &log_line[json_start + 14..];
-                    // Convert Python dict syntax to JSON
-                    let json_str = raw.trim().replace('\'', "\"");
-                    if let Ok(sp) = serde_json::from_str::<Value>(&json_str) {
-                        if let Some(v) = sp.get("pc_current").and_then(|x| x.as_i64()) {
-                            pc_current = v;
-                        }
-                        if let Some(v) = sp.get("pc_max").and_then(|x| x.as_i64()) {
-                            if v > 0 {
-                                pc_max = v;
-                            }
-                        }
-                        if let Some(v) = sp.get("mobile_current").and_then(|x| x.as_i64()) {
-                            mobile_current = v;
-                        }
-                        if let Some(v) = sp.get("mobile_max").and_then(|x| x.as_i64()) {
-                            if v > 0 {
-                                mobile_max = v;
-                            }
-                        }
-                        if let Some(v) = sp.get("total_points").and_then(|x| x.as_i64()) {
-                            if v > 0 {
-                                points = v;
-                            }
-                        }
-                        if let Some(v) = sp.get("edge_current").and_then(|x| x.as_i64()) {
-                            edge_current = v;
-                        }
-                        if let Some(v) = sp.get("edge_max").and_then(|x| x.as_i64()) {
-                            if v > 0 {
-                                edge_max = v;
-                            }
-                        }
-                    }
-                }
-                // Parse "PC: 30/90, Mobile: 20/60, Daily: 1/3"
-                if log_line.contains("Tasks detected")
-                    || log_line.contains("PC:") && log_line.contains("Mobile:")
-                {
-                    // Extract PC
-                    if let Some(pc_pos) = log_line.find("PC:") {
-                        let after = &log_line[pc_pos + 3..];
-                        let parts: Vec<&str> = after
-                            .trim()
-                            .splitn(2, ',')
-                            .next()
-                            .unwrap_or("")
-                            .split('/')
-                            .collect();
-                        if parts.len() == 2 {
-                            if let (Ok(c), Ok(m)) = (
-                                parts[0].trim().parse::<i64>(),
-                                parts[1].trim().parse::<i64>(),
-                            ) {
-                                pc_current = c;
-                                if m > 0 {
-                                    pc_max = m;
-                                }
-                            }
-                        }
-                    }
-                    // Extract Mobile
-                    if let Some(mob_pos) = log_line.find("Mobile:") {
-                        let after = &log_line[mob_pos + 7..];
-                        let parts: Vec<&str> = after
-                            .trim()
-                            .splitn(2, ',')
-                            .next()
-                            .unwrap_or("")
-                            .split('/')
-                            .collect();
-                        if parts.len() == 2 {
-                            if let (Ok(c), Ok(m)) = (
-                                parts[0].trim().parse::<i64>(),
-                                parts[1].trim().parse::<i64>(),
-                            ) {
-                                mobile_current = c;
-                                if m > 0 {
-                                    mobile_max = m;
-                                }
-                            }
-                        }
-                    }
-                    // Extract Daily
-                    if let Some(daily_pos) = log_line.find("Daily:") {
-                        let after = &log_line[daily_pos + 6..];
-                        let parts: Vec<&str> = after
-                            .trim()
-                            .splitn(2, ',')
-                            .next()
-                            .unwrap_or("")
-                            .split('/')
-                            .collect();
-                        if parts.len() == 2 {
-                            if let (Ok(c), Ok(m)) = (
-                                parts[0].trim().parse::<i64>(),
-                                parts[1].trim().parse::<i64>(),
-                            ) {
-                                daily_current = c;
-                                if m > 0 {
-                                    daily_max = m;
-                                }
-                            }
-                        }
-                    }
-                    // Extract Edge
-                    if let Some(edge_pos) = log_line.find("Edge:") {
-                        let after = &log_line[edge_pos + 5..];
-                        let parts: Vec<&str> = after
-                            .trim()
-                            .splitn(2, |c: char| c == ',' || c.is_whitespace())
-                            .next()
-                            .unwrap_or("")
-                            .split('/')
-                            .collect();
-                        if parts.len() == 2 {
-                            if let (Ok(c), Ok(m)) = (
-                                parts[0].trim().parse::<i64>(),
-                                parts[1].trim().parse::<i64>(),
-                            ) {
-                                edge_current = c;
-                                if m > 0 {
-                                    edge_max = m;
-                                }
-                            }
-                        }
-                    }
-                }
-                // Parse "[Edge Streak] 3/35 min"
-                if log_line.contains("[Edge Streak]") {
-                    if let Some(bracket_end) = log_line.find("[Edge Streak]") {
-                        let after = &log_line[bracket_end + 13..];
-                        let trimmed = after.trim();
-                        let parts: Vec<&str> = trimmed.splitn(2, '/').collect();
-                        if parts.len() == 2 {
-                            if let Ok(c) = parts[0].trim().parse::<i64>() {
-                                edge_current = c;
-                                // Extract max from "35 min"
-                                let max_part = parts[1].split_whitespace().next().unwrap_or("0");
-                                if let Ok(m) = max_part.parse::<i64>() {
-                                    if m > 0 {
-                                        edge_max = m;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
 
-                // Parse "💰 Points: 11,259 | 🔥 Streak: 45" or "Streak: 45 days"
-                if log_line.contains("Streak:") {
-                    if let Some(streak_str) = log_line.split("Streak:").last() {
-                        let mut num_str = String::new();
-                        for c in streak_str.trim().chars() {
-                            if c.is_digit(10) {
-                                num_str.push(c);
-                            } else if !num_str.is_empty() {
-                                break;
-                            }
-                        }
-                        if let Ok(st) = num_str.parse::<i64>() {
-                            if st > 0 {
-                                streak = st;
-                            }
-                        }
-                    }
-                }
-
-                // Parse real-time updated points from log
-                if log_line.contains("Points:") {
-                    if let Some(pts_str) = log_line.split("Points:").last() {
-                        let mut num_str = String::new();
-                        for c in pts_str.trim().chars() {
-                            if c.is_digit(10) {
-                                num_str.push(c);
-                            } else if c != ',' && c != '.' {
-                                if !num_str.is_empty() {
-                                    break;
-                                }
-                            }
-                        }
-                        if let Ok(pt) = num_str.parse::<i64>() {
-                            if pt > 0 {
-                                points = pt;
-                            }
-                        }
-                    }
-                }
+        let sanitize_earned_today = |earned: i64, total_points: i64| -> i64 {
+            if earned < 0 {
+                0
+            } else if total_points > 0 && earned > total_points {
+                0
+            } else {
+                earned
             }
-        }
-        let mut earned_today = snapshot_opt
+        };
+
+        let raw_snapshot_earned_today = snapshot_opt
             .and_then(|s| s.get("earned_today"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
+        let snapshot_earned_today_valid =
+            !(raw_snapshot_earned_today < 0 || (points > 0 && raw_snapshot_earned_today > points));
+        let mut earned_today = if snapshot_opt.is_some() {
+            sanitize_earned_today(raw_snapshot_earned_today, points)
+        } else {
+            0
+        };
+        if !snapshot_earned_today_valid {
+            earned_today = 0;
+        }
+
         let mut status = "Stopped".to_string();
         let mut msg_override = None;
 
@@ -344,9 +324,9 @@ fn read_system_status() -> serde_json::Value {
                                 streak = st;
                             }
                         }
-                        if let Some(earned) = v.get("earned_today").and_then(|p| p.as_i64()) {
-                            if earned > earned_today {
-                                earned_today = earned;
+                        if let Some(today) = v.get("earned_today").and_then(|p| p.as_i64()) {
+                            if today >= 0 {
+                                earned_today = today;
                             }
                         }
                         if let Some(search_status) = v.get("search_status") {
@@ -381,13 +361,22 @@ fn read_system_status() -> serde_json::Value {
                             }
                         }
                         if let Some(task_overview) = v.get("task_overview") {
-                            if let Some(daily_set) = task_overview.get("daily_set") {
-                                if let Some(v) = daily_set.get("completed").and_then(|x| x.as_i64()) {
-                                    daily_current = daily_current.max(v);
-                                }
-                                if let Some(v) = daily_set.get("total").and_then(|x| x.as_i64()) {
-                                    if v > 0 {
-                                        daily_max = daily_max.max(v);
+                            if let Some(streaks) = task_overview.get("streaks") {
+                                if let Some(bing_search) = streaks.get("bing_search") {
+                                    if let Some(v) = bing_search.get("current").and_then(|x| x.as_i64()) {
+                                        bing_streak_current = bing_streak_current.max(v);
+                                    }
+                                    if let Some(v) = bing_search.get("target").and_then(|x| x.as_i64()) {
+                                        if v > 0 { bing_streak_target = bing_streak_target.max(v); }
+                                    }
+                                    if let Some(v) = bing_search.get("searches").and_then(|x| x.as_i64()) {
+                                        bing_streak_searches = bing_streak_searches.max(v);
+                                    }
+                                    if let Some(v) = bing_search.get("search_target").and_then(|x| x.as_i64()) {
+                                        if v > 0 { bing_streak_search_target = bing_streak_search_target.max(v); }
+                                    }
+                                    if let Some(v) = bing_search.get("reward").and_then(|x| x.as_i64()) {
+                                        bing_streak_reward = bing_streak_reward.max(v);
                                     }
                                 }
                             }
@@ -396,22 +385,24 @@ fn read_system_status() -> serde_json::Value {
                             status = match state_status {
                                 "running" | "accepted" | "pending" => "Running".to_string(),
                                 "error" | "failed" => "Error".to_string(),
+                                "done" | "completed" | "cancelled" => "Stopped".to_string(),
                                 _ => state_status.to_string(),
                             };
+                            if is_running(&status) {
+                                let normalized_bing = normalize_bing_track(
+                                    bing_streak_searches,
+                                    bing_streak_search_target,
+                                    bing_streak_current,
+                                    bing_streak_target,
+                                );
+                                bing_streak_searches = normalized_bing.0;
+                                bing_streak_search_target = normalized_bing.1;
+                            }
                         }
-
                         if msg_override.is_none() {
                             if let Some(message) = v.get("last_message").and_then(|m| m.as_str()) {
                                 if !message.trim().is_empty() {
                                     msg_override = Some(message.to_string());
-                                }
-                            }
-                        }
-
-                        if status == "Stopped" {
-                            if let Some(current_task) = v.get("task").and_then(|t| t.as_str()) {
-                                if !current_task.trim().is_empty() {
-                                    status = "Running".to_string();
                                 }
                             }
                         }
@@ -420,10 +411,6 @@ fn read_system_status() -> serde_json::Value {
             }
         }
 
-        let state_path = PathBuf::from(format!(
-            "C:\\Users\\CATTFAN\\Desktop\\autobing\\.omx\\worker-jobs\\{}\\state.json",
-            email
-        ));
         if let Ok(state_str) = std::fs::read_to_string(&state_path) {
             if let Ok(state_json) = serde_json::from_str::<Value>(&state_str) {
                 if let Some(s) = state_json.get("status").and_then(|v| v.as_str()) {
@@ -436,14 +423,16 @@ fn read_system_status() -> serde_json::Value {
                         }
                     } else if s == "completed" || s == "done" || s == "cancelled" {
                         status = "Stopped".to_string();
-                        if s == "cancelled" {
-                            msg_override = Some("Cancelled".to_string());
+                        msg_override = Some(if s == "cancelled" {
+                            "Cancelled".to_string()
                         } else {
-                            msg_override = Some("Completed".to_string());
-                        }
+                            "Completed".to_string()
+                        });
                     }
                 }
-                
+                if status != "Running" {
+                    earned_today = earned_today.max(raw_snapshot_earned_today.max(0));
+                }
                 if let Some(pts) = state_json.get("points").and_then(|v| v.as_i64()) {
                     if pts > 0 && pts > points {
                         points = pts;
@@ -456,6 +445,26 @@ fn read_system_status() -> serde_json::Value {
                 }
             }
         }
+
+
+        if status != "Running" {
+            bing_streak_searches = snapshot_opt
+                .and_then(|s| s.get("bing_search_searches"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(bing_streak_searches);
+            bing_streak_search_target = snapshot_opt
+                .and_then(|s| s.get("bing_search_search_target"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(bing_streak_search_target);
+        }
+        let normalized_bing = normalize_bing_track(
+            bing_streak_searches,
+            bing_streak_search_target,
+            bing_streak_current,
+            bing_streak_target,
+        );
+        bing_streak_searches = normalized_bing.0;
+        bing_streak_search_target = normalized_bing.1;
 
         let denominator = pc_max + mobile_max;
         let progress = if denominator > 0 {
@@ -475,6 +484,36 @@ fn read_system_status() -> serde_json::Value {
             msg = mo;
         }
 
+        let edge_track_current = if edge_minutes > 0 { edge_minutes } else { edge_current };
+        let edge_track_max = if edge_target > 0 { edge_target } else { edge_max };
+        let tracks = json!({
+            "pc_search": {
+                "current": pc_current,
+                "max": pc_max,
+                "percent": if pc_max > 0 { ((pc_current * 100) / pc_max).clamp(0, 100) } else { 0 }
+            },
+            "mobile_search": {
+                "current": mobile_current,
+                "max": mobile_max,
+                "percent": if mobile_max > 0 { ((mobile_current * 100) / mobile_max).clamp(0, 100) } else { 0 }
+            },
+            "daily_set": {
+                "current": daily_current,
+                "max": daily_max,
+                "percent": if daily_max > 0 { ((daily_current * 100) / daily_max).clamp(0, 100) } else { 0 }
+            },
+            "edge": {
+                "current": edge_track_current,
+                "max": edge_track_max,
+                "percent": if edge_track_max > 0 { ((edge_track_current * 100) / edge_track_max).clamp(0, 100) } else { 0 }
+            },
+            "bing_search_streak": {
+                "current": bing_streak_searches,
+                "max": bing_streak_search_target,
+                "percent": if bing_streak_search_target > 0 { ((bing_streak_searches * 100) / bing_streak_search_target).clamp(0, 100) } else { 0 }
+            }
+        });
+
         jobs.push(json!({
             "email": email,
             "status": status,
@@ -487,10 +526,17 @@ fn read_system_status() -> serde_json::Value {
             "daily_max": daily_max,
             "streak_current": streak,
             "streak_max": 3,
-            "edge_current": edge_current,
-            "edge_max": edge_max,
+            "edge_current": if edge_minutes > 0 { edge_minutes } else { edge_current },
+            "edge_max": if edge_target > 0 { edge_target } else { edge_max },
+            "bing_streak_current": bing_streak_current,
+            "bing_streak_target": bing_streak_target,
+            "bing_streak_searches": bing_streak_searches,
+            "bing_streak_search_target": bing_streak_search_target,
+            "bing_streak_reward": bing_streak_reward,
             "daily_streak": streak,
             "earned_today": earned_today,
+            "yesterday_summary": yesterday_summary,
+            "tracks": tracks,
             "progress": progress,
             "msg": msg,
             "pid": 0
@@ -873,12 +919,14 @@ pub fn run() {
                 let (tx, rx) = mpsc::channel();
                 let mut watcher = notify::RecommendedWatcher::new(tx, Config::default()).unwrap();
 
-                let path = get_workspace_root().join("data/account_daily_snapshots.jsonl");
+                let workspace_root = get_workspace_root();
+                let snapshot_path = workspace_root.join("data/account_daily_snapshots.jsonl");
+                let worker_jobs_root = workspace_root.join(".omx/worker-jobs");
 
-                // Retry loop in case file doesn't exist yet
                 loop {
-                    if path.exists() {
-                        let _ = watcher.watch(&path, RecursiveMode::NonRecursive);
+                    let _ = watcher.watch(&worker_jobs_root, RecursiveMode::Recursive);
+                    if snapshot_path.exists() {
+                        let _ = watcher.watch(&snapshot_path, RecursiveMode::NonRecursive);
                         break;
                     }
                     std::thread::sleep(Duration::from_secs(2));
@@ -887,7 +935,7 @@ pub fn run() {
                 for res in rx {
                     match res {
                         Ok(event) => {
-                            if matches!(event.kind, EventKind::Modify(_)) {
+                            if matches!(event.kind, EventKind::Modify(_)) && event.paths.iter().any(|p| p.starts_with(&worker_jobs_root) || p == &snapshot_path) {
                                 let _ = handle.emit("system_status_update", read_system_status());
                             }
                         }

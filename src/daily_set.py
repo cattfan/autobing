@@ -68,13 +68,17 @@ class DailySetCompleter:
                         .trim()
                         .toLowerCase();
                     const clickableSelector =
-                        "a,button,[role='button'],[role='link'],[data-rac],.cursor-pointer";
+                        "a,button,[role='button'],[role='link'],[data-rac],.cursor-pointer,[tabindex]";
                     const cardSelector = [
                         "mee-rewards-daily-set-item-content",
                         "#daily-sets mee-card",
+                        "#daily-sets [data-bi-id]",
                         "[data-bi-area*='DailySet']",
-                        "[data-bi-id]",
-                        "mee-card",
+                        "[data-bi-id*='DailySet']",
+                        "[data-bi-id*='dailyset']",
+                        "[data-task-type]",
+                        "[class*='daily-set']",
+                        "[class*='dailySet']",
                         "[class*='daily']",
                     ].join(",");
                     const bannedTitles = new Set((excludedTitles || []).map(normalize).filter(Boolean));
@@ -103,6 +107,63 @@ class DailySetCompleter:
                     };
 
                     const results = [];
+                    const pushCandidate = (candidate, title, fullText, baseScore = 0) => {
+                        const hasExpectedMatch = expectedTitle && (title.includes(expectedTitle) || expectedTitle.includes(title) || fullText.includes(expectedTitle));
+                        const hasDailyActionSignal = /\\+\\d+/.test(fullText) || fullText.includes("quiz") || fullText.includes("poll") || fullText.includes("search") || fullText.includes("activity");
+                        if (!candidate || !title || bannedTitles.has(title) || (!hasExpectedMatch && !hasDailyActionSignal)) {
+                            return;
+                        }
+                        if (!candidate.id) {
+                            candidate.id = `codex-daily-activity-${Math.random().toString(36).slice(2, 10)}`;
+                        }
+                        candidate.setAttribute("data-codex-daily-activity", "true");
+
+                        let score = baseScore;
+                        if (expectedTitle) {
+                            if (title.includes(expectedTitle) || expectedTitle.includes(title)) {
+                                score += 1000;
+                            }
+                            if (fullText.includes(expectedTitle)) {
+                                score += 400;
+                            }
+                        }
+                        if (/\\+\\d+/.test(fullText)) {
+                            score += 80;
+                        }
+                        score += Math.min(fullText.length, 160);
+                        const href = candidate.href || candidate.getAttribute('href') || candidate.getAttribute('data-url') || '';
+                        const dataBiId = candidate.getAttribute('data-bi-id') || '';
+                        const tagName = candidate.tagName ? candidate.tagName.toLowerCase() : '';
+                        const strategy = href ? 'href' : (dataBiId ? 'data-bi-id' : (candidate.getAttribute('role') || tagName || 'unknown'));
+                        const identity = [title, href.split('?')[0], strategy].map(normalize).filter(Boolean).join(' | ');
+                        results.push({ id: candidate.id, title, score, href, dataBiId, strategy, identity });
+                    };
+
+                    const modalRoots = Array.from(document.querySelectorAll(
+                        "[role='dialog'],[aria-modal='true'],mee-modal,[class*='modal'],[class*='flyout'],[class*='popover']"
+                    )).filter(root => {
+                        const rect = root.getBoundingClientRect();
+                        if (rect.width < 20 || rect.height < 20) return false;
+                        const text = normalize(root.innerText || root.textContent || "");
+                        return text.includes("daily") || text.includes("activity") || text.includes("+10") || text.includes("+5");
+                    });
+                    for (const root of modalRoots) {
+                        for (const link of root.querySelectorAll(clickableSelector)) {
+                            const rect = link.getBoundingClientRect();
+                            if (rect.width < 10 || rect.height < 10) continue;
+                            const style = window.getComputedStyle(link);
+                            if (style.visibility === "hidden" || style.display === "none") continue;
+                            const fullText = normalize(link.innerText || link.textContent || link.getAttribute("aria-label") || link.getAttribute("title") || "");
+                            if (!fullText || fullText === "completed" || fullText === "close" || fullText.includes("daily set")) continue;
+                            const title = pickTitle(link);
+                            const lines = fullText.split(/\n+/).map(normalize).filter(Boolean);
+                            const completed = lines.some(line => line === "completed" || line === "complete")
+                                || fullText.includes("✓") || fullText.includes("✔");
+                            if (completed) continue;
+                            pushCandidate(link, title || fullText, fullText, 200);
+                        }
+                    }
+
                     for (const card of document.querySelectorAll(cardSelector)) {
                         const rect = card.getBoundingClientRect();
                         if (rect.width < 20 || rect.height < 20) {
@@ -124,8 +185,10 @@ class DailySetCompleter:
                             continue;
                         }
 
+                        const ownText = normalize(card.innerText || card.textContent || "");
+                        const textLines = ownText.split(/\n+/).map(normalize).filter(Boolean);
                         const completed =
-                            fullText.includes("completed")
+                            textLines.some(line => line === "completed" || line === "complete")
                             || fullText.includes("✓")
                             || fullText.includes("✔")
                             || Boolean(
@@ -141,30 +204,7 @@ class DailySetCompleter:
                             card.closest(clickableSelector)
                             || card.querySelector(clickableSelector)
                             || card;
-                        if (!candidate.id) {
-                            candidate.id = `codex-daily-activity-${Math.random().toString(36).slice(2, 10)}`;
-                        }
-                        candidate.setAttribute("data-codex-daily-activity", "true");
-
-                        let score = 0;
-                        if (expectedTitle) {
-                            if (title.includes(expectedTitle) || expectedTitle.includes(title)) {
-                                score += 1000;
-                            }
-                            if (fullText.includes(expectedTitle)) {
-                                score += 400;
-                            }
-                        }
-                        if (/\\+\\d+/.test(String(card.innerText || ""))) {
-                            score += 80;
-                        }
-                        score += Math.min(fullText.length, 160);
-
-                        results.push({
-                            id: candidate.id,
-                            title,
-                            score,
-                        });
+                        pushCandidate(candidate, title, fullText, 0);
                     }
 
                     results.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
@@ -187,8 +227,150 @@ class DailySetCompleter:
             if not title or key in normalized_seen:
                 continue
             normalized_seen.add(key)
-            deduped.append({"id": target.get("id", ""), "title": title})
+            deduped.append({
+                "id": target.get("id", ""),
+                "title": title,
+                "href": target.get("href", ""),
+                "data_bi_id": target.get("dataBiId", ""),
+                "selector_strategy": target.get("strategy", ""),
+                "identity": target.get("identity", ""),
+            })
         return deduped
+
+    async def locate_daily_set_surface_task(self, page: Page, expected_title: str) -> dict | None:
+        expected_key = self._normalize_title(expected_title)
+        if not expected_key:
+            return None
+        try:
+            located = await page.evaluate(
+                """
+                ({ expectedTitle }) => {
+                    const normalize = (value) => (value || "")
+                        .replace(/​/g, "")
+                        .replace(/ /g, " ")
+                        .replace(/\\s+/g, " ")
+                        .trim()
+                        .toLowerCase();
+                    const titleMatches = (title, expected) => {
+                        if (!title || !expected) return false;
+                        if (title.includes(expected) || expected.includes(title)) return true;
+                        const expectedTokens = expected.replace(/[?:]/g, ' ').split(' ').filter(token => token.length >= 4);
+                        const titleTokens = new Set(title.replace(/[?:]/g, ' ').split(' ').filter(token => token.length >= 4));
+                        let overlap = 0;
+                        for (const token of expectedTokens) {
+                            if (titleTokens.has(token)) overlap += 1;
+                        }
+                        return overlap >= Math.max(1, Math.min(2, expectedTokens.length));
+                    };
+
+                    for (const old of document.querySelectorAll('[data-codex-daily-surface="true"]')) {
+                        old.removeAttribute('data-codex-daily-surface');
+                    }
+
+                    const selectors = [
+                        '#daily-sets mee-card',
+                        '#daily-sets [data-bi-id]',
+                        '[data-bi-area*="DailySet"]',
+                        '[data-bi-id*="DailySet"]',
+                        '[data-bi-id*="dailyset"]',
+                        'mee-card',
+                        'a',
+                        'button',
+                        '[role="button"]',
+                        '[role="link"]'
+                    ].join(',');
+
+                    const results = [];
+                    for (const node of document.querySelectorAll(selectors)) {
+                        const rect = node.getBoundingClientRect();
+                        if (rect.width < 20 || rect.height < 20) continue;
+                        const style = window.getComputedStyle(node);
+                        if (style.visibility === 'hidden' || style.display === 'none') continue;
+                        const text = normalize(node.innerText || node.textContent || '');
+                        if (!text) continue;
+                        if (!titleMatches(text, expectedTitle)) continue;
+                        const clickable = node.closest('a,button,[role="button"],[role="link"],[tabindex]') || node;
+                        if (!clickable.id) {
+                            clickable.id = `codex-daily-surface-${Math.random().toString(36).slice(2, 10)}`;
+                        }
+                        clickable.setAttribute('data-codex-daily-surface', 'true');
+                        const href = clickable.href || clickable.getAttribute('href') || clickable.getAttribute('data-url') || '';
+                        results.push({ id: clickable.id, title: text, href });
+                    }
+                    return results[0] || null;
+                }
+                """,
+                {"expectedTitle": expected_key},
+            )
+        except Exception:
+            return None
+        return located or None
+
+    async def click_daily_set_surface_task(self, page: Page, expected_title: str) -> bool:
+        located = await self.locate_daily_set_surface_task(page, expected_title)
+        if not located:
+            return False
+        try:
+            target = page.locator(f"#{located.get('id', '')}").first
+            if await target.count() == 0 or not await target.is_visible(timeout=2000):
+                return False
+            await target.scroll_into_view_if_needed(timeout=3000)
+            await target.click(timeout=5000)
+            logger.info(f"Clicked Daily Set surface task via title match: {expected_title}")
+            return True
+        except Exception:
+            return False
+
+    async def read_daily_set_surface_debug(self, page: Page) -> list[str]:
+        try:
+            observed = await page.evaluate(
+                """
+                () => {
+                    const normalize = (value) => (value || '')
+                        .replace(/​/g, '')
+                        .replace(/ /g, ' ')
+                        .replace(/\\s+/g, ' ')
+                        .trim();
+                    const results = [];
+                    for (const node of document.querySelectorAll('mee-card, a, button, [role="button"], [role="link"], [data-bi-id], [class*="daily"]')) {
+                        const rect = node.getBoundingClientRect();
+                        if (rect.width < 20 || rect.height < 20) continue;
+                        const style = window.getComputedStyle(node);
+                        if (style.visibility === 'hidden' || style.display === 'none') continue;
+                        const text = normalize(node.innerText || node.textContent || '');
+                        if (!text) continue;
+                        const lower = text.toLowerCase();
+                        if (!lower.includes('daily') && !lower.includes('quiz') && !lower.includes('poll') && !lower.includes('this or that')) continue;
+                        results.push(text.slice(0, 180));
+                    }
+                    return results.slice(0, 12);
+                }
+                """
+            )
+        except Exception:
+            return []
+        return observed or []
+
+    async def attempt_surface_fallback(self, page: Page, expected_title: str = "") -> dict:
+        rewards_surfaces = [
+            f"{REWARDS_URL}/earn",
+            f"{REWARDS_URL}/dashboard",
+            REWARDS_URL,
+        ]
+        debug_texts: list[str] = []
+        for rewards_url in rewards_surfaces:
+            try:
+                await page.goto(rewards_url, wait_until="domcontentloaded", timeout=35000)
+                await asyncio.sleep(2)
+            except Exception:
+                continue
+            debug_texts = await self.read_daily_set_surface_debug(page)
+            if expected_title and await self.click_daily_set_surface_task(page, expected_title):
+                await asyncio.sleep(3)
+                await self.captcha.solve_if_present(page)
+                await self._handle_task(page)
+                return {"clicked": True, "debug_texts": debug_texts}
+        return {"clicked": False, "debug_texts": debug_texts}
 
     async def _read_daily_set_progress(self, page: Page) -> dict:
         """Read the visible Daily Set progress summary from Rewards surfaces."""
@@ -263,6 +445,9 @@ class DailySetCompleter:
                             }
                             const current = Number(match[1] || 0);
                             const maximum = Number(match[2] || 0);
+                            if (maximum <= 0 || maximum > 7 || current < 0 || current > maximum) {
+                                continue;
+                            }
                             if (maximum > total || (maximum === total && current > completed)) {
                                 completed = current;
                                 total = maximum;
@@ -280,8 +465,12 @@ class DailySetCompleter:
             except Exception:
                 continue
 
-            proof["completed"] = max(proof["completed"], int(observed.get("completed", 0)))
-            proof["total"] = max(proof["total"], int(observed.get("total", 0)))
+            observed_completed = int(observed.get("completed", 0) or 0)
+            observed_total = int(observed.get("total", 0) or 0)
+            if observed_total <= 0 or observed_total > 7 or observed_completed < 0 or observed_completed > observed_total:
+                continue
+            proof["completed"] = max(proof["completed"], observed_completed)
+            proof["total"] = max(proof["total"], observed_total)
             proof["signals"] = observed.get("signals", []) or proof["signals"]
             if proof["total"] > 0 and proof["completed"] >= proof["total"]:
                 proof["category_proven"] = True
@@ -413,7 +602,6 @@ class DailySetCompleter:
             "proof_titles": [],
             "progress_completed": 0,
             "progress_total": 0,
-            "state": "panel_control_failed",
             "source": "daily_set_completer",
         }
         panel_control_failed = False
@@ -422,9 +610,9 @@ class DailySetCompleter:
             # ═══ Click-based approach using correct Rewards page DOM ═══
             streak_card_clicked = False
             rewards_surfaces = [
-                f"{REWARDS_URL}/earn",
-                f"{REWARDS_URL}/dashboard",
                 REWARDS_URL,
+                f"{REWARDS_URL}/dashboard",
+                f"{REWARDS_URL}/earn",
             ]
 
             for rewards_url in rewards_surfaces:
@@ -453,8 +641,21 @@ class DailySetCompleter:
             await asyncio.sleep(3)
 
             attempted_titles: set[str] = set()
+            empty_modal_retries = 0
+            max_empty_modal_retries = 2
 
             while True:
+                if stats["attempted"]:
+                    progress_proof = await self._read_daily_set_progress(page)
+                    stats["progress_completed"] = max(stats["completed"], int(progress_proof.get("completed", 0)))
+                    stats["progress_total"] = max(stats["total"], int(progress_proof.get("total", 0)))
+                    if progress_proof.get("category_proven", False) or (
+                        stats["progress_total"] > 0 and stats["progress_completed"] >= stats["progress_total"]
+                    ):
+                        stats["category_proven"] = True
+                        logger.info("Daily Set progress proof reached full completion")
+                        break
+
                 targets = await self._collect_daily_set_activity_targets(
                     page,
                     expected_title=expected_title,
@@ -463,9 +664,31 @@ class DailySetCompleter:
                 if not targets:
                     if not stats["attempted"]:
                         logger.warning("No incomplete Daily Set activities found in modal")
+                        if empty_modal_retries < max_empty_modal_retries:
+                            empty_modal_retries += 1
+                            logger.info(
+                                f"Retrying Daily Set modal recovery ({empty_modal_retries}/{max_empty_modal_retries})"
+                            )
+                            reopened = False
+                            for rewards_url in rewards_surfaces:
+                                try:
+                                    await page.goto(rewards_url, wait_until="domcontentloaded", timeout=35000)
+                                    await asyncio.sleep(2)
+                                    if await self._click_daily_set_card(page):
+                                        await asyncio.sleep(3)
+                                        reopened = True
+                                        break
+                                except Exception:
+                                    continue
+                            if reopened:
+                                continue
                     break
 
+                empty_modal_retries = 0
+
                 stats["total"] = max(stats["total"], len(targets) + len(attempted_titles))
+                if expected_title and not any(self._titles_match(expected_title, t.get("title", "")) for t in targets):
+                    logger.info("Expected Daily Set title no longer present; continuing with strongest remaining target")
                 target = targets[0]
                 title = (target.get("title") or "").strip()
                 target_id = target.get("id", "")
@@ -473,6 +696,14 @@ class DailySetCompleter:
 
                 try:
                     logger.info(f"Daily Set {stats['completed'] + 1}/{stats['total']}: {title}")
+                    logger.debug(
+                        "Daily Set target metadata: strategy=%s href=%s identity=%s",
+                        target.get("selector_strategy", ""),
+                        target.get("href", ""),
+                        target.get("identity", ""),
+                    )
+
+                    # Remember current pages before click
 
                     # Remember current pages before click
                     pages_before = len(page.context.pages)
@@ -506,24 +737,52 @@ class DailySetCompleter:
                         await self.captcha.solve_if_present(page)
                         await self._handle_task(page)
 
-                        # Go back to rewards page and reopen modal
-                        await page.goto(f"{REWARDS_URL}/earn", wait_until="domcontentloaded", timeout=35000)
-                        await asyncio.sleep(3)
+                        # Go back to a rewards surface and reopen modal with fresh DOM
+                        reopened = False
+                        for rewards_url in rewards_surfaces:
+                            try:
+                                await page.goto(rewards_url, wait_until="domcontentloaded", timeout=35000)
+                                await asyncio.sleep(2)
+                                if await self._click_daily_set_card(page):
+                                    await asyncio.sleep(3)
+                                    reopened = True
+                                    break
+                            except Exception:
+                                continue
+                        if not reopened:
+                            logger.warning("Could not reopen Daily Set panel after same-page task")
 
-                        # Re-click streak card to reopen modal
-                        if await self._click_daily_set_card(page):
-                            await asyncio.sleep(3)
+                    progress_before = int(stats.get("progress_completed", 0) or 0)
+                    progress_proof = await self._read_daily_set_progress(page)
+                    observed_completed = int(progress_proof.get("completed", 0) or 0)
+                    observed_total = int(progress_proof.get("total", 0) or 0)
+                    progress_advanced = observed_completed > progress_before
+                    target_proven = bool(progress_advanced or progress_proof.get("category_proven", False))
 
-                    stats["completed"] += 1
-                    stats["tasks"].append({"index": stats["completed"], "status": "completed"})
-                    if title:
-                        stats["proof_titles"].append(title)
-                    if expected_title:
-                        if self._titles_match(expected_title, title):
+                    stats["progress_completed"] = max(progress_before, observed_completed)
+                    stats["progress_total"] = max(stats["total"], observed_total)
+
+                    if target_proven:
+                        stats["completed"] = max(stats["completed"], stats["progress_completed"])
+                        stats["tasks"].append({"index": stats["completed"], "status": "completed"})
+                        if title:
+                            stats["proof_titles"].append(title)
+                        if expected_title:
+                            if self._titles_match(expected_title, title):
+                                stats["target_status"] = "proven"
+                        elif stats["completed"] > 0:
                             stats["target_status"] = "proven"
-                    elif stats["completed"] > 0:
-                        stats["target_status"] = "proven"
-                    logger.info(f"Daily Set activity completed: {title}")
+                    else:
+                        stats["tasks"].append({"index": len(stats["tasks"]) + 1, "status": "attempted_no_proof"})
+                        logger.warning(f"Daily Set activity attempted but progress did not advance: {title}")
+
+                    if progress_proof.get("category_proven", False) or (
+                        stats["progress_total"] > 0 and stats["progress_completed"] >= stats["progress_total"]
+                    ):
+                        stats["category_proven"] = True
+                        logger.info("Daily Set progress proof reached full completion")
+                        break
+                    logger.info(f"Daily Set activity processed: {title}")
                     await self.humanizer.short_delay()
 
                 except Exception as e:
@@ -547,7 +806,12 @@ class DailySetCompleter:
                         pass
 
         except Exception as e:
-            logger.error(f"Daily Set completion error: {e}")
+            message = str(e)
+            if "Target page, context or browser has been closed" in message:
+                stats["page_closed"] = True
+                logger.debug(f"Daily Set completion stopped because page was already closed: {e}")
+            else:
+                logger.error(f"Daily Set completion error: {e}")
             if self.ai_agent and self.ai_agent.enabled:
                 logger.info("🤖 Falling back to AI Agent for Daily Set...")
                 try:

@@ -20,6 +20,7 @@ SUPPORTED_RUN_TASKS = {
     "punch",
     "promos",
     "bootstrap",
+    "sync",
 }
 WINDOWS_TASK_NAME = "RewardsSearchAutomator"
 
