@@ -95,14 +95,11 @@ jobs:
           path: update-repo
 
       - name: Update update.json
+        if: ${{ secrets.TAURI_PRIVATE_KEY != '' }}
         shell: pwsh
         run: |
           $VERSION = ("${{ github.ref_name }}" -replace "^v", "")
           $JSON_PATH = "update-repo/update.json"
-
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.TAURI_PRIVATE_KEY }}")) {
-            throw "TAURI_PRIVATE_KEY secret is required for signed updater releases"
-          }
 
           $bundleRoot = "autobing-app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
           $artifact = Get-ChildItem -Path $bundleRoot -Recurse -Filter "*.msi.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -147,10 +144,12 @@ jobs:
           $null = $generated | ConvertFrom-Json
 
       - name: Commit and Push update.json
+        if: ${{ secrets.TAURI_PRIVATE_KEY != '' }}
         run: |
           cd update-repo
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add update.json
+          git diff --cached --quiet && exit 0
           git commit -m "chore(release): auto update update.json for ${{ github.ref_name }}"
           git push
