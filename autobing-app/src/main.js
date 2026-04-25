@@ -7,8 +7,13 @@ import { getVersion } from '@tauri-apps/api/app';
 
 const isTauriRuntime = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 const browserMocks = {
-    get_system_status: async () => fetch('/mock-dashboard-state.json').then(r => r.json()),
-    get_settings: async () => fetch('/mock-settings.json').then(r => r.json()),
+    get_system_status: async () => ({ status: 'online', jobs: [], stats: { failed_jobs: 0 } }),
+    get_settings: async () => ({
+        browser_type: 'gpm',
+        browser_api_url: 'http://127.0.0.1:9495',
+        ai_enabled: false,
+        page_agent_enabled: false,
+    }),
     get_job_logs: async () => [],
     scan_gpm_profiles: async () => [],
     get_account: async () => ({ email: '', password: '', gpm_profile_id: '', gpm_mobile_profile_id: '' }),

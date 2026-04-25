@@ -68,6 +68,15 @@ jobs:
               throw "Refusing release with local runtime data present: $path"
             }
           }
+          $publicForbidden = @(
+            "autobing-app/public/mock-dashboard-state.json",
+            "autobing-app/public/mock-settings.json"
+          )
+          foreach ($path in $publicForbidden) {
+            if (Test-Path $path) {
+              throw "Refusing release with frontend mock data present: $path"
+            }
+          }
 
       - name: Build Tauri and Create Release
         uses: tauri-apps/tauri-action@v0

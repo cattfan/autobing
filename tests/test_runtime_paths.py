@@ -41,6 +41,20 @@ class RuntimePathTests(unittest.TestCase):
 
         self.assertEqual(result.stdout.strip(), "")
 
+    def test_frontend_public_contains_no_personal_mock_data(self):
+        public_dir = Path("autobing-app/public")
+        forbidden_names = {"mock-dashboard-state.json", "mock-settings.json"}
+
+        for name in forbidden_names:
+            self.assertFalse((public_dir / name).exists(), f"{name} must not be bundled into the app")
+
+        for path in public_dir.rglob("*.json") if public_dir.exists() else []:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            self.assertNotIn("@gmail", content.lower())
+            self.assertNotIn("@outlook", content.lower())
+            self.assertNotIn("password", content.lower())
+
+
 
 if __name__ == "__main__":
     unittest.main()
