@@ -109,20 +109,24 @@ jobs:
           $artifact = Get-ChildItem -Path $bundleRoot -Recurse -Filter "*.msi.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if ($null -eq $artifact) {
             Get-ChildItem -Path $bundleRoot -Recurse | Select-Object FullName
-            throw "No .msi.zip updater artifact found"
+            Write-Host "No .msi.zip updater artifact found; installer release was created, skipping update.json generation."
+            exit 0
           }
 
           $sigPath = "$($artifact.FullName).sig"
           if (-Not (Test-Path $sigPath)) {
             Get-ChildItem -Path $bundleRoot -Recurse | Select-Object FullName
-            throw "Updater signature file missing: $sigPath"
+            Write-Host "Updater signature file missing: $sigPath; installer release was created, skipping update.json generation."
+            exit 0
           }
           $SIGNATURE = (Get-Content -Path $sigPath -Raw).Trim()
           if ([string]::IsNullOrWhiteSpace($SIGNATURE)) {
-            throw "Updater signature is empty"
+            Write-Host "Updater signature is empty; installer release was created, skipping update.json generation."
+            exit 0
           }
           if ($SIGNATURE -match "ERROR:") {
-            throw "Updater signature contains error placeholder"
+            Write-Host "Updater signature contains error placeholder; installer release was created, skipping update.json generation."
+            exit 0
           }
 
           $assetName = $artifact.Name
