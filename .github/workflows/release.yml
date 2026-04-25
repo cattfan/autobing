@@ -95,11 +95,15 @@ jobs:
           path: update-repo
 
       - name: Update update.json
-        if: ${{ secrets.TAURI_PRIVATE_KEY != '' }}
         shell: pwsh
         run: |
           $VERSION = ("${{ github.ref_name }}" -replace "^v", "")
           $JSON_PATH = "update-repo/update.json"
+
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.TAURI_PRIVATE_KEY }}")) {
+            Write-Host "TAURI_PRIVATE_KEY is not configured; installer release was created, skipping update.json generation."
+            exit 0
+          }
 
           $bundleRoot = "autobing-app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
           $artifact = Get-ChildItem -Path $bundleRoot -Recurse -Filter "*.msi.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -144,7 +148,6 @@ jobs:
           $null = $generated | ConvertFrom-Json
 
       - name: Commit and Push update.json
-        if: ${{ secrets.TAURI_PRIVATE_KEY != '' }}
         run: |
           cd update-repo
           git config user.name "github-actions[bot]"
