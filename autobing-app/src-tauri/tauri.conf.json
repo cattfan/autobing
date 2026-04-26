@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "autobing-app",
-  "version": "0.1.1",
+  "version": "0.1.10",
   "identifier": "com.autobing.app",
   "build": {
     "frontendDist": "../dist",
@@ -25,7 +25,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi"],
+    "targets": [
+      "msi"
+    ],
     "resources": [
       "bin/worker_api.exe",
       "bin/browser_scanner.exe"
