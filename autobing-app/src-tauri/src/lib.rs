@@ -602,26 +602,6 @@ fn read_system_status() -> serde_json::Value {
         }));
     }
 
-    // Default mock if file couldn't be read or was empty
-    if jobs.is_empty() {
-        jobs.push(json!({
-            "email": "cattfan239@gmail.com",
-            "status": "Stopped",
-            "points": 9716,
-            "pc_current": 12,
-            "pc_max": 90,
-            "mobile_current": 0,
-            "mobile_max": 60,
-            "daily_current": 0,
-            "daily_max": 3,
-            "streak_current": 0,
-            "streak_max": 3,
-            "earned_today": 0,
-            "progress": 8, // (12 / 150) * 100
-            "msg": "File not found, using pure mock...",
-            "pid": 0
-        }));
-    }
 
     serde_json::json!({
         "status": "online",
