@@ -912,58 +912,136 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const checkUpdateBtn = document.getElementById('check-update-btn');
     const updateMsg = document.getElementById('update-status-msg');
+    const updateBanner = document.getElementById('update-banner');
+    const updateBannerTitle = document.getElementById('update-banner-title');
+    const updateBannerMessage = document.getElementById('update-banner-message');
+    const updateBannerInstallBtn = document.getElementById('update-banner-install-btn');
+    let pendingUpdate = null;
 
-    if (checkUpdateBtn && updateMsg) {
-        checkUpdateBtn.addEventListener('click', async () => {
-            updateMsg.style.display = 'block';
-            updateMsg.style.color = 'var(--text-secondary)';
-            updateMsg.textContent = "Đang kiểm tra máy chủ cập nhật...";
-            checkUpdateBtn.disabled = true;
+    const showUpdateMessage = (message, color = 'var(--text-secondary)') => {
+        if (!updateMsg) return;
+        updateMsg.style.display = 'block';
+        updateMsg.style.color = color;
+        updateMsg.textContent = message;
+    };
 
-            try {
-                const update = await safeCheck();
-                if (update) {
-                    let downloaded = 0;
-                    let contentLength = 0;
+    const hideUpdateBanner = () => {
+        if (updateBanner) updateBanner.style.display = 'none';
+    };
 
-                    updateMsg.style.color = 'var(--primary)';
-                    updateMsg.textContent = `Tìm thấy bản cập nhật v${update.version}! Đang tải xuống (0%)...`;
+    const showUpdateBanner = (update) => {
+        pendingUpdate = update;
+        if (!updateBanner || !updateBannerTitle || !updateBannerMessage) return;
+        updateBannerTitle.textContent = `Có bản cập nhật v${update.version}`;
+        updateBannerMessage.textContent = 'Bạn có thể tải và cài đặt ngay. Ứng dụng sẽ khởi động lại sau khi cập nhật.';
+        updateBanner.style.display = 'flex';
+    };
 
-                    await update.downloadAndInstall((event) => {
-                        switch (event.event) {
-                            case 'Started':
-                                contentLength = event.data.contentLength || 0;
-                                break;
-                            case 'Progress':
-                                downloaded += event.data.chunkLength;
-                                if (contentLength > 0) {
-                                    const percent = Math.round((downloaded / contentLength) * 100);
-                                    updateMsg.textContent = `Đang tải xuống... ${percent}%`;
-                                }
-                                break;
-                            case 'Finished':
-                                updateMsg.textContent = 'Đã tải xong! Đang cài đặt...';
-                                break;
-                        }
-                    });
+    const formatUpdateError = (error) => {
+        const message = error?.toString?.() || String(error);
+        if (message.includes('not allowed by ACL')) {
+            return 'Bản app hiện tại chưa có quyền updater. Hãy cài bản mới nhất từ GitHub Releases một lần để kích hoạt cập nhật trong app.';
+        }
+        if (message.includes('signature') || message.includes('Signature') || message.includes('invalid updater')) {
+            return 'Kênh cập nhật tự động chưa có bản ký hợp lệ. Vui lòng tải bản mới nhất từ GitHub Releases.';
+        }
+        return `Lỗi kiểm tra cập nhật: ${message}`;
+    };
 
-                    updateMsg.style.color = 'var(--success)';
-                    updateMsg.textContent = 'Cập nhật thành công! Ứng dụng sẽ khởi động lại trong 3 giây...';
-                    setTimeout(async () => {
-                        await safeRelaunch();
-                    }, 3000);
-
-                } else {
-                    updateMsg.style.color = 'var(--success)';
-                    updateMsg.textContent = "Bạn đang ở phiên bản mới nhất.";
-                    checkUpdateBtn.disabled = false;
-                }
-            } catch (error) {
-                console.error("Update error:", error);
-                updateMsg.style.color = 'var(--danger)';
-                updateMsg.textContent = "Lỗi kiểm tra cập nhật: " + error.toString();
-                checkUpdateBtn.disabled = false;
+    const installUpdate = async (update, statusTarget = 'settings') => {
+        if (!update) return;
+        let downloaded = 0;
+        let contentLength = 0;
+        const setStatus = (message, color = 'var(--primary)') => {
+            if (statusTarget === 'settings') {
+                showUpdateMessage(message, color);
             }
+            if (updateBannerMessage) updateBannerMessage.textContent = message;
+        };
+
+        if (checkUpdateBtn) checkUpdateBtn.disabled = true;
+        if (updateBannerInstallBtn) updateBannerInstallBtn.disabled = true;
+        setStatus(`Tìm thấy bản cập nhật v${update.version}! Đang tải xuống (0%)...`);
+
+        try {
+            await update.downloadAndInstall((event) => {
+                switch (event.event) {
+                    case 'Started':
+                        contentLength = event.data.contentLength || 0;
+                        break;
+                    case 'Progress':
+                        downloaded += event.data.chunkLength;
+                        if (contentLength > 0) {
+                            const percent = Math.round((downloaded / contentLength) * 100);
+                            setStatus(`Đang tải xuống... ${percent}%`);
+                        }
+                        break;
+                    case 'Finished':
+                        setStatus('Đã tải xong! Đang cài đặt...');
+                        break;
+                }
+            });
+
+            setStatus('Cập nhật thành công! Ứng dụng sẽ khởi động lại trong 3 giây...', 'var(--success)');
+            setTimeout(async () => {
+                await safeRelaunch();
+            }, 3000);
+        } catch (error) {
+            console.error('Update install error:', error);
+            const message = formatUpdateError(error);
+            setStatus(message, 'var(--danger)');
+            if (checkUpdateBtn) checkUpdateBtn.disabled = false;
+            if (updateBannerInstallBtn) updateBannerInstallBtn.disabled = false;
+        }
+    };
+
+    const checkForUpdates = async ({ manual = false } = {}) => {
+        if (!isTauriRuntime()) return null;
+        if (manual) {
+            showUpdateMessage('Đang kiểm tra máy chủ cập nhật...');
+            if (checkUpdateBtn) checkUpdateBtn.disabled = true;
+        }
+
+        try {
+            const update = await safeCheck();
+            if (update) {
+                showUpdateBanner(update);
+                if (manual) {
+                    await installUpdate(update, 'settings');
+                }
+                return update;
+            }
+
+            hideUpdateBanner();
+            if (manual) {
+                showUpdateMessage('Bạn đang ở phiên bản mới nhất.', 'var(--success)');
+            }
+            return null;
+        } catch (error) {
+            console.error('Update check error:', error);
+            const message = formatUpdateError(error);
+            if (manual) {
+                showUpdateMessage(message, 'var(--danger)');
+            }
+            return null;
+        } finally {
+            if (manual && checkUpdateBtn) checkUpdateBtn.disabled = false;
+        }
+    };
+
+    if (checkUpdateBtn) {
+        checkUpdateBtn.addEventListener('click', async () => {
+            await checkForUpdates({ manual: true });
         });
     }
+
+    if (updateBannerInstallBtn) {
+        updateBannerInstallBtn.addEventListener('click', async () => {
+            await installUpdate(pendingUpdate, 'banner');
+        });
+    }
+
+    setTimeout(() => {
+        checkForUpdates({ manual: false });
+    }, 2500);
 });

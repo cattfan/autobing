@@ -799,3 +799,26 @@ body {
 
 .settings-card { background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 24px; max-width: 600px; }
 
+
+.update-banner {
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 16px 30px 0;
+    padding: 14px 16px;
+    border: 1px solid #bfdbfe;
+    border-radius: 12px;
+    background: #eff6ff;
+    color: #1e3a8a;
+    box-shadow: 0 10px 24px rgba(37, 99, 235, 0.08);
+}
+
+.update-banner p {
+    margin: 4px 0 0;
+    color: #1d4ed8;
+    font-size: 0.9rem;
+}
+
+.update-banner .btn {
+    flex-shrink: 0;
+}
