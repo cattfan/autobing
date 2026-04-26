@@ -55,6 +55,15 @@ class RuntimePathTests(unittest.TestCase):
             self.assertNotIn("password", content.lower())
 
 
+    def test_defaults_use_edge_chromium_without_gpm(self):
+        from src.utils import get_default_settings
+
+        settings = get_default_settings()
+
+        self.assertEqual(settings["browser_type"], "chromium")
+        self.assertTrue(settings["native_edge_runtime_enabled"])
+
+
 
 if __name__ == "__main__":
     unittest.main()

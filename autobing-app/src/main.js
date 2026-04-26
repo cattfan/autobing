@@ -9,7 +9,7 @@ const isTauriRuntime = () => typeof window !== 'undefined' && '__TAURI_INTERNALS
 const browserMocks = {
     get_system_status: async () => ({ status: 'online', jobs: [], stats: { failed_jobs: 0 } }),
     get_settings: async () => ({
-        browser_type: 'gpm',
+        browser_type: 'chromium',
         browser_api_url: 'http://127.0.0.1:9495',
         ai_enabled: false,
         page_agent_enabled: false,
@@ -632,7 +632,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const saveSettingsBtn = document.getElementById('save-settings-btn');
     if (saveSettingsBtn) {
         saveSettingsBtn.addEventListener('click', async () => {
-            const browserType = document.getElementById('setting-browser-type').value;
+            const browserType = document.getElementById('setting-browser-type').value || 'chromium';
             const apiUrl = document.getElementById('setting-api-url').value;
             const aiEnabled = document.getElementById('setting-ai-enabled')?.checked ?? false;
             const pageAgentEnabled = document.getElementById('setting-page-agent-enabled')?.checked ?? false;
@@ -743,7 +743,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
             document.getElementById('edit-modal').classList.add('active');
 
-            // Load profiles for selection
+            // Load profiles only when GPM is selected; new installs default to Edge.
+            if ((document.getElementById('setting-browser-type')?.value || 'chromium') !== 'gpm') {
+                document.getElementById('edit-gpm-pc').innerHTML = `<option value="">Edge mặc định</option>`;
+                document.getElementById('edit-gpm-mobile').innerHTML = `<option value="">Edge mặc định</option>`;
+                return;
+            }
             invoke('scan_gpm_profiles').then(profiles => {
                 let opts = `<option value="">${t.noProfileSelected || 'None'}</option>`;
                 if (profiles && profiles.length > 0) {
@@ -815,7 +820,12 @@ document.addEventListener("DOMContentLoaded", async () => {
                 document.getElementById('edit-modal').classList.add('active');
                 updateUIText();
 
-                // Background load profiles
+                // Background load profiles only when GPM is selected.
+                if ((document.getElementById('setting-browser-type')?.value || 'chromium') !== 'gpm') {
+                    pcSelect.innerHTML = `<option value="">Edge mặc định</option>`;
+                    mobileSelect.innerHTML = `<option value="">Edge mặc định</option>`;
+                    return;
+                }
                 invoke('scan_gpm_profiles').then(profiles => {
                     let opts = `<option value="">${t.noProfileSelected}</option>`;
                     const pcId = accountData.gpm_profile_id || '';

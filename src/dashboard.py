@@ -1145,7 +1145,7 @@ async def _check_gpm_online(api_url: str) -> bool:
     try:
         from src.utils import load_settings
         settings = load_settings()
-        platform = settings.get("browser_type", "gpm")
+        platform = settings.get("browser_type", "chromium")
         
         async with httpx.AsyncClient(timeout=3.0) as client:
             if platform == "genlogin":
@@ -1177,7 +1177,7 @@ async def _start_gpm_profile(gpm_profile_id: str, api_url: str) -> str:
     
     from src.utils import load_settings
     settings = load_settings()
-    platform = settings.get("browser_type", "gpm")
+    platform = settings.get("browser_type", "chromium")
     
 
     # Fast-fail: if GPM was already confirmed offline this run, don't retry

@@ -14,7 +14,7 @@ def scan_profiles():
                 settings = json.load(f)
                 
                 # Get Platform Context
-                platform = settings.get("browser_type", "gpm")
+                platform = settings.get("browser_type", "chromium")
                 api_url = settings.get("browser_api_url", settings.get("gpm_api_url", "http://127.0.0.1:9495")).rstrip("/")
         except Exception:
             pass
