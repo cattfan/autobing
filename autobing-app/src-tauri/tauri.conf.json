@@ -38,11 +38,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJCOTI5QTgwRDNFNzFGMDcKUldRSEgrZlRnSnFTdTF2am1hY09lUE8ra3JNSUNuZ1ErY3JzVlQycTlSbk56MzJwYXJQUVJxK3oK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc4Q0U5MzU2Q0U2RTZBM0QKUldROWFtN09WcFBPZUhkN1dkZXYvaWVkWTA3OFBrVFNGcjBDV3BTNzJQVUZwSzFiNzlrSlFYYW8K",
       "endpoints": [
         "https://raw.githubusercontent.com/cattfan/autobing/main/update.json"
       ],
