@@ -9,6 +9,8 @@ jobs:
     permissions:
       contents: write
     runs-on: windows-latest
+    env:
+      TAURI_SIGNING_CONFIGURED: ${{ secrets.TAURI_PRIVATE_KEY != '' }}
     
     steps:
       - name: Checkout Code
@@ -78,9 +80,19 @@ jobs:
             }
           }
 
+      - name: Prepare unsigned installer config
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "autobing-app/build" | Out-Null
+          [System.IO.File]::WriteAllText(
+            "autobing-app/build/tauri-release-no-updater.json",
+            '{"bundle":{"createUpdaterArtifacts":false}}',
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
       - name: Build Tauri and Create Release
+        if: env.TAURI_SIGNING_CONFIGURED == 'true'
         uses: tauri-apps/tauri-action@v0
-        id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
@@ -96,6 +108,21 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: --target x86_64-pc-windows-msvc
+
+      - name: Build Tauri and Create Release (installer only)
+        if: env.TAURI_SIGNING_CONFIGURED != 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/autobing-app/src-tauri/target
+        with:
+          projectPath: autobing-app
+          tagName: ${{ github.ref_name }}
+          releaseName: "AutoBing Update ${{ github.ref_name }}"
+          releaseBody: "Bản cập nhật sinh tự động. Tải file .msi hoặc zip để tiến hành!"
+          releaseDraft: false
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc --config build/tauri-release-no-updater.json
 
       - name: Checkout Main Branch to Push update.json
         uses: actions/checkout@v4
