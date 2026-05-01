@@ -9,8 +9,6 @@ jobs:
     permissions:
       contents: write
     runs-on: windows-latest
-    env:
-      TAURI_SIGNING_CONFIGURED: ${{ secrets.TAURI_PRIVATE_KEY != '' }}
     
     steps:
       - name: Checkout Code
@@ -91,26 +89,6 @@ jobs:
           )
 
       - name: Build Tauri and Create Release
-        if: env.TAURI_SIGNING_CONFIGURED == 'true'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-          CARGO_TARGET_DIR: ${{ github.workspace }}/autobing-app/src-tauri/target
-        with:
-          projectPath: autobing-app
-          tagName: ${{ github.ref_name }}
-          releaseName: "AutoBing Update ${{ github.ref_name }}"
-          releaseBody: "Bản cập nhật sinh tự động. Tải file .msi hoặc zip để tiến hành!"
-          releaseDraft: false
-          prerelease: false
-          args: --target x86_64-pc-windows-msvc
-
-      - name: Build Tauri and Create Release (installer only)
-        if: env.TAURI_SIGNING_CONFIGURED != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -133,63 +111,16 @@ jobs:
       - name: Update update.json
         shell: pwsh
         run: |
-          $VERSION = ("${{ github.ref_name }}" -replace "^v", "")
-          $JSON_PATH = "update-repo/update.json"
-
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.TAURI_PRIVATE_KEY }}")) {
-            Write-Host "TAURI_PRIVATE_KEY is not configured; installer release was created, skipping update.json generation."
-            exit 0
-          }
-
-          $bundleRoot = "autobing-app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
-          $artifact = Get-ChildItem -Path $bundleRoot -Recurse -Filter "*.msi.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if ($null -eq $artifact) {
-            Get-ChildItem -Path $bundleRoot -Recurse | Select-Object FullName
-            Write-Host "No .msi.zip updater artifact found; installer release was created, skipping update.json generation."
-            exit 0
-          }
-
-          $sigPath = "$($artifact.FullName).sig"
-          if (-Not (Test-Path $sigPath)) {
-            Get-ChildItem -Path $bundleRoot -Recurse | Select-Object FullName
-            Write-Host "Updater signature file missing: $sigPath; installer release was created, skipping update.json generation."
-            exit 0
-          }
-          $SIGNATURE = (Get-Content -Path $sigPath -Raw).Trim()
-          if ([string]::IsNullOrWhiteSpace($SIGNATURE)) {
-            Write-Host "Updater signature is empty; installer release was created, skipping update.json generation."
-            exit 0
-          }
-          if ($SIGNATURE -match "ERROR:") {
-            Write-Host "Updater signature contains error placeholder; installer release was created, skipping update.json generation."
-            exit 0
-          }
-
-          $assetName = $artifact.Name
-          $URL = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$assetName"
-
-          $UPDATE_PAYLOAD = @{
-              version = $VERSION
-              notes = "Update $VERSION automatically published."
-              pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-              platforms = @{
-                  "windows-x86_64" = @{
-                      signature = $SIGNATURE
-                      url = $URL
-                  }
-              }
-          }
-
-          $UPDATE_PAYLOAD | ConvertTo-Json -Depth 5 > $JSON_PATH
-          $generated = Get-Content -Path $JSON_PATH -Raw
-          if ($generated -match "ERROR:" -or $generated -notmatch "https://github.com/") {
-            throw "Generated update.json failed validation"
-          }
-          $null = $generated | ConvertFrom-Json
+          Write-Host "Installer-only release; skipping Tauri updater update.json generation."
 
       - name: Commit and Push update.json
+        shell: pwsh
         run: |
           cd update-repo
+          if (-Not (Test-Path update.json)) {
+            Write-Host "update.json not present; nothing to commit."
+            exit 0
+          }
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add update.json
