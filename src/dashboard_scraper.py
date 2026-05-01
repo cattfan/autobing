@@ -388,7 +388,7 @@ async def click_task_by_metadata(page: Page, metadata: dict[str, Any]) -> dict[s
                     const pointsMatch = String(text || '').match(/\\+?\\b(\\d{1,3})\\b(?!.*\\b\\d+\\b)/);
                     const points = pointsMatch ? Number(pointsMatch[1]) : 0;
                     const category = normalize(section).includes('daily set') ? 'daily_set' : (normalize(section).includes('earn') ? 'more_promo' : 'unknown');
-                    const title = normalize(titleAttr || aria || String(text).split('\n').filter(Boolean)[0] || '');
+                    const title = normalize(titleAttr || aria || String(text).split(String.fromCharCode(10)).filter(Boolean)[0] || '');
                     const fingerprint = buildFingerprint(title, href, points || expectedPoints, expectedCategory || category, section);
                     return { el, index, text: normalize(text), href: normalizeHref(href), aria: normalize(aria), title, biId: normalize(biId), tagName, section: normalize(section), points, category: normalize(category), fingerprint };
                 };

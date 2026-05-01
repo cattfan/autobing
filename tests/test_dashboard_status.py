@@ -320,7 +320,7 @@ class DashboardStatusTests(unittest.TestCase):
             ["Desktop 39/90", "Mobile unverified from original runtime"],
         )
 
-    def test_dashboard_remaining_items_can_ignore_mobile_app_and_edge_streak(self):
+    def test_dashboard_remaining_items_can_ignore_mobile_app_but_not_edge_streak(self):
         snapshot = {
             "search_status": {},
             "task_overview": {
@@ -337,9 +337,9 @@ class DashboardStatusTests(unittest.TestCase):
             "pending_tasks": [],
         }
 
-        self.assertEqual(_describe_remaining_items(snapshot), [])
+        self.assertEqual(_describe_remaining_items(snapshot), ["Edge Minutes 0/30"])
 
-    def test_dashboard_remaining_items_ignores_missing_daily_set_when_no_actionable_daily_task_is_scanned(self):
+    def test_dashboard_remaining_items_reports_missing_daily_set_when_no_actionable_daily_task_is_scanned(self):
         snapshot = {
             "search_status": {},
             "task_overview": {"daily_set": {"completed": 2, "total": 3}},
@@ -348,7 +348,7 @@ class DashboardStatusTests(unittest.TestCase):
             "pending_tasks": ["Montreal's Winter Glow"],
         }
 
-        self.assertEqual(_describe_remaining_items(snapshot), ["Task: Montreal's Winter Glow"])
+        self.assertEqual(_describe_remaining_items(snapshot), ["Daily Set 2/3", "Task: Montreal's Winter Glow"])
 
     def test_dashboard_remaining_items_reports_daily_set_when_actionable_daily_task_is_scanned(self):
         snapshot = {
@@ -375,7 +375,7 @@ class DashboardStatusTests(unittest.TestCase):
 
         self.assertEqual(_describe_remaining_items(snapshot), ["Task: Bogus"])
 
-    def test_dashboard_reconcile_applies_reporting_overrides_without_daily_set_proof(self):
+    def test_dashboard_reconcile_applies_bing_app_override_without_daily_set_proof(self):
         snapshot = {"task_overview": {}, "pending_tasks": []}
         reconciled = _reconcile_verification_with_session_proof(
             snapshot,
@@ -386,7 +386,54 @@ class DashboardStatusTests(unittest.TestCase):
         )
 
         self.assertTrue(reconciled["reporting_overrides"]["ignore_bing_app_checkin"])
-        self.assertTrue(reconciled["reporting_overrides"]["ignore_edge_streak"])
+        self.assertNotIn("ignore_edge_streak", reconciled["reporting_overrides"])
+
+    def test_dashboard_remaining_items_reports_visible_edge_gap_even_with_ignore_proof(self):
+        snapshot = {
+            "search_status": {},
+            "task_overview": {
+                "daily_set": {"completed": 3, "total": 3},
+                "streaks": {
+                    "edge": {"exists": True, "done": False, "minutes": 0, "target": 30},
+                },
+            },
+            "reporting_overrides": {"ignore_edge_streak": True},
+            "pending_tasks": [],
+        }
+
+        self.assertEqual(_describe_remaining_items(snapshot), ["Edge Minutes 0/30"])
+
+    def test_dashboard_reconcile_does_not_hide_visible_daily_or_edge_gaps(self):
+        snapshot = {
+            "task_overview": {
+                "daily_set": {"completed": 2, "total": 3},
+                "streaks": {
+                    "edge": {"exists": True, "done": False, "minutes": 0, "target": 30},
+                },
+            },
+            "category_status": {"daily_set": {"completed": 2, "total": 3}},
+            "pending_tasks": [],
+            "pending_by_category": {"daily_set": []},
+        }
+        reconciled = _reconcile_verification_with_session_proof(
+            snapshot,
+            {
+                "daily_set_complete": True,
+                "daily_set_progress_completed": 3,
+                "daily_set_progress_total": 3,
+                "edge_streak_verified_exists": True,
+                "edge_streak_verified_minutes": 35,
+                "edge_streak_verified_target": 30,
+                "edge_streak_verified_done": True,
+            },
+        )
+
+        self.assertEqual(reconciled["task_overview"]["daily_set"], {"completed": 2, "total": 3})
+        self.assertFalse(reconciled["task_overview"]["streaks"]["edge"].get("done", False))
+        self.assertEqual(
+            _describe_remaining_items(reconciled),
+            ["Daily Set 2/3", "Edge Minutes 0/30"],
+        )
 
     def test_dashboard_reconcile_applies_partial_daily_set_progress(self):
         snapshot = {
@@ -971,7 +1018,7 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["search_status"]["pc_max"], 90)
         self.assertEqual(snapshot["search_status"]["total_points"], 14603)
 
-    def test_dashboard_remaining_items_can_ignore_non_actionable_daily_set_gap(self):
+    def test_dashboard_remaining_items_does_not_ignore_non_actionable_daily_set_gap(self):
         snapshot = {
             "search_status": {},
             "task_overview": {"daily_set": {"completed": 2, "total": 3}},
@@ -981,7 +1028,46 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
             "reporting_overrides": {"ignore_daily_set_gap": True},
         }
 
-        self.assertEqual(_describe_remaining_items(snapshot), [])
+        self.assertEqual(_describe_remaining_items(snapshot), ["Daily Set 2/3"])
+
+
+    def test_daily_set_recovery_candidates_uses_incomplete_inventory_urls(self):
+        from src.dashboard import _daily_set_recovery_candidates
+
+        snapshot = {
+            "verification_tasks": [
+                {
+                    "title": "Done Daily",
+                    "category": "daily_set",
+                    "is_complete": True,
+                    "is_locked": False,
+                    "destination_url": "https://example.test/done",
+                },
+                {
+                    "title": "Starry Visionary?",
+                    "category": "daily_set",
+                    "is_complete": False,
+                    "is_locked": False,
+                    "destination_url": "https://example.test/daily",
+                },
+                {
+                    "title": "Promo",
+                    "category": "more_promo",
+                    "is_complete": False,
+                    "is_locked": False,
+                    "destination_url": "https://example.test/promo",
+                },
+            ],
+            "pending_by_category": {"daily_set": ["Fallback Daily"]},
+        }
+
+        self.assertEqual(
+            _daily_set_recovery_candidates(snapshot),
+            [
+                {"title": "Starry Visionary?", "destination_url": "https://example.test/daily"},
+                {"title": "Fallback Daily", "destination_url": ""},
+            ],
+        )
 
     async def test_final_daily_set_repair_updates_session_proof(self):
         from src.dashboard import _repair_daily_set_gap_from_final_verification
@@ -1012,7 +1098,7 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session_proofs["daily_set_progress_completed"], 3)
         self.assertEqual(session_proofs["daily_set_progress_total"], 3)
 
-    async def test_final_daily_set_repair_marks_no_target_gap_non_actionable(self):
+    async def test_final_daily_set_repair_keeps_no_target_gap_incomplete(self):
         from src.dashboard import _repair_daily_set_gap_from_final_verification
 
         page = object()
@@ -1028,6 +1114,7 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
                 "panel_control_failed": True,
             }),
             _read_daily_set_progress=AsyncMock(return_value={"completed": 2, "total": 3, "category_proven": False}),
+            try_direct_daily_set_url=AsyncMock(),
         )
 
         with patch("src.daily_set.DailySetCompleter", return_value=completer):
@@ -1040,8 +1127,110 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(repaired)
-        self.assertTrue(session_proofs["ignore_daily_set_gap"])
+        self.assertNotIn("ignore_daily_set_gap", session_proofs)
         self.assertFalse(session_proofs.get("daily_set_complete", False))
+        self.assertEqual(session_proofs["daily_set_progress_completed"], 2)
+        self.assertEqual(session_proofs["daily_set_progress_total"], 3)
+        completer.try_direct_daily_set_url.assert_not_called()
+
+    async def test_final_daily_set_repair_tries_direct_inventory_url(self):
+        from src.dashboard import _repair_daily_set_gap_from_final_verification
+
+        page = object()
+        snapshot = {
+            "task_overview": {"daily_set": {"completed": 2, "total": 3}},
+            "verification_tasks": [{
+                "title": "Starry Visionary?",
+                "category": "daily_set",
+                "is_complete": False,
+                "is_locked": False,
+                "destination_url": "https://example.test/daily",
+            }],
+        }
+        session_proofs = {}
+        completer = SimpleNamespace(
+            complete_daily_set=AsyncMock(return_value={
+                "completed": 0,
+                "total": 0,
+                "progress_completed": 2,
+                "progress_total": 3,
+                "category_proven": False,
+                "panel_control_failed": True,
+            }),
+            _read_daily_set_progress=AsyncMock(side_effect=[
+                {"completed": 2, "total": 3, "category_proven": False},
+                {"completed": 3, "total": 3, "category_proven": True},
+            ]),
+            try_direct_daily_set_url=AsyncMock(return_value={
+                "attempted": True,
+                "progress_completed": 3,
+                "progress_total": 3,
+                "category_proven": True,
+            }),
+            extract_hidden_daily_set_urls=AsyncMock(return_value=[]),
+        )
+
+        with patch("src.daily_set.DailySetCompleter", return_value=completer):
+            repaired = await _repair_daily_set_gap_from_final_verification(
+                page,
+                SimpleNamespace(),
+                {},
+                snapshot,
+                session_proofs,
+            )
+
+        self.assertTrue(repaired)
+        completer.try_direct_daily_set_url.assert_awaited_once_with(page, "https://example.test/daily", "Starry Visionary?")
+        self.assertTrue(session_proofs["daily_set_complete"])
+        self.assertEqual(session_proofs["daily_set_progress_completed"], 3)
+        self.assertEqual(session_proofs["daily_set_progress_total"], 3)
+
+
+    async def test_final_daily_set_repair_tries_hidden_extracted_url(self):
+        from src.dashboard import _repair_daily_set_gap_from_final_verification
+
+        page = object()
+        snapshot = {"task_overview": {"daily_set": {"completed": 2, "total": 3}}}
+        session_proofs = {}
+        completer = SimpleNamespace(
+            complete_daily_set=AsyncMock(return_value={
+                "completed": 0,
+                "total": 0,
+                "progress_completed": 2,
+                "progress_total": 3,
+                "category_proven": False,
+                "panel_control_failed": True,
+            }),
+            _read_daily_set_progress=AsyncMock(side_effect=[
+                {"completed": 2, "total": 3, "category_proven": False},
+                {"completed": 3, "total": 3, "category_proven": True},
+            ]),
+            extract_hidden_daily_set_urls=AsyncMock(return_value=[{
+                "title": "Hidden Daily",
+                "destination_url": "https://example.test/hidden-daily",
+                "source": "script",
+            }]),
+            try_direct_daily_set_url=AsyncMock(return_value={
+                "attempted": True,
+                "progress_completed": 3,
+                "progress_total": 3,
+                "category_proven": True,
+            }),
+        )
+
+        with patch("src.daily_set.DailySetCompleter", return_value=completer):
+            repaired = await _repair_daily_set_gap_from_final_verification(
+                page,
+                SimpleNamespace(),
+                {},
+                snapshot,
+                session_proofs,
+            )
+
+        self.assertTrue(repaired)
+        completer.extract_hidden_daily_set_urls.assert_awaited_once_with(page)
+        completer.try_direct_daily_set_url.assert_awaited_once_with(page, "https://example.test/hidden-daily", "Hidden Daily")
+        self.assertTrue(session_proofs["daily_set_complete"])
 
     async def test_collect_final_verification_honors_recent_verified_task_cache(self):
         page = object()
@@ -1072,8 +1261,8 @@ class DashboardStatusAsyncTests(unittest.IsolatedAsyncioTestCase):
                 search_status_override={"total_points": 100},
             )
 
-        self.assertEqual(snapshot["pending_tasks"], [])
-        self.assertEqual(snapshot["category_status"]["more_promo"], {"completed": 1, "total": 1})
+        self.assertEqual(snapshot["pending_tasks"], ["Winter in Dublin"])
+        self.assertEqual(snapshot["category_status"]["more_promo"], {"completed": 0, "total": 1})
 
     async def test_dead_desktop_page_reacquires_from_live_cdp(self):
         dead_page = SimpleNamespace(

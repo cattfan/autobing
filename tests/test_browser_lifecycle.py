@@ -153,6 +153,31 @@ class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(page, "_codex_mobile_emulation_client"))
         page.set_extra_http_headers.assert_awaited_once()
 
+    def test_edge_global_kill_is_disabled_by_default(self):
+        manager = BrowserManager({"headless": False})
+
+        self.assertFalse(manager._should_kill_stale_edge_before_launch())
+
+    def test_edge_global_kill_requires_single_thread_opt_in(self):
+        self.assertTrue(
+            BrowserManager(
+                {
+                    "headless": False,
+                    "kill_stale_edge_before_launch": True,
+                    "max_threads": 1,
+                }
+            )._should_kill_stale_edge_before_launch()
+        )
+        self.assertFalse(
+            BrowserManager(
+                {
+                    "headless": False,
+                    "kill_stale_edge_before_launch": True,
+                    "max_threads": 2,
+                }
+            )._should_kill_stale_edge_before_launch()
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

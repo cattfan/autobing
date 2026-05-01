@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+ROOT = Path(globals().get('SPECPATH', '.')).resolve()
 
 a = Analysis(
     ['src\\browser_scanner.py'],
-    pathex=[],
+    pathex=[str(ROOT)],
     binaries=[],
     datas=[],
     hiddenimports=[],

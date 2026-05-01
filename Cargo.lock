@@ -81,6 +81,7 @@ version = "0.1.13"
 dependencies = [
  "autobing-control-plane",
  "autobing-protocol",
+ "chrono",
  "log",
  "notify",
  "serde",

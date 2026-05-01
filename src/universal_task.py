@@ -493,21 +493,29 @@ class UniversalTaskScanner:
                 }
                 continue
 
-            # Local Memory Cache check (skip tasks recently visited to outpace Microsoft API delay)
+            # Local Memory Cache check (skip lagging non-strict tasks only).
             visited_tasks = account_state.setdefault("visited_tasks", {})
             if task.id in visited_tasks:
                 visited_at_str = visited_tasks[task.id]
                 if _should_skip_task_via_cache(task, visited_at_str):
-                    stats["skipped_done"] += 1
-                    category_stats["skipped_done"] += 1
-                    self._log("info", f"✅ Local Cache: Skipping recently completed task: {task.title[:30]}")
-                    self._diag(
-                        "Skipping task due to recent cache hit",
-                        scope="task-filter",
-                        visited_at=visited_at_str,
-                        **self._task_diag_payload(task),
-                    )
-                    continue
+                    if _requires_strict_completion(task.category):
+                        self._diag(
+                            "Ignoring recent cache hit because current API still marks strict task incomplete",
+                            scope="task-filter",
+                            visited_at=visited_at_str,
+                            **self._task_diag_payload(task),
+                        )
+                    else:
+                        stats["skipped_done"] += 1
+                        category_stats["skipped_done"] += 1
+                        self._log("info", f"✅ Local Cache: Skipping recently completed task: {task.title[:30]}")
+                        self._diag(
+                            "Skipping task due to recent cache hit",
+                            scope="task-filter",
+                            visited_at=visited_at_str,
+                            **self._task_diag_payload(task),
+                        )
+                        continue
 
             deferred_reason = get_deferred_offer_reason(task)
             if deferred_reason:
@@ -775,7 +783,7 @@ class UniversalTaskScanner:
                    f"✅ Tasks: {stats['completed']}/{stats['total']} completed, "
                    f"{stats['skipped_locked']} locked, {stats['failed']} failed")
         daily_category = stats.get("by_category", {}).get("daily_set", {})
-        daily_completed = int(daily_category.get("completed", 0)) + int(daily_category.get("skipped_done", 0))
+        daily_completed = int(daily_category.get("completed", 0))
         daily_total = int(daily_category.get("total", 0))
         stats["session_proofs"] = {
             "daily_set_complete": "daily_set" in self._session_completed_categories or (daily_total > 0 and daily_completed >= daily_total),

@@ -1,12 +1,19 @@
 import json
+import os
 import urllib.request
 import pathlib
 import sys
 
 def scan_profiles():
     # Attempt to read GPM API URL from settings
-    url = "http://127.0.0.1:9495"
-    config_path = pathlib.Path(__file__).parent.parent / "config" / "settings.json"
+    platform = "chromium"
+    api_url = "http://127.0.0.1:9495"
+    config_dir = os.environ.get("AUTOBING_CONFIG_DIR", "").strip()
+    config_path = (
+        pathlib.Path(config_dir) / "settings.json"
+        if config_dir
+        else pathlib.Path(__file__).parent.parent / "config" / "settings.json"
+    )
     
     if config_path.exists():
         try:

@@ -7,6 +7,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tauri::Emitter;
 
+const WORKER_API_RESOURCE: &str = "bin/worker_api.exe";
+const BROWSER_SCANNER_RESOURCE: &str = "bin/browser_scanner.exe";
+
 fn get_workspace_root() -> std::path::PathBuf {
     if let Ok(dir) = std::env::current_dir() {
         if dir.ends_with("src-tauri") {
@@ -29,7 +32,11 @@ fn get_workspace_root() -> std::path::PathBuf {
 }
 
 fn env_path(name: &str) -> Option<std::path::PathBuf> {
-    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).map(PathBuf::from)
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 fn runtime_config_dir() -> std::path::PathBuf {
@@ -91,7 +98,66 @@ fn worker_jobs_dir() -> std::path::PathBuf {
     runtime_data_dir().join(".omx").join("worker-jobs")
 }
 
+fn command_working_dir() -> std::path::PathBuf {
+    if cfg!(debug_assertions) {
+        get_workspace_root()
+    } else {
+        runtime_data_dir()
+    }
+}
+
+fn ensure_runtime_dirs() {
+    let _ = std::fs::create_dir_all(runtime_config_dir());
+    let _ = std::fs::create_dir_all(runtime_data_dir());
+    let _ = std::fs::create_dir_all(worker_jobs_dir());
+}
+
+fn resolve_resource_exe(
+    app_handle: &tauri::AppHandle,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    use tauri::Manager;
+
+    let exe_path = app_handle
+        .path()
+        .resolve(relative_path, tauri::path::BaseDirectory::Resource)
+        .map_err(|e| format!("Could not resolve bundled sidecar {relative_path}: {e}"))?;
+
+    if exe_path.exists() {
+        Ok(exe_path)
+    } else {
+        Err(format!("Bundled sidecar not found: {}", exe_path.display()))
+    }
+}
+
+fn worker_api_command(app_handle: &tauri::AppHandle) -> Result<std::process::Command, String> {
+    if cfg!(debug_assertions) {
+        let mut cmd = std::process::Command::new("python");
+        cmd.args(["-m", "src.worker_api"]);
+        Ok(cmd)
+    } else {
+        Ok(std::process::Command::new(resolve_resource_exe(
+            app_handle,
+            WORKER_API_RESOURCE,
+        )?))
+    }
+}
+
+fn browser_scanner_command(app_handle: &tauri::AppHandle) -> Result<std::process::Command, String> {
+    if cfg!(debug_assertions) {
+        let mut cmd = std::process::Command::new("python");
+        cmd.args(["-m", "src.browser_scanner"]);
+        Ok(cmd)
+    } else {
+        Ok(std::process::Command::new(resolve_resource_exe(
+            app_handle,
+            BROWSER_SCANNER_RESOURCE,
+        )?))
+    }
+}
+
 fn apply_runtime_env(cmd: &mut std::process::Command) {
+    ensure_runtime_dirs();
     let config_dir = runtime_config_dir();
     let data_dir = runtime_data_dir();
     cmd.env("AUTOBING_CONFIG_DIR", &config_dir)
@@ -107,14 +173,7 @@ fn get_system_status() -> serde_json::Value {
 fn read_system_status() -> serde_json::Value {
     let mut jobs = Vec::new();
 
-    let today_key = std::process::Command::new("python")
-        .args(["-c", "from datetime import datetime; print(datetime.now().date().isoformat())"])
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default();
+    let today_key = chrono::Local::now().date_naive().to_string();
 
     // First, read all configured accounts
     let acc_path = accounts_path();
@@ -202,11 +261,14 @@ fn read_system_status() -> serde_json::Value {
         })
     }
 
-    fn previous_snapshot_for_email<'a>(history: Option<&'a Vec<Value>>, today_key: &str) -> Option<&'a Value> {
+    fn previous_snapshot_for_email<'a>(
+        history: Option<&'a Vec<Value>>,
+        today_key: &str,
+    ) -> Option<&'a Value> {
         let history = history?;
-        let today_index = history.iter().rposition(|record| {
-            record.get("date").and_then(|v| v.as_str()) == Some(today_key)
-        });
+        let today_index = history
+            .iter()
+            .rposition(|record| record.get("date").and_then(|v| v.as_str()) == Some(today_key));
         if let Some(index) = today_index {
             if index > 0 {
                 history.get(index - 1)
@@ -219,12 +281,13 @@ fn read_system_status() -> serde_json::Value {
     }
 
     for email in &configured_emails {
-        let snapshot_opt = latest_today_snapshots
-            .get(email)
-            .or_else(|| latest_snapshots.get(email).filter(|snapshot| {
+        let snapshot_opt = latest_today_snapshots.get(email).or_else(|| {
+            latest_snapshots.get(email).filter(|snapshot| {
                 snapshot.get("date").and_then(|v| v.as_str()) == Some(today_key.as_str())
-            }));
-        let previous_snapshot = previous_snapshot_for_email(snapshot_history.get(email), &today_key);
+            })
+        });
+        let previous_snapshot =
+            previous_snapshot_for_email(snapshot_history.get(email), &today_key);
         let yesterday_summary = build_yesterday_summary(previous_snapshot);
 
         let mut pc_current = snapshot_opt
@@ -313,16 +376,21 @@ fn read_system_status() -> serde_json::Value {
             100
         };
         let is_running = |value: &str| value == "Running";
-        let normalize_bing_track = |searches: i64, search_target: i64, current: i64, _target: i64| {
-            if searches > 0 || current > 0 {
-                (
-                    searches.max(current),
-                    if search_target > 0 { search_target } else { fallback_bing_streak_search_target },
-                )
-            } else {
-                (0, fallback_bing_streak_search_target)
-            }
-        };
+        let normalize_bing_track =
+            |searches: i64, search_target: i64, current: i64, _target: i64| {
+                if searches > 0 || current > 0 {
+                    (
+                        searches.max(current),
+                        if search_target > 0 {
+                            search_target
+                        } else {
+                            fallback_bing_streak_search_target
+                        },
+                    )
+                } else {
+                    (0, fallback_bing_streak_search_target)
+                }
+            };
         let mut bing_streak_reward = snapshot_opt
             .and_then(|s| s.get("bing_search_reward"))
             .and_then(|v| v.as_i64())
@@ -389,7 +457,9 @@ fn read_system_status() -> serde_json::Value {
                             }
                         }
                         if let Some(search_status) = v.get("search_status") {
-                            if let Some(v) = search_status.get("pc_current").and_then(|x| x.as_i64()) {
+                            if let Some(v) =
+                                search_status.get("pc_current").and_then(|x| x.as_i64())
+                            {
                                 pc_current = pc_current.max(v);
                             }
                             if let Some(v) = search_status.get("pc_max").and_then(|x| x.as_i64()) {
@@ -397,23 +467,32 @@ fn read_system_status() -> serde_json::Value {
                                     pc_max = pc_max.max(v);
                                 }
                             }
-                            if let Some(v) = search_status.get("mobile_current").and_then(|x| x.as_i64()) {
+                            if let Some(v) =
+                                search_status.get("mobile_current").and_then(|x| x.as_i64())
+                            {
                                 mobile_current = mobile_current.max(v);
                             }
-                            if let Some(v) = search_status.get("mobile_max").and_then(|x| x.as_i64()) {
+                            if let Some(v) =
+                                search_status.get("mobile_max").and_then(|x| x.as_i64())
+                            {
                                 if v > 0 {
                                     mobile_max = mobile_max.max(v);
                                 }
                             }
-                            if let Some(v) = search_status.get("edge_current").and_then(|x| x.as_i64()) {
+                            if let Some(v) =
+                                search_status.get("edge_current").and_then(|x| x.as_i64())
+                            {
                                 edge_current = edge_current.max(v);
                             }
-                            if let Some(v) = search_status.get("edge_max").and_then(|x| x.as_i64()) {
+                            if let Some(v) = search_status.get("edge_max").and_then(|x| x.as_i64())
+                            {
                                 if v > 0 {
                                     edge_max = edge_max.max(v);
                                 }
                             }
-                            if let Some(v) = search_status.get("total_points").and_then(|x| x.as_i64()) {
+                            if let Some(v) =
+                                search_status.get("total_points").and_then(|x| x.as_i64())
+                            {
                                 if v > 0 {
                                     points = points.max(v);
                                 }
@@ -422,19 +501,34 @@ fn read_system_status() -> serde_json::Value {
                         if let Some(task_overview) = v.get("task_overview") {
                             if let Some(streaks) = task_overview.get("streaks") {
                                 if let Some(bing_search) = streaks.get("bing_search") {
-                                    if let Some(v) = bing_search.get("current").and_then(|x| x.as_i64()) {
+                                    if let Some(v) =
+                                        bing_search.get("current").and_then(|x| x.as_i64())
+                                    {
                                         bing_streak_current = bing_streak_current.max(v);
                                     }
-                                    if let Some(v) = bing_search.get("target").and_then(|x| x.as_i64()) {
-                                        if v > 0 { bing_streak_target = bing_streak_target.max(v); }
+                                    if let Some(v) =
+                                        bing_search.get("target").and_then(|x| x.as_i64())
+                                    {
+                                        if v > 0 {
+                                            bing_streak_target = bing_streak_target.max(v);
+                                        }
                                     }
-                                    if let Some(v) = bing_search.get("searches").and_then(|x| x.as_i64()) {
+                                    if let Some(v) =
+                                        bing_search.get("searches").and_then(|x| x.as_i64())
+                                    {
                                         bing_streak_searches = bing_streak_searches.max(v);
                                     }
-                                    if let Some(v) = bing_search.get("search_target").and_then(|x| x.as_i64()) {
-                                        if v > 0 { bing_streak_search_target = bing_streak_search_target.max(v); }
+                                    if let Some(v) =
+                                        bing_search.get("search_target").and_then(|x| x.as_i64())
+                                    {
+                                        if v > 0 {
+                                            bing_streak_search_target =
+                                                bing_streak_search_target.max(v);
+                                        }
                                     }
-                                    if let Some(v) = bing_search.get("reward").and_then(|x| x.as_i64()) {
+                                    if let Some(v) =
+                                        bing_search.get("reward").and_then(|x| x.as_i64())
+                                    {
                                         bing_streak_reward = bing_streak_reward.max(v);
                                     }
                                 }
@@ -505,7 +599,6 @@ fn read_system_status() -> serde_json::Value {
             }
         }
 
-
         if status != "Running" {
             bing_streak_searches = snapshot_opt
                 .and_then(|s| s.get("bing_search_searches"))
@@ -543,8 +636,16 @@ fn read_system_status() -> serde_json::Value {
             msg = mo;
         }
 
-        let edge_track_current = if edge_minutes > 0 { edge_minutes } else { edge_current };
-        let edge_track_max = if edge_target > 0 { edge_target } else { edge_max };
+        let edge_track_current = if edge_minutes > 0 {
+            edge_minutes
+        } else {
+            edge_current
+        };
+        let edge_track_max = if edge_target > 0 {
+            edge_target
+        } else {
+            edge_max
+        };
         let tracks = json!({
             "pc_search": {
                 "current": pc_current,
@@ -602,7 +703,6 @@ fn read_system_status() -> serde_json::Value {
         }));
     }
 
-
     serde_json::json!({
         "status": "online",
         "jobs": jobs,
@@ -613,8 +713,13 @@ fn read_system_status() -> serde_json::Value {
 }
 
 #[tauri::command]
-fn start_job(app_handle: tauri::AppHandle, email: String, task: Option<String>) -> Result<String, String> {
-    let workspace_root = get_workspace_root();
+fn start_job(
+    app_handle: tauri::AppHandle,
+    email: String,
+    task: Option<String>,
+) -> Result<String, String> {
+    let working_dir = command_working_dir();
+    std::fs::create_dir_all(&working_dir).map_err(|e| e.to_string())?;
 
     // Clean up old state so the worker starts fresh
     let job_dir = worker_jobs_dir().join(&email);
@@ -623,40 +728,18 @@ fn start_job(app_handle: tauri::AppHandle, email: String, task: Option<String>) 
 
     let task_val = task.unwrap_or_else(|| "all".to_string());
 
-    let mut cmd = if cfg!(debug_assertions) {
-        let mut c = std::process::Command::new("python");
-        c.args(&[
-            "-m",
-            "src.worker_api",
-            "start-job",
-            "--job-id",
-            &email,
-            "--target-email",
-            &email,
-            "--task",
-            &task_val,
-        ]);
-        c
-    } else {
-        use tauri::Manager;
-        let exe_path = app_handle
-            .path()
-            .resolve("bin/worker_api.exe", tauri::path::BaseDirectory::Resource)
-            .map_err(|e| e.to_string())?;
-        let mut c = std::process::Command::new(exe_path);
-        c.args(&[
-            "start-job",
-            "--job-id",
-            &email,
-            "--target-email",
-            &email,
-            "--task",
-            &task_val,
-        ]);
-        c
-    };
+    let mut cmd = worker_api_command(&app_handle)?;
+    cmd.args(&[
+        "start-job",
+        "--job-id",
+        &email,
+        "--target-email",
+        &email,
+        "--task",
+        &task_val,
+    ]);
 
-    cmd.current_dir(&workspace_root)
+    cmd.current_dir(&working_dir)
         .env("REWARDS_BOT_PASSWORD", "tauri-managed");
     apply_runtime_env(&mut cmd);
 
@@ -684,11 +767,12 @@ fn start_job(app_handle: tauri::AppHandle, email: String, task: Option<String>) 
 }
 
 #[tauri::command]
-fn stop_job(email: String) -> Result<String, String> {
-    let workspace_root = get_workspace_root();
-    let mut cmd = std::process::Command::new("python");
-    cmd.args(&["-m", "src.worker_api", "cancel-job", "--job-id", &email])
-        .current_dir(&workspace_root);
+fn stop_job(app_handle: tauri::AppHandle, email: String) -> Result<String, String> {
+    let working_dir = command_working_dir();
+    std::fs::create_dir_all(&working_dir).map_err(|e| e.to_string())?;
+    let mut cmd = worker_api_command(&app_handle)?;
+    cmd.args(&["cancel-job", "--job-id", &email])
+        .current_dir(&working_dir);
     apply_runtime_env(&mut cmd);
 
     #[cfg(target_os = "windows")]
@@ -808,21 +892,11 @@ fn update_account(email: String, data: serde_json::Value) -> Result<String, Stri
 
 #[tauri::command]
 fn scan_gpm_profiles(app_handle: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    let workspace_root = get_workspace_root();
+    let working_dir = command_working_dir();
+    std::fs::create_dir_all(&working_dir).map_err(|e| e.to_string())?;
 
-    let mut cmd = if cfg!(debug_assertions) {
-        let mut c = std::process::Command::new("python");
-        c.args(&["-m", "src.browser_scanner"]);
-        c
-    } else {
-        use tauri::Manager;
-        let exe_path = app_handle
-            .path()
-            .resolve("bin/browser_scanner.exe", tauri::path::BaseDirectory::Resource)
-            .map_err(|e| e.to_string())?;
-        std::process::Command::new(exe_path)
-    };
-    cmd.current_dir(&workspace_root);
+    let mut cmd = browser_scanner_command(&app_handle)?;
+    cmd.current_dir(&working_dir);
     apply_runtime_env(&mut cmd);
 
     #[cfg(target_os = "windows")]
@@ -981,7 +1055,11 @@ pub fn run() {
                 for res in rx {
                     match res {
                         Ok(event) => {
-                            if matches!(event.kind, EventKind::Modify(_)) && event.paths.iter().any(|p| p.starts_with(&worker_jobs_root) || p == &snapshot_path) {
+                            if matches!(event.kind, EventKind::Modify(_))
+                                && event.paths.iter().any(|p| {
+                                    p.starts_with(&worker_jobs_root) || p == &snapshot_path
+                                })
+                            {
                                 let _ = handle.emit("system_status_update", read_system_status());
                             }
                         }

@@ -127,10 +127,7 @@ mod tests {
             .and_then(|value| value.as_array())
             .expect("commands array");
 
-        let values: Vec<&str> = commands
-            .iter()
-            .filter_map(|entry| entry.as_str())
-            .collect();
+        let values: Vec<&str> = commands.iter().filter_map(|entry| entry.as_str()).collect();
 
         assert_eq!(
             values,

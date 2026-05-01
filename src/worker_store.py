@@ -50,6 +50,22 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _read_json_file(path: Path, default: Any | None = None, *, allow_invalid: bool = False) -> Any:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+        if not text.strip() and default is not None:
+            return default
+        return json.loads(text)
+    except json.JSONDecodeError:
+        if allow_invalid and default is not None:
+            return default
+        raise
+
+
+def _write_json_file(path: Path, payload: Any) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def jobs_root(path: str | None = None) -> Path:
     root = Path(path) if path else DEFAULT_JOBS_ROOT
     root.mkdir(parents=True, exist_ok=True)
@@ -147,6 +163,17 @@ def _try_lock_handle(lock_path: Path):
         raise
 
 
+def _runtime_lock_owner_has_identity(owner: dict[str, Any]) -> bool:
+    return bool(owner.get("pid") or owner.get("job_id") or owner.get("account_email"))
+
+
+def _unknown_runtime_lock_is_stale(lock_path: Path, *, min_age_seconds: float = 30.0) -> bool:
+    try:
+        return (time.time() - lock_path.stat().st_mtime) >= min_age_seconds
+    except OSError:
+        return False
+
+
 def acquire_runtime_lock(runtime_key: str, *, job_id: str, account_email: str, root: str | None = None) -> dict[str, Any]:
     lock_path = runtime_lock_path(runtime_key, root)
     owner_payload = {
@@ -177,6 +204,15 @@ def acquire_runtime_lock(runtime_key: str, *, job_id: str, account_email: str, r
                 with suppress(Exception):
                     lock_path.unlink()
                 continue
+            if (
+                attempt == 0
+                and not _runtime_lock_owner_has_identity(owner)
+                and _unknown_runtime_lock_is_stale(lock_path)
+            ):
+                with suppress(Exception):
+                    lock_path.unlink()
+                if not lock_path.exists():
+                    continue
             holder = owner.get("job_id") or owner.get("account_email") or "unknown"
             raise RuntimeError(f"runtime lock busy for {runtime_key} ({holder})")
 
@@ -257,13 +293,13 @@ def reserve_native_edge_port(account_email: str, *, base_port: int, job_id: str,
             try:
                 reservations = {}
                 if reservation_file.exists():
-                    reservations = json.loads(reservation_file.read_text(encoding="utf-8") or "{}")
+                    reservations = _read_json_file(reservation_file, {}, allow_invalid=True)
                 reservations[str(port)] = {
                     "account_email": account_text,
                     "job_id": job_id,
                     "updated_at": _utcnow(),
                 }
-                reservation_file.write_text(json.dumps(reservations, ensure_ascii=False, indent=2), encoding="utf-8")
+                _write_json_file(reservation_file, reservations)
             except Exception:
                 release_runtime_lock(lock_info)
                 raise
@@ -281,9 +317,9 @@ def release_native_edge_port(reservation: dict[str, Any] | None, root: str | Non
     reservation_file = runtime_state_root(root) / "native_edge_ports.json"
     if port is not None and reservation_file.exists():
         try:
-            reservations = json.loads(reservation_file.read_text(encoding="utf-8") or "{}")
+            reservations = _read_json_file(reservation_file, {}, allow_invalid=True)
             reservations.pop(str(port), None)
-            reservation_file.write_text(json.dumps(reservations, ensure_ascii=False, indent=2), encoding="utf-8")
+            _write_json_file(reservation_file, reservations)
         except Exception:
             pass
     release_runtime_lock(lock_info)
@@ -294,7 +330,7 @@ def active_native_edge_port_for_account(account_email: str, root: str | None = N
     if not reservation_file.exists():
         return None
     try:
-        reservations = json.loads(reservation_file.read_text(encoding="utf-8") or "{}")
+        reservations = _read_json_file(reservation_file, {}, allow_invalid=True)
     except Exception:
         return None
     for port_text, payload in reservations.items():
@@ -1460,6 +1496,13 @@ def write_job_spec(job: JobSpec, root: str | None = None) -> dict[str, Path]:
     return paths
 
 
+
+
+def _append_event(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
 def read_state(job_id: str, root: str | None = None) -> dict[str, Any]:
     paths = job_paths(job_id, root)
     if not paths["state"].exists():
@@ -1470,7 +1513,28 @@ def read_state(job_id: str, root: str | None = None) -> dict[str, Any]:
             "status": "unknown",
             "updated_at": _utcnow(),
         }
-    return json.loads(paths["state"].read_text(encoding="utf-8"))
+
+    state = _read_json_file(paths["state"])
+    if state.get("status") == "running":
+        pid = int(state.get("pid", 0) or 0)
+        if pid and not _pid_alive(pid):
+            state = dict(state)
+            state.update({
+                "status": "failed",
+                "error": "worker process exited before writing final state",
+                "completed_at": _utcnow(),
+                "updated_at": _utcnow(),
+            })
+            paths["state"].write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            _append_event(paths["events"], {
+                "protocol_version": "0.1",
+                "job_id": job_id,
+                "event_type": "job_failed",
+                "timestamp": _utcnow(),
+                "error": state["error"],
+                "pid": pid,
+            })
+    return state
 
 
 def read_events(job_id: str, root: str | None = None) -> list[dict[str, Any]]:

@@ -368,6 +368,18 @@ class BrowserManager:
             sock.settimeout(0.5)
             return sock.connect_ex((host, port)) == 0
 
+    def _should_kill_stale_edge_before_launch(self) -> bool:
+        if self.settings.get("headless", True):
+            return False
+        if not self.settings.get("kill_stale_edge_before_launch", False):
+            return False
+        try:
+            if int(self.settings.get("max_threads", 1) or 1) > 1:
+                return False
+        except Exception:
+            return False
+        return True
+
     async def start_clean_edge(self) -> None:
         """Start Edge with MINIMAL flags — allows telemetry for Edge Browsing Streak.
         
@@ -686,11 +698,10 @@ class BrowserManager:
         # IMPORTANT: On Windows, if Edge processes are already running,
         # Playwright cannot launch a new controlled instance — the OS merges
         # it with the existing process tree and it dies immediately.
-        # We must kill stale Edge processes first.
-        if not self.settings.get("headless", True):
+        # Global Edge cleanup is opt-in because it closes every msedge.exe process.
+        if self._should_kill_stale_edge_before_launch():
             try:
                 import subprocess
-                # Only kill if not attached via CDP (preserve user's Edge if we're connecting to it)
                 result = subprocess.run(
                     ["taskkill", "/F", "/IM", "msedge.exe"],
                     capture_output=True, text=True, timeout=10,

@@ -324,6 +324,18 @@ class RewardsTrustTests(unittest.TestCase):
             )
         )
 
+    def test_hidden_daily_set_extractor_embeds_valid_js_regex_literals(self):
+        script = next(
+            value
+            for value in DailySetCompleter.extract_hidden_daily_set_urls.__code__.co_consts
+            if isinstance(value, str) and "const urlPattern" in value
+        )
+
+        self.assertIn(".replace(/\\s+/g, ' ')", script)
+        self.assertNotIn(".replace(/\\\\s+/g, ' ')", script)
+        self.assertIn(".replace(/\\\\\\//g, '/')", script)
+        self.assertNotIn(".replace(/\\\\//g, '/')", script)
+
 
     def test_deferred_offer_reason_detects_external_and_multi_day_promos(self):
         referral_task = RewardsTask(
@@ -2124,6 +2136,48 @@ class RewardsTrustAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["completed"], 1)
         searcher._search_via_box.assert_awaited_once()
         searcher._search_via_url.assert_not_awaited()
+
+    async def test_run_searches_recovers_closed_page_and_retries_current_query(self):
+        trends = SimpleNamespace(
+            fetch_trending=AsyncMock(),
+            get_batch_queries=lambda count: ["Quote of the day"] * count,
+        )
+        searcher = Searcher(Humanizer(), trends, {})
+        original_page = SimpleNamespace(label="closed")
+        recovered_page = SimpleNamespace(label="recovered")
+        recover_page = AsyncMock(return_value=recovered_page)
+        attempts = []
+
+        async def search_via_box(page, query, cur, total):
+            attempts.append((page, query, cur, total))
+            if len(attempts) == 1:
+                raise RuntimeError("Page.goto: Target page, context or browser has been closed")
+            return True
+
+        searcher._search_via_box = AsyncMock(side_effect=search_via_box)
+        searcher._search_via_url = AsyncMock(return_value=True)
+        searcher._session_break_interval = lambda: 99
+        searcher._search_delay_bounds = lambda: (0, 0)
+
+        with patch("src.searcher.asyncio.sleep", new=AsyncMock()), \
+             patch.object(searcher.humanizer, "random_delay", new=AsyncMock()), \
+             patch.object(searcher.humanizer, "simulate_tab_switch", new=AsyncMock()), \
+             patch("src.searcher.random.choices", return_value=["searchbox"]), \
+             patch("src.searcher.random.random", return_value=1.0), \
+             patch("src.searcher.close_other_tabs", new=AsyncMock()):
+            result = await searcher.run_searches(
+                original_page,
+                1,
+                "desktop",
+                recover_page_fn=recover_page,
+            )
+
+        self.assertEqual(result["completed"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertFalse(result["fatal_error"])
+        recover_page.assert_awaited_once()
+        self.assertIs(attempts[0][0], original_page)
+        self.assertIs(attempts[1][0], recovered_page)
 
     async def test_mobile_requirement_resolution_uses_mobile_probe(self):
         settings = {"mobile_searches": 60}

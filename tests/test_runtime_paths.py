@@ -1,7 +1,12 @@
+import contextlib
+import io
+import json
 import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class RuntimePathTests(unittest.TestCase):
@@ -54,7 +59,6 @@ class RuntimePathTests(unittest.TestCase):
             self.assertNotIn("@outlook", content.lower())
             self.assertNotIn("password", content.lower())
 
-
     def test_defaults_use_edge_chromium_without_gpm(self):
         from src.utils import get_default_settings
 
@@ -63,6 +67,43 @@ class RuntimePathTests(unittest.TestCase):
         self.assertEqual(settings["browser_type"], "chromium")
         self.assertTrue(settings["native_edge_runtime_enabled"])
 
+    def test_browser_scanner_honors_autobing_config_dir(self):
+        from src.browser_scanner import scan_profiles
+
+        requested_urls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"data": [{"user_id": "profile-1", "name": "Profile One"}]}).encode("utf-8")
+
+        def fake_urlopen(request, timeout=0):
+            requested_urls.append(request.full_url)
+            return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "settings.json"
+            settings_path.write_text(
+                json.dumps({"browser_type": "adspower", "browser_api_url": "http://127.0.0.1:5555/"}),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with patch.dict(os.environ, {"AUTOBING_CONFIG_DIR": tmp}, clear=False), patch(
+                "src.browser_scanner.urllib.request.urlopen",
+                side_effect=fake_urlopen,
+            ), contextlib.redirect_stdout(output):
+                with self.assertRaises(SystemExit) as cm:
+                    scan_profiles()
+
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(requested_urls, ["http://127.0.0.1:5555/api/v1/user/list"])
+        self.assertEqual(json.loads(output.getvalue()), [{"id": "profile-1", "name": "Profile One"}])
 
 
 if __name__ == "__main__":

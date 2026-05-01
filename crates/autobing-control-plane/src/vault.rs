@@ -34,7 +34,11 @@ pub fn key_to_filename(key: &str) -> Result<String, VaultError> {
     if trimmed.is_empty() {
         return Err(VaultError::InvalidKey);
     }
-    let encoded: String = trimmed.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let encoded: String = trimmed
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     Ok(format!("{encoded}.bin"))
 }
 
@@ -45,10 +49,10 @@ pub fn vault_path_for_key(key: &str) -> Result<PathBuf, VaultError> {
 #[cfg(windows)]
 fn protect_bytes(secret: &[u8]) -> Result<Vec<u8>, VaultError> {
     use std::ptr::{null, null_mut};
-    use windows_sys::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
-    };
     use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
+    };
 
     let input = CRYPT_INTEGER_BLOB {
         cbData: secret.len() as u32,
@@ -74,7 +78,8 @@ fn protect_bytes(secret: &[u8]) -> Result<Vec<u8>, VaultError> {
         return Err(VaultError::Dpapi);
     }
 
-    let bytes = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
+    let bytes =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
     unsafe {
         LocalFree(output.pbData.cast());
     }
@@ -84,10 +89,10 @@ fn protect_bytes(secret: &[u8]) -> Result<Vec<u8>, VaultError> {
 #[cfg(windows)]
 fn unprotect_bytes(secret: &[u8]) -> Result<Vec<u8>, VaultError> {
     use std::ptr::{null, null_mut};
-    use windows_sys::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
-    };
     use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
+    };
 
     let input = CRYPT_INTEGER_BLOB {
         cbData: secret.len() as u32,
@@ -113,7 +118,8 @@ fn unprotect_bytes(secret: &[u8]) -> Result<Vec<u8>, VaultError> {
         return Err(VaultError::Dpapi);
     }
 
-    let bytes = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
+    let bytes =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
     unsafe {
         LocalFree(output.pbData.cast());
     }
@@ -152,7 +158,10 @@ pub fn read_secret(key: &str) -> Result<String, VaultError> {
 
 pub fn materialize_secret_ref(key: &str, job_id: &str) -> Result<String, VaultError> {
     let secret = read_secret(key)?;
-    let secret_dir = workspace_root().join(".omx").join("worker-secrets").join(job_id);
+    let secret_dir = workspace_root()
+        .join(".omx")
+        .join("worker-secrets")
+        .join(job_id);
     fs::create_dir_all(&secret_dir)?;
     let secret_path = secret_dir.join("secret.txt");
     fs::write(&secret_path, secret)?;

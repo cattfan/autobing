@@ -2124,7 +2124,19 @@ async def _read_search_status_with_mobile_recheck(
     add_log("info", "📱 Mobile credits returned 0/0; rechecking before skip.")
     for attempt in range(retries):
         await asyncio.sleep(delay_seconds)
-        refreshed = await asyncio.wait_for(searcher.get_search_points_status(page), timeout=read_timeout)
+        try:
+            refreshed = await asyncio.wait_for(searcher.get_search_points_status(page), timeout=read_timeout)
+        except Exception as e:
+            logger.debug(f"Mobile credit recheck status read skipped: {e.__class__.__name__}: {e}")
+            _diag_log(
+                settings,
+                "Mobile credit recheck status read failed",
+                scope="search-status",
+                attempt=attempt + 1,
+                retries=retries,
+                error=f"{e.__class__.__name__}: {e}",
+            )
+            continue
         if _needs_mobile_credit_recheck(refreshed, settings):
             try:
                 task_status = await asyncio.wait_for(
@@ -2445,10 +2457,6 @@ def _reconcile_verification_with_session_proof(snapshot: dict, session_proofs: d
     reporting_overrides = snapshot.setdefault("reporting_overrides", {})
     if session_proofs.get("ignore_bing_app_checkin", False):
         reporting_overrides["ignore_bing_app_checkin"] = True
-    if session_proofs.get("ignore_edge_streak", False):
-        reporting_overrides["ignore_edge_streak"] = True
-    if session_proofs.get("ignore_daily_set_gap", False):
-        reporting_overrides["ignore_daily_set_gap"] = True
 
     task_overview = snapshot.setdefault("task_overview", {})
     streaks = task_overview.setdefault("streaks", {})
@@ -2459,10 +2467,15 @@ def _reconcile_verification_with_session_proof(snapshot: dict, session_proofs: d
     proof_edge_done = bool(session_proofs.get("edge_streak_verified_done", False))
     if proof_edge_exists:
         edge_overview["exists"] = True
-        edge_overview["minutes"] = max(int(edge_overview.get("minutes", 0) or 0), proof_edge_minutes)
-        if proof_edge_target > 0:
-            edge_overview["target"] = max(int(edge_overview.get("target", 0) or 0), proof_edge_target)
-        if proof_edge_done:
+        visible_minutes = int(edge_overview.get("minutes", 0) or 0)
+        visible_target = int(edge_overview.get("target", 0) or 0)
+        if visible_target <= 0 and proof_edge_target > 0:
+            edge_overview["target"] = proof_edge_target
+            visible_target = proof_edge_target
+        if visible_minutes > 0 or visible_target <= 0:
+            edge_overview["minutes"] = max(visible_minutes, proof_edge_minutes)
+            visible_minutes = int(edge_overview.get("minutes", 0) or 0)
+        if proof_edge_done and visible_target > 0 and visible_minutes >= visible_target:
             edge_overview["done"] = True
 
     daily_overview = task_overview.setdefault("daily_set", {})
@@ -2472,7 +2485,9 @@ def _reconcile_verification_with_session_proof(snapshot: dict, session_proofs: d
     proof_total = int(session_proofs.get("daily_set_progress_total", 0) or 0)
     if proof_total > daily_total:
         daily_total = proof_total
-    if proof_completed > daily_completed:
+    proof_has_titles = bool(session_proofs.get("daily_set_titles", []))
+    proof_progress_only = proof_completed > daily_completed and not session_proofs.get("daily_set_complete", False)
+    if proof_completed > daily_completed and (proof_has_titles or proof_progress_only or daily_completed <= 0 or daily_total <= 0):
         daily_completed = min(proof_completed, daily_total) if daily_total > 0 else proof_completed
     daily_overview["total"] = daily_total
     daily_overview["completed"] = daily_completed
@@ -2501,10 +2516,10 @@ def _reconcile_verification_with_session_proof(snapshot: dict, session_proofs: d
         ]
 
     if session_proofs.get("daily_set_complete", False):
-        if daily_total > 0:
+        if daily_total > 0 and daily_completed >= daily_total:
             daily_overview["completed"] = daily_total
             daily_category["completed"] = max(int(daily_category.get("completed", 0) or 0), daily_total)
-        snapshot.setdefault("pending_by_category", {})["daily_set"] = []
+            snapshot.setdefault("pending_by_category", {})["daily_set"] = []
     elif stale_title_set and daily_total > 0 and proof_completed <= 0:
         proven_count = len(stale_title_set)
         daily_overview["completed"] = min(daily_total, max(daily_completed, daily_completed + proven_count))
@@ -2593,6 +2608,35 @@ async def _run_mobile_search_pass(
 
 
 
+def _daily_set_recovery_candidates(snapshot: dict) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+
+    for task in snapshot.get("verification_tasks", []) or []:
+        if not isinstance(task, dict):
+            continue
+        if task.get("category") != "daily_set":
+            continue
+        if task.get("is_complete") or task.get("is_locked"):
+            continue
+        url = str(task.get("destination_url") or "").strip()
+        title = str(task.get("title") or task.get("id") or "Daily Set").strip()
+        key = url or title.lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        candidates.append({"title": title, "destination_url": url})
+
+    for title in (snapshot.get("pending_by_category", {}) or {}).get("daily_set", []) or []:
+        title = str(title or "").strip()
+        key = title.lower()
+        if title and key not in seen:
+            seen.add(key)
+            candidates.append({"title": title, "destination_url": ""})
+
+    return candidates
+
+
 async def _repair_daily_set_gap_from_final_verification(page, humanizer, settings, snapshot: dict, session_proofs: dict) -> bool:
     daily_set = (snapshot.get("task_overview") or {}).get("daily_set") or {}
     completed = _safe_int(daily_set.get("completed", 0))
@@ -2624,6 +2668,43 @@ async def _repair_daily_set_gap_from_final_verification(page, humanizer, setting
         category_proven = bool(isinstance(result, dict) and result.get("category_proven")) or bool(progress.get("category_proven")) or (
             repaired_total > 0 and repaired_completed >= repaired_total
         )
+
+        if not category_proven and repaired_total > 0 and repaired_completed < repaired_total:
+            direct_candidates = _daily_set_recovery_candidates(snapshot)
+            try:
+                hidden_candidates = await daily_set_completer.extract_hidden_daily_set_urls(page)
+            except AttributeError:
+                hidden_candidates = []
+            if hidden_candidates:
+                add_log("info", f"🎯 Found {len(hidden_candidates)} hidden Daily Set recovery URL(s)")
+                direct_candidates.extend(hidden_candidates)
+
+            seen_urls: set[str] = set()
+            for candidate in direct_candidates:
+                url = candidate.get("destination_url", "")
+                title = candidate.get("title", "Daily Set")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                add_log("info", f"🎯 Trying Daily Set direct URL recovery: {title[:60]}")
+                direct_result = await daily_set_completer.try_direct_daily_set_url(page, url, title)
+                direct_progress = await daily_set_completer._read_daily_set_progress(page)
+                repaired_completed = max(
+                    repaired_completed,
+                    _safe_int(direct_result.get("progress_completed", 0)),
+                    _safe_int(direct_progress.get("completed", 0)),
+                )
+                repaired_total = max(
+                    repaired_total,
+                    _safe_int(direct_result.get("progress_total", 0)),
+                    _safe_int(direct_progress.get("total", 0)),
+                )
+                category_proven = bool(direct_result.get("category_proven")) or bool(direct_progress.get("category_proven")) or (
+                    repaired_total > 0 and repaired_completed >= repaired_total
+                )
+                if category_proven:
+                    break
+
         session_proofs["daily_set_progress_completed"] = max(
             _safe_int(session_proofs.get("daily_set_progress_completed", 0)),
             repaired_completed,
@@ -2640,8 +2721,7 @@ async def _repair_daily_set_gap_from_final_verification(page, humanizer, setting
             and not result.get("page_closed")
             and _safe_int(result.get("total", 0)) <= 0
         ):
-            session_proofs["ignore_daily_set_gap"] = True
-            add_log("info", "ℹ️ Daily Set gap is visible in overview but no actionable activity is exposed; not blocking run completion")
+            add_log("warning", "⚠️ Daily Set gap is visible in overview but no actionable activity is exposed; marking account incomplete")
         return True
     except Exception as e:
         logger.debug(f"Final Daily Set repair failed: {e}")
@@ -2740,6 +2820,15 @@ async def _collect_final_verification(
             if reward_task.is_complete or _final_task_is_recently_verified(account_email, reward_task):
                 category_status["completed"] += 1
                 continue
+            snapshot.setdefault("verification_tasks", []).append({
+                "id": reward_task.id,
+                "title": reward_task.title,
+                "category": category,
+                "task_type": reward_task.task_type,
+                "is_complete": bool(reward_task.is_complete),
+                "is_locked": bool(reward_task.is_locked),
+                "destination_url": reward_task.destination_url,
+            })
             if reward_task.is_locked:
                 continue
             deferred_reason = get_deferred_offer_reason(reward_task)
@@ -2787,10 +2876,8 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
     scanned_daily_total = _safe_int(scanned_daily.get("total", 0))
     if (
         daily_total > 0
-        and not reporting_overrides.get("ignore_daily_set_gap", False)
         and daily_total <= 7
         and 0 <= daily_done < daily_total
-        and (actionable_daily_titles or scanned_daily_total > 0)
     ):
         remaining.append(f"Daily Set {daily_done}/{daily_total}")
 
@@ -2806,8 +2893,7 @@ def _describe_remaining_items(snapshot: dict) -> list[str]:
     edge_minutes = edge_streak.get("minutes", 0)
     edge_target = edge_streak.get("target", 30)
     if (
-        not reporting_overrides.get("ignore_edge_streak", False)
-        and edge_target > 0
+        edge_target > 0
         and not edge_streak.get("done", False)
         and edge_streak.get("exists", False)
     ):
@@ -3402,39 +3488,51 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None) -
                                     progress=minutes_done,
                                     progress_total=minutes_target,
                                 )
-                                native_streak = NativeEdgeStreak(account_email=email)
-
                                 def on_streak_progress(done, total):
-                                    credited_now = min(minutes_done + done, minutes_target)
+                                    credited_now = min(done, total)
                                     state["current_task"] = "Edge Browsing Streak"
                                     state["progress"] = credited_now
-                                    state["progress_total"] = minutes_target
+                                    state["progress_total"] = total
                                     _update_account_state(
                                         account_key,
                                         task="Edge Browsing Streak",
                                         progress=credited_now,
-                                        progress_total=minutes_target,
+                                        progress_total=total,
                                     )
 
-                                await native_streak.browse(
-                                    target_minutes=run_minutes,
+                                cdp_streak = EdgeBrowsingStreak(humanizer)
+                                cdp_streak_done = await cdp_streak.browse(
+                                    page3,
+                                    target_minutes=minutes_target,
                                     on_progress=on_streak_progress,
+                                    initial_minutes=minutes_done,
+                                    hard_cap_minutes=run_minutes,
                                 )
+                                if not cdp_streak_done:
+                                    add_log("warning", "⚠️ Edge Browsing Streak did not credit after CDP heartbeat pass; leaving it for final verification")
 
                                 try:
                                     refreshed_tasks = await task_detector.get_all_tasks(page3)
                                     edge_streak_info = refreshed_tasks.get("streaks", {}).get("edge", {})
                                     refreshed_minutes = edge_streak_info.get("minutes", minutes_done)
                                     refreshed_target = edge_streak_info.get("target", minutes_target)
+                                    refreshed_done = bool(edge_streak_info.get("done", False)) or refreshed_minutes >= refreshed_target
+                                    session_proofs["edge_streak_verified_exists"] = bool(edge_streak_info.get("exists", False))
+                                    session_proofs["edge_streak_verified_minutes"] = refreshed_minutes
+                                    session_proofs["edge_streak_verified_target"] = refreshed_target
+                                    session_proofs["edge_streak_verified_done"] = refreshed_done
                                     _update_account_state(
                                         account_key,
                                         task="Edge Browsing Streak",
                                         progress=refreshed_minutes,
                                         progress_total=refreshed_target,
                                     )
+                                    if refreshed_done:
+                                        add_log("info", f"✅ Edge Browsing Streak verified ({refreshed_minutes}/{refreshed_target})")
+                                    else:
+                                        add_log("warning", f"⚠️ Edge Browsing Streak still incomplete after run ({refreshed_minutes}/{refreshed_target})")
                                 except Exception as verify_error:
                                     add_log("warning", f"⚠️ Edge streak verify failed: {verify_error}")
-                                session_proofs["ignore_edge_streak"] = not bool(edge_streak_info.get("exists", False))
 
                             try:
                                 await asyncio.wait_for(
@@ -3660,19 +3758,29 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None) -
                                 if c % 5 == 0:
                                     add_log("info", f"Desktop {c}/{t}: {q[:30]}")
 
+                            async def recover_desktop_search_page():
+                                nonlocal ctx, page
+                                ctx, page = await _ensure_usable_desktop_search_page(
+                                    settings,
+                                    bm,
+                                    login_mgr,
+                                    account,
+                                    session_proxy,
+                                    storage_state_path,
+                                    desktop_runtime,
+                                    ctx,
+                                    page,
+                                )
+                                return page
+
                             searcher.on_progress = on_desktop
-                            ctx, page = await _ensure_usable_desktop_search_page(
-                                settings,
-                                bm,
-                                login_mgr,
-                                account,
-                                session_proxy,
-                                storage_state_path,
-                                desktop_runtime,
-                                ctx,
+                            await recover_desktop_search_page()
+                            desktop_stats = await searcher.run_searches(
                                 page,
+                                remaining_desktop,
+                                "desktop",
+                                recover_page_fn=recover_desktop_search_page,
                             )
-                            desktop_stats = await searcher.run_searches(page, remaining_desktop, "desktop")
                             if desktop_stats.get("fatal_error"):
                                 raise RuntimeError(desktop_stats["fatal_error"])
                             add_log("info", "✅ Desktop searches done")
@@ -4255,7 +4363,93 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None) -
                         })
 
                         if deficit:
-                            add_log("warning", f"⚠️ Search deficit: {', '.join(deficit)}")
+                            pc_current = _safe_int(final_status.get("pc_current", 0))
+                            pc_max = _safe_int(final_status.get("pc_max", 0))
+                            pc_deficit = max(0, pc_max - pc_current)
+                            if pc_deficit > 0:
+                                retry_searches = min(
+                                    _search_count_setting(settings, "desktop"),
+                                    max(1, (pc_deficit + 2) // 3),
+                                )
+                                add_log(
+                                    "warning",
+                                    f"⚠️ Search deficit: {', '.join(deficit)}; retrying {retry_searches} desktop search(es)",
+                                )
+                                try:
+                                    ctx, page = await _ensure_usable_desktop_search_page(
+                                        settings,
+                                        bm,
+                                        login_mgr,
+                                        account,
+                                        session_proxy,
+                                        storage_state_path,
+                                        desktop_runtime,
+                                        ctx,
+                                        page,
+                                    )
+                                    state["current_task"] = "Desktop Search Retry"
+                                    state["progress"] = 0
+                                    state["progress_total"] = retry_searches
+                                    _update_account_state(
+                                        account_key,
+                                        task="Desktop Search Retry",
+                                        progress=0,
+                                        progress_total=retry_searches,
+                                    )
+
+                                    def on_desktop_retry(c, t, q):
+                                        state["progress"] = c
+                                        _update_account_state(account_key, progress=c)
+                                        if c % 5 == 0 or c == t:
+                                            add_log("info", f"Desktop retry {c}/{t}: {q[:30]}")
+
+                                    async def recover_desktop_retry_page():
+                                        nonlocal ctx, page
+                                        ctx, page = await _ensure_usable_desktop_search_page(
+                                            settings,
+                                            bm,
+                                            login_mgr,
+                                            account,
+                                            session_proxy,
+                                            storage_state_path,
+                                            desktop_runtime,
+                                            ctx,
+                                            page,
+                                        )
+                                        return page
+
+                                    searcher.on_progress = on_desktop_retry
+                                    await recover_desktop_retry_page()
+                                    retry_stats = await searcher.run_searches(
+                                        page,
+                                        retry_searches,
+                                        "desktop",
+                                        recover_page_fn=recover_desktop_retry_page,
+                                    )
+                                    if retry_stats.get("fatal_error"):
+                                        raise RuntimeError(retry_stats["fatal_error"])
+                                    final_status, search_verification = await _collect_search_status_snapshot(
+                                        settings,
+                                        account,
+                                        session_proxy,
+                                        login_mgr,
+                                        searcher,
+                                        storage_state_path,
+                                        desktop_runtime=desktop_runtime,
+                                        mobile_runtime=mobile_runtime,
+                                    )
+                                    deficit = describe_search_remaining_items({
+                                        "search_status": final_status,
+                                        "search_verification": search_verification,
+                                    })
+                                except Exception as retry_err:
+                                    add_log("warning", f"⚠️ Desktop retry failed: {retry_err}")
+                                finally:
+                                    searcher.on_progress = None
+                            if deficit:
+                                add_log("warning", f"⚠️ Search deficit: {', '.join(deficit)}")
+                            else:
+                                add_log("info", "✅ All search credits verified after retry")
                         else:
                             add_log("info", "✅ All search credits verified")
                         current_points = _resolve_account_current_points(account_points, final_status)
@@ -4501,25 +4695,26 @@ async def _run_bot_async(task: str, password: str, target_emails: list = None) -
                 overall_complete = False
                 account_failed = True
                 account_verification_state = "error"
-                _update_account_state(account_key, status="error", task=f"Error: {str(e)[:40]}", verification_state="error")
+                error_message = str(e) or e.__class__.__name__
+                _update_account_state(account_key, status="error", task=f"Error: {error_message[:40]}", verification_state="error")
                 run_summary["accounts"][account_key] = {
                     "email": email,
                     "status": "error",
                     "verification_state": "error",
                     "remaining_items": list(account_remaining_items),
-                    "error": str(e),
+                    "error": error_message,
                 }
-                add_log("error", f"❌ {account_key}: {str(e)}")
-                logger.error(f"Account {email} error: {e}")
+                add_log("error", f"❌ {account_key}: {error_message}")
+                logger.error(f"Account {email} error: {error_message}")
                 _diag_log(
                     settings,
                     "Account run raised exception",
                     level="error",
                     scope="account",
                     account=mask_email(email),
-                    error=str(e),
+                    error=error_message,
                 )
-                notifier.send_error(email, str(e))
+                notifier.send_error(email, error_message)
             finally:
                 try:
                     _finalize_run_scoped_storage_state(

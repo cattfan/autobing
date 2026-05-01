@@ -4,6 +4,7 @@ Includes Quiz Auto-Answer (search Bing for answers) and Captcha solving.
 """
 
 import asyncio
+import json
 import random
 
 from playwright.async_api import Page
@@ -20,7 +21,8 @@ class DailySetCompleter:
     def __init__(self, humanizer: Humanizer, settings: dict = None, ai_agent=None):
         self.humanizer = humanizer
         self.ai_agent = ai_agent
-        self.captcha = CaptchaSolver(settings or {})
+        self.settings = settings or {}
+        self.captcha = CaptchaSolver(self.settings)
 
     @staticmethod
     def _normalize_title(value: str) -> str:
@@ -372,6 +374,227 @@ class DailySetCompleter:
                 return {"clicked": True, "debug_texts": debug_texts}
         return {"clicked": False, "debug_texts": debug_texts}
 
+
+    async def locate_daily_set_surface_activities(self, page: Page, *, excluded_titles: set[str] | None = None) -> list[dict]:
+        excluded = [self._normalize_title(title) for title in (excluded_titles or set()) if (title or "").strip()]
+        try:
+            located = await page.evaluate(
+                """
+                ({ excludedTitles }) => {
+                    const normalize = (value) => (value || '')
+                        .replace(/​/g, '')
+                        .replace(/ /g, ' ')
+                        .replace(/\\s+/g, ' ')
+                        .trim()
+                        .toLowerCase();
+                    const excluded = new Set((excludedTitles || []).map(normalize).filter(Boolean));
+                    const selectors = [
+                        '#daily-sets mee-card',
+                        '#daily-sets [data-bi-id]',
+                        '[data-bi-area*=DailySet]',
+                        '[data-bi-id*=DailySet]',
+                        '[data-bi-id*=dailyset]',
+                        'mee-rewards-daily-set-item-content',
+                        'mee-card'
+                    ].join(',');
+                    const pickTitle = (node) => {
+                        const lines = String(node.innerText || node.textContent || '')
+                            .split(/\n+/)
+                            .map(normalize)
+                            .filter(Boolean);
+                        for (const line of lines) {
+                            if (line.includes('daily set') || line.includes('activity:') || line === 'completed' || /^\\+?\\d+\\s*(point|points)?$/.test(line)) continue;
+                            return line;
+                        }
+                        return lines[0] || '';
+                    };
+                    const results = [];
+                    for (const node of document.querySelectorAll(selectors)) {
+                        const rect = node.getBoundingClientRect();
+                        if (rect.width < 20 || rect.height < 20) continue;
+                        const style = window.getComputedStyle(node);
+                        if (style.visibility === 'hidden' || style.display === 'none') continue;
+                        const text = normalize(node.innerText || node.textContent || '');
+                        if (!text) continue;
+                        if (!text.includes('daily') && !text.includes('quiz') && !text.includes('poll') && !text.includes('search') && !/\\+\\d+/.test(text)) continue;
+                        if (text.includes('completed') || text.includes('complete')) continue;
+                        const title = pickTitle(node);
+                        if (!title || excluded.has(title)) continue;
+                        const clickable = node.closest('a,button,[role="button"],[role="link"],[tabindex]') || node.querySelector('a,button,[role="button"],[role="link"],[tabindex]') || node;
+                        if (!clickable.id) clickable.id = `codex-daily-surface-any-${Math.random().toString(36).slice(2, 10)}`;
+                        clickable.setAttribute('data-codex-daily-surface-any', 'true');
+                        const href = clickable.href || clickable.getAttribute('href') || clickable.getAttribute('data-url') || '';
+                        let score = 0;
+                        if (/\\+\\d+/.test(text)) score += 80;
+                        if (text.includes('quiz') || text.includes('poll') || text.includes('search')) score += 40;
+                        score += Math.min(text.length, 160);
+                        results.push({ id: clickable.id, title, href, score });
+                    }
+                    results.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
+                    return results.slice(0, 5);
+                }
+                """,
+                {"excludedTitles": excluded},
+            )
+        except Exception:
+            return []
+        return located or []
+
+    async def click_next_daily_set_surface_activity(self, page: Page, *, excluded_titles: set[str] | None = None) -> dict | None:
+        for activity in await self.locate_daily_set_surface_activities(page, excluded_titles=excluded_titles):
+            try:
+                target = page.locator(f"#{activity.get('id', '')}").first
+                if await target.count() == 0 or not await target.is_visible(timeout=2000):
+                    continue
+                await target.scroll_into_view_if_needed(timeout=3000)
+                await target.click(timeout=5000)
+                logger.info(f"Clicked Daily Set surface activity: {activity.get('title', '')}")
+                return activity
+            except Exception:
+                continue
+        return None
+
+    async def extract_hidden_daily_set_urls(self, page: Page) -> list[dict]:
+        try:
+            found = await page.evaluate(
+                r"""
+                () => {
+                    const normalize = (value) => String(value || '')
+                        .replace(/​/g, '')
+                        .replace(/ /g, ' ')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    const results = [];
+                    const seen = new Set();
+                    const push = (url, title, source) => {
+                        url = normalize(url);
+                        title = normalize(title) || 'Hidden Daily Set';
+                        if (!url || seen.has(url)) return;
+                        const lower = (url + ' ' + title).toLowerCase();
+                        const dailyish = lower.includes('daily')
+                            || lower.includes('dset')
+                            || lower.includes('dsetqu')
+                            || lower.includes('rewardsquiz_dailyset')
+                            || lower.includes('wqoskey')
+                            || lower.includes('btepokey');
+                        const actionable = lower.includes('bing.com/search')
+                            || lower.includes('rewards.bing.com')
+                            || lower.includes('spotlight')
+                            || lower.includes('form=dset')
+                            || lower.includes('form=ml');
+                        if (!dailyish || !actionable) return;
+                        seen.add(url);
+                        results.push({ title, destination_url: url, source });
+                    };
+
+                    for (const node of document.querySelectorAll('a[href], [data-url], [data-destination-url], [data-bi-destinationurl]')) {
+                        const url = node.href
+                            || node.getAttribute('href')
+                            || node.getAttribute('data-url')
+                            || node.getAttribute('data-destination-url')
+                            || node.getAttribute('data-bi-destinationurl')
+                            || '';
+                        push(url, node.innerText || node.textContent || node.getAttribute('aria-label') || '', 'dom');
+                    }
+
+                    const blobs = [];
+                    for (const script of document.querySelectorAll('script')) {
+                        const text = script.textContent || '';
+                        if (text.includes('daily') || text.includes('Daily') || text.includes('dset') || text.includes('DSET')) {
+                            blobs.push(text);
+                        }
+                    }
+                    blobs.push(document.documentElement.innerHTML || '');
+
+                    const urlPattern = /https?:\/\/[^\s"'<>\\]+/g;
+                    for (const blob of blobs) {
+                        for (const match of blob.matchAll(urlPattern)) {
+                            let url = match[0]
+                                .replace(/\u0026/g, '&')
+                                .replace(/&amp;/g, '&')
+                                .replace(/\\\//g, '/')
+                                .replace(/[),.;]+$/g, '');
+                            const context = blob.slice(Math.max(0, match.index - 300), Math.min(blob.length, match.index + url.length + 300));
+                            push(url, context, 'script');
+                        }
+                    }
+
+                    try {
+                        for (const entry of performance.getEntriesByType('resource')) {
+                            push(entry.name, entry.name, 'performance');
+                        }
+                    } catch (_) {}
+
+                    return results.slice(0, 10);
+                }
+                """
+            )
+        except Exception as exc:
+            logger.debug(f"Hidden Daily Set URL extraction failed: {exc}")
+            return []
+        return found or []
+
+    async def log_daily_set_empty_modal_diagnostics(self, page: Page, *, progress: dict | None = None) -> None:
+        if not self.settings.get("diagnostic_logging", True):
+            return
+        try:
+            payload = await page.evaluate(
+                r"""
+                () => {
+                    const normalize = (value) => String(value || '')
+                        .replace(/​/g, ' ')
+                        .replace(/ /g, ' ')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    const roots = Array.from(document.querySelectorAll(
+                        "[role='dialog'],[aria-modal='true'],mee-modal,[class*='modal'],[class*='flyout'],[class*='popover']"
+                    ));
+                    const modalTexts = roots.map((root) => normalize(root.innerText || root.textContent || '')).filter(Boolean).slice(0, 5);
+                    const links = Array.from(document.querySelectorAll('a[href], [data-url], [data-destination-url], [data-bi-destinationurl]')).map((node) => ({
+                        text: normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || ''),
+                        href: normalize(node.href || node.getAttribute('href') || node.getAttribute('data-url') || node.getAttribute('data-destination-url') || node.getAttribute('data-bi-destinationurl') || ''),
+                    })).filter((item) => {
+                        const lower = (item.text + ' ' + item.href).toLowerCase();
+                        return lower.includes('daily') || lower.includes('dset') || lower.includes('quiz') || lower.includes('poll');
+                    }).slice(0, 20);
+                    return { url: location.href, modalTexts, links };
+                }
+                """
+            )
+        except Exception as exc:
+            logger.debug(f"Daily Set empty modal diagnostics failed: {exc}")
+            return
+        logger.info(
+            "[diag][daily-set] Empty Daily Set modal diagnostics | "
+            f"progress={json.dumps(progress or {}, ensure_ascii=False, sort_keys=True)} | "
+            f"payload={json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)[:4000]}"
+        )
+
+    async def try_direct_daily_set_url(self, page: Page, destination_url: str, title: str = "") -> dict:
+        result = {"attempted": False, "progress_completed": 0, "progress_total": 0, "category_proven": False}
+        destination_url = (destination_url or "").strip()
+        if not destination_url:
+            return result
+
+        try:
+            await page.goto(destination_url, wait_until="domcontentloaded", timeout=35000)
+            result["attempted"] = True
+            await asyncio.sleep(3)
+            await self.captcha.solve_if_present(page)
+            await self._handle_task(page)
+            await asyncio.sleep(2)
+            progress = await self._read_daily_set_progress(page)
+            result["progress_completed"] = int(progress.get("completed", 0) or 0)
+            result["progress_total"] = int(progress.get("total", 0) or 0)
+            result["category_proven"] = bool(progress.get("category_proven", False)) or (
+                result["progress_total"] > 0
+                and result["progress_completed"] >= result["progress_total"]
+            )
+            logger.info(f"Tried Daily Set direct URL recovery: {title or destination_url}")
+        except Exception as exc:
+            logger.debug(f"Daily Set direct URL recovery failed: {exc}")
+        return result
+
     async def _read_daily_set_progress(self, page: Page) -> dict:
         """Read the visible Daily Set progress summary from Rewards surfaces."""
         proof = {
@@ -664,6 +887,14 @@ class DailySetCompleter:
                 if not targets:
                     if not stats["attempted"]:
                         logger.warning("No incomplete Daily Set activities found in modal")
+                        await self.log_daily_set_empty_modal_diagnostics(
+                            page,
+                            progress={
+                                "completed": stats.get("progress_completed", 0),
+                                "total": stats.get("progress_total", 0),
+                                "retry": empty_modal_retries,
+                            },
+                        )
                         if empty_modal_retries < max_empty_modal_retries:
                             empty_modal_retries += 1
                             logger.info(
@@ -682,6 +913,27 @@ class DailySetCompleter:
                                     continue
                             if reopened:
                                 continue
+                    if stats["attempted"]:
+                        break
+                    surface_progress = await self._read_daily_set_progress(page)
+                    if (
+                        int(surface_progress.get("total", 0) or 0) > 0
+                        and int(surface_progress.get("completed", 0) or 0) < int(surface_progress.get("total", 0) or 0)
+                    ):
+                        clicked_surface = await self.click_next_daily_set_surface_activity(
+                            page,
+                            excluded_titles=attempted_titles,
+                        )
+                        if clicked_surface:
+                            title = (clicked_surface.get("title") or "").strip()
+                            attempted_titles.add(title)
+                            stats["attempted"] = True
+                            await asyncio.sleep(3)
+                            await self.captcha.solve_if_present(page)
+                            await self._handle_task(page)
+                            if title:
+                                stats["proof_titles"].append(title)
+                            continue
                     break
 
                 empty_modal_retries = 0

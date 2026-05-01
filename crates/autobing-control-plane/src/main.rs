@@ -1,8 +1,5 @@
 use autobing_control_plane::{
-    default_contract,
-    health_report,
-    run_python_control_plane_cli,
-    run_worker_cli,
+    default_contract, health_report, run_python_control_plane_cli, run_worker_cli,
     vault::{materialize_secret_ref, read_secret, store_secret},
     worker_capabilities,
 };

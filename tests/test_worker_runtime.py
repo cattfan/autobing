@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.worker_runtime import _resolve_password
+from src.worker_runtime import _merge_progress_into_running_state, _resolve_password
 
 
 class WorkerRuntimeTests(unittest.TestCase):
@@ -41,3 +41,17 @@ class WorkerRuntimeTests(unittest.TestCase):
 
         self.assertEqual(password, "")
         self.assertIn("REWARDS_BOT_PASSWORD", error or "")
+    def test_progress_merge_does_not_overwrite_terminal_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            state_file.write_text(
+                '{"status": "completed", "points": 10, "streak": 1}',
+                encoding="utf-8",
+            )
+
+            _merge_progress_into_running_state(
+                state_file,
+                {"target_emails": ["user@example.com"]},
+            )
+
+            self.assertIn('"status": "completed"', state_file.read_text(encoding="utf-8"))

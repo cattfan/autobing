@@ -355,6 +355,20 @@ class Searcher:
                                 recovered = True
                                 _consecutive_closed = 0
                                 logger.info(f"Recovered {mode} search page and will retry current query")
+                                if method == "url_direct":
+                                    success = await self._search_via_url(page, query, i + 1, count)
+                                else:
+                                    success = await self._search_via_box(page, query, i + 1, count)
+                                if success:
+                                    _consecutive_failures = 0
+                                    stats["completed"] += 1
+                                    stats["queries"].append(query)
+                                else:
+                                    stats["failed"] += 1
+                                    _consecutive_failures += 1
+                                await close_other_tabs(page)
+                                if self.on_progress:
+                                    self.on_progress(i + 1, count, query)
                                 continue
                         except Exception as recover_err:
                             logger.warning(f"{mode} search page recovery failed: {recover_err}")

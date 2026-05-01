@@ -8,6 +8,8 @@ import argparse
 import asyncio
 import json
 import os
+import traceback
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -169,60 +171,102 @@ async def _run_job(job_payload: dict, state_file: Path, events_file: Path) -> in
             accounts_failed=accounts_failed,
         )
         return 0
-    except Exception as exc:
-        message = str(exc)
-        write_state("failed", error=message, completed_at=_utcnow())
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        message = str(exc) or exc.__class__.__name__
+        write_state("failed", error=message, traceback=traceback.format_exc(), completed_at=_utcnow())
         emit("job_failed", error=message)
         return 1
 
+
+def _merge_progress_into_running_state(state_file: Path, job_payload: dict) -> None:
+    from src.dashboard import state as dashboard_state
+    import hashlib
+
+    if not state_file.exists():
+        return
+
+    loaded = json.loads(state_file.read_text(encoding="utf-8"))
+    if loaded.get("status") != "running":
+        return
+
+    changed = False
+    target_emails = [
+        email.strip()
+        for email in job_payload.get("target_emails", [])
+        if isinstance(email, str) and email.strip()
+    ]
+    for email in target_emails:
+        text_lower = str(email).strip().lower()
+        account_key = f"acct:{hashlib.md5(text_lower.encode('utf-8')).hexdigest()[:10]}"
+
+        legacy_key = email.replace("@", "_at_").replace(".", "_")
+        safe_email = email.replace("@", "_at_")
+        for key in [account_key, legacy_key, safe_email, email]:
+            if key in dashboard_state.get("accounts", {}):
+                acc_data = dashboard_state["accounts"][key]
+                pts = int(acc_data.get("points", 0) or 0)
+                st = int(acc_data.get("streak", 0) or 0)
+                if pts > int(loaded.get("points", 0) or 0):
+                    loaded["points"] = pts
+                    changed = True
+                if st > int(loaded.get("streak", 0) or 0):
+                    loaded["streak"] = st
+                    changed = True
+                break
+
+    if changed:
+        state_file.write_text(json.dumps(loaded, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 async def _run_job_with_polling(job_payload: dict, state_file: Path, events_file: Path) -> int:
     task_task = asyncio.create_task(_run_job(job_payload, state_file, events_file))
-    
-    # We will poll `src.dashboard.state` to inject real-time values into `state.json` continuously
+
     async def poller():
-        from src.dashboard import state as dashboard_state
-        import json
-        import hashlib
-        target_emails = [
-            email.strip()
-            for email in job_payload.get("target_emails", [])
-            if isinstance(email, str) and email.strip()
-        ]
         while not task_task.done():
-            if state_file.exists():
-                try:
-                    loaded = json.loads(state_file.read_text(encoding="utf-8"))
-                    changed = False
-                    for email in target_emails:
-                        # Compute the exact account key used by dashboard.py
-                        text_lower = str(email).strip().lower()
-                        account_key = f"acct:{hashlib.md5(text_lower.encode('utf-8')).hexdigest()[:10]}"
-                        
-                        legacy_key = email.replace("@", "_at_").replace(".", "_")
-                        safe_email = email.replace("@", "_at_")
-                        for k in [account_key, legacy_key, safe_email, email]:
-                            if k in dashboard_state.get("accounts", {}):
-                                acc_data = dashboard_state["accounts"][k]
-                                pts = int(acc_data.get("points", 0) or 0)
-                                st = int(acc_data.get("streak", 0) or 0)
-                                if pts > int(loaded.get("points", 0) or 0):
-                                    loaded["points"] = pts
-                                    changed = True
-                                if st > int(loaded.get("streak", 0) or 0):
-                                    loaded["streak"] = st
-                                    changed = True
-                                break # Stop searching keys if found
-                    
-                    if changed:
-                        state_file.write_text(json.dumps(loaded, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
+            with suppress(Exception):
+                _merge_progress_into_running_state(state_file, job_payload)
             await asyncio.sleep(2)
 
     polling_task = asyncio.create_task(poller())
-    result = await task_task
-    polling_task.cancel()
-    return result
+    try:
+        return await task_task
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        message = str(exc) or exc.__class__.__name__
+        payload = {
+            "protocol_version": "0.1",
+            "worker_kind": "python-sidecar",
+            "job_id": str(job_payload.get("job_id", "") or "job-local"),
+            "status": "failed",
+            "task": str(job_payload.get("task", "all") or "all"),
+            "target_emails": job_payload.get("target_emails", []),
+            "updated_at": _utcnow(),
+            "correlation_id": str(job_payload.get("correlation_id", "") or "") or None,
+            "error": message,
+            "traceback": traceback.format_exc(),
+            "completed_at": _utcnow(),
+        }
+        with suppress(Exception):
+            if state_file.exists():
+                current = json.loads(state_file.read_text(encoding="utf-8") or "{}")
+                payload.update({k: v for k, v in current.items() if k in {"points", "streak"}})
+        _write_json(state_file, payload)
+        _append_event(events_file, {
+            "protocol_version": "0.1",
+            "job_id": payload["job_id"],
+            "event_type": "job_failed",
+            "timestamp": _utcnow(),
+            "correlation_id": payload["correlation_id"],
+            "error": message,
+        })
+        return 1
+    finally:
+        polling_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await polling_task
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m src.worker_runtime")

@@ -64,7 +64,10 @@ pub fn build_worker_cli_args(subcommand: &str, trailing: &[String]) -> Vec<Strin
     args
 }
 
-pub fn run_worker_cli(subcommand: &str, trailing: &[String]) -> std::io::Result<std::process::Output> {
+pub fn run_worker_cli(
+    subcommand: &str,
+    trailing: &[String],
+) -> std::io::Result<std::process::Output> {
     let executable = python_worker_executable();
     let args = build_worker_cli_args(subcommand, trailing);
     Command::new(executable)
@@ -104,17 +107,17 @@ mod tests {
         let contract = default_contract();
         assert_eq!(contract.authority_model, "rust_control_plane_only");
         assert_eq!(contract.wake_up_mechanism, "windows_task_scheduler");
-        assert!(contract
-            .retained_sidecar_domains
-            .contains(&"native_edge_streak".to_string()));
+        assert!(
+            contract
+                .retained_sidecar_domains
+                .contains(&"native_edge_streak".to_string())
+        );
     }
 
     #[test]
     fn worker_cli_builder_uses_python_module_entrypoint() {
-        let args = build_worker_cli_args(
-            "query-job",
-            &["--job-id".to_string(), "job-1".to_string()],
-        );
+        let args =
+            build_worker_cli_args("query-job", &["--job-id".to_string(), "job-1".to_string()]);
         assert_eq!(
             args,
             vec![
