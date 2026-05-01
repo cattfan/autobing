@@ -45,8 +45,8 @@ jobs:
           Remove-Item dist -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item build -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path "autobing-app/src-tauri/bin"
-          python -m PyInstaller --noconfirm --onefile --log-level ERROR --name worker_api src/worker_api.py
-          python -m PyInstaller --noconfirm --onefile --log-level ERROR --name browser_scanner src/browser_scanner.py
+          python -m PyInstaller --noconfirm --clean --log-level WARN worker_api.spec
+          python -m PyInstaller --noconfirm --clean --log-level WARN browser_scanner.spec
           if (-Not (Test-Path "dist/worker_api.exe")) { throw "worker_api.exe not built" }
           if (-Not (Test-Path "dist/browser_scanner.exe")) { throw "browser_scanner.exe not built" }
           Copy-Item "dist/worker_api.exe" -Destination "autobing-app/src-tauri/bin/worker_api.exe" -Force
